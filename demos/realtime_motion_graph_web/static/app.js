@@ -34,8 +34,41 @@ const seedBtn = $("seed-btn");
 const seedValueEl = $("seed-value");
 const pauseBtn = $("pause-btn");
 const modeToggle = $("mode-toggle");
+const kioskToggle = $("kiosk-toggle");
 const graphCanvas = $("graph");
 const effectsCanvas = $("effects-canvas");
+const fixtureSelect = $("fixture-select");
+const keySelect = $("key-select");
+
+// Full keyscale set, generated the same way Python does in
+// acestep.constants.VALID_KEYSCALES (7 notes × 5 accidentals × 2 modes
+// = 70 entries, including ASCII / Unicode sharp & flat spellings the
+// model accepts verbatim).
+const KEYSCALE_NOTES = ["A", "B", "C", "D", "E", "F", "G"];
+const KEYSCALE_ACCIDENTALS = ["", "#", "b", "♯", "♭"];
+const KEYSCALE_MODES = ["major", "minor"];
+const VALID_KEYSCALES = (() => {
+  const out = [];
+  for (const note of KEYSCALE_NOTES) {
+    for (const acc of KEYSCALE_ACCIDENTALS) {
+      for (const mode of KEYSCALE_MODES) {
+        out.push(`${note}${acc} ${mode}`);
+      }
+    }
+  }
+  return out;
+})();
+
+function populateKeySelect(selected) {
+  keySelect.innerHTML = "";
+  for (const k of VALID_KEYSCALES) {
+    const opt = document.createElement("option");
+    opt.value = k;
+    opt.textContent = k;
+    if (k === selected) opt.selected = true;
+    keySelect.appendChild(opt);
+  }
+}
 
 // ── Config ──
 // All initial values come from config.json (next to this file). Edit + refresh
@@ -61,9 +94,11 @@ const userConfig = await fetch(`config.json?t=${Date.now()}`).then((r) => {
 // {no_backend: true} and the Play handler skips the WebSocket path.
 // Best-effort: if the endpoint isn't there (older server) we treat it as
 // backend-present and let WS try as usual.
+// Defaults match the older server (no kiosk, graph mode) so an old server
+// + new client still boots cleanly.
 const serverInfo = await fetch("/api/server-info")
-  .then((r) => (r.ok ? r.json() : { no_backend: false }))
-  .catch(() => ({ no_backend: false }));
+  .then((r) => (r.ok ? r.json() : { no_backend: false, kiosk: false, default_mode: "graph" }))
+  .catch(() => ({ no_backend: false, kiosk: false, default_mode: "graph" }));
 
 // LoRA catalog comes from /api/loras — a cheap filesystem scan of
 // MODELS_DIR/loras/ that runs on the static-file server, so we can
@@ -194,7 +229,7 @@ modeToggle?.addEventListener("click", () => {
   const i = DISPLAY_MODES.indexOf(currentMode);
   setMode(DISPLAY_MODES[(i + 1) % DISPLAY_MODES.length]);
 });
-setMode("graph");
+setMode(DISPLAY_MODES.includes(serverInfo.default_mode) ? serverInfo.default_mode : "graph");
 
 // ── State ──
 
@@ -237,6 +272,13 @@ function applyConfigToDom() {
   blendValueEl.textContent = blendValue.toFixed(2);
   seedValueEl.textContent = seedValue.toFixed(2);
 }
+
+// ── Kiosk runtime state ──
+// Set by setKiosk() (server CLI default + the operator toggle in the
+// Advanced drawer). Consulted by bumpIdleTimer() and showCursor() so they
+// no-op when kiosk is off. Declared here because both functions below
+// reference it.
+let kioskActive = false;
 
 // ── Idle reset ──
 // After `reset_seconds` of no user interaction (pointer, key, MIDI), revert
@@ -286,6 +328,7 @@ function resetToDefaults() {
 }
 
 function bumpIdleTimer() {
+  if (!kioskActive) return;
   const secs = userConfig.reset_seconds ?? 0;
   if (secs <= 0) return;
   clearTimeout(idleTimer);
@@ -312,6 +355,7 @@ let cursorIdleTimer = null;
 function showCursor() {
   document.body.classList.remove("cursor-idle");
   clearTimeout(cursorIdleTimer);
+  if (!kioskActive) return;
   cursorIdleTimer = setTimeout(() => {
     document.body.classList.add("cursor-idle");
   }, CURSOR_IDLE_MS);
@@ -321,6 +365,31 @@ function initCursorAutoHide() {
   document.addEventListener("mousemove", showCursor, { passive: true });
   showCursor();
 }
+
+// Toggle kiosk behaviors at runtime. The CLI flag (--kiosk) seeds the
+// initial state via /api/server-info; the button in the Advanced drawer
+// flips it from there. Turning off cancels in-flight timers and brings
+// the cursor back so the operator isn't left with a half-applied state.
+function setKiosk(on) {
+  kioskActive = !!on;
+  if (kioskToggle) {
+    kioskToggle.textContent = kioskActive ? "EXIT KIOSK" : "KIOSK";
+    kioskToggle.classList.toggle("active", kioskActive);
+    kioskToggle.setAttribute("aria-pressed", kioskActive ? "true" : "false");
+  }
+  if (kioskActive) {
+    // Arm both timers immediately so the operator sees the effect right
+    // after toggling on, without having to first wiggle the mouse.
+    bumpIdleTimer();
+    showCursor();
+  } else {
+    clearTimeout(idleTimer);
+    clearTimeout(cursorIdleTimer);
+    document.body.classList.remove("cursor-idle");
+  }
+}
+
+kioskToggle?.addEventListener("click", () => setKiosk(!kioskActive));
 
 // Global timer state -- persists across reconnects.
 let globalTimerStart = null;
@@ -1021,6 +1090,27 @@ function sendCurrentPrompt() {
   session?.remote?.sendPrompt(activePrompt, activeKey);
 }
 
+// Single funnel for activeKey edits. ``source`` is "auto" when the server
+// just told us its detected key (no need to re-send — the server already
+// encoded with that key); "user" when the operator picked from the
+// dropdown (re-send so the next generation reflects the override).
+function setActiveKey(key, source) {
+  if (!key) return;
+  activeKey = key;
+  if (keySelect && Array.from(keySelect.options).some((o) => o.value === key)) {
+    keySelect.value = key;
+  }
+  if (source === "user") sendCurrentPrompt();
+}
+
+function initKeySelect() {
+  populateKeySelect(activeKey);
+  keySelect.addEventListener("change", () => {
+    bumpIdleTimer();
+    setActiveKey(keySelect.value, "user");
+  });
+}
+
 function initPrompts() {
   promptAInput.addEventListener("keydown", (e) => e.stopPropagation());
   promptBInput.addEventListener("keydown", (e) => e.stopPropagation());
@@ -1176,17 +1266,30 @@ class Session {
   async start() {
     pauseBtn.innerHTML = "&#9646;&#9646;";
 
-    this.videoLayer.setVideos(this.videos);
-    this.videoLayer.play(this.videos[0], "none");
+    // Video is secondary: only attach the VideoLayer when at least one
+    // video file is present. With no video, the audio drives the demo on
+    // its own and the focal canvas falls back to its CSS-only state.
+    this.hasAnyVideo = this.videos.length > 0;
+    if (this.hasAnyVideo) {
+      this.videoLayer.setVideos(this.videos);
+      this.videoLayer.play(this.videos[0], "none");
 
-    // Mirror the playing video into the blurred ambient back layer so
-    // the side gutters fill with motion-matched ambience.
-    const ambient = document.getElementById("install-ambient");
-    if (ambient && this.videos[0]) {
-      ambient.src = `videos/${this.videos[0]}`;
-      ambient.muted = true;
-      ambient.loop = true;
-      ambient.play().catch(() => {});
+      // Mirror the playing video into the blurred ambient back layer so
+      // the side gutters fill with motion-matched ambience.
+      const ambient = document.getElementById("install-ambient");
+      if (ambient) {
+        ambient.src = `videos/${this.videos[0]}`;
+        ambient.muted = true;
+        ambient.loop = true;
+        ambient.play().catch(() => {});
+      }
+    } else {
+      // Hide video DOM so the focal area stays dark instead of showing
+      // a stuck black <video> tile. Effects canvas is also a no-op below.
+      const ambient = document.getElementById("install-ambient");
+      if (ambient) ambient.removeAttribute("src");
+      videoA.removeAttribute("src");
+      videoB.removeAttribute("src");
     }
 
     if (this.remote) {
@@ -1287,7 +1390,10 @@ class Session {
         ? sliderValues[loraStrengthKey(ids[1])] / LORA_SLIDER_MAX : 0;
       this.effects.setDaftPunk(slot0);
       this.effects.setDubstep(slot1);
-      this.effects.tick(this.videoLayer.activeVideo, t, kick);
+      // With no video attached, _uploadVideo() returns false and the
+      // shader clears to transparent — the focal area is empty but the
+      // HUD bars and graph still drive off the audio.
+      this.effects.tick(this.hasAnyVideo ? this.videoLayer.activeVideo : null, t, kick);
     }
     tickRibbons(this.ribbons, t, kick);
 
@@ -1432,6 +1538,7 @@ async function startSession(interleaved, channels, frames, videos) {
     showStatus("Connected. Starting audio...");
     initialBuffer = remote.initialBuffer;
     initialChannels = remote.channels;
+    if (remote.detectedKey) setActiveKey(remote.detectedKey, "auto");
     // Server is now the source of truth.  Reconcile our local catalog
     // with what the server actually loaded (handles cases where the
     // server registered ad-hoc paths or a row in our pre-Play list
@@ -1456,23 +1563,153 @@ async function startSession(interleaved, channels, frames, videos) {
 
 // ── Init ──
 
+// Test-fixture audio is the primary source. Videos are best-effort and
+// purely visual: if /api/videos returns at least one file we attach the
+// VideoLayer to the active session, otherwise the audio plays alone.
+let availableFixtures = [];
+let availableVideos = [];
+
+// Pick the file containing "new_order_confusion" if present; fall back to
+// the first fixture. The user requested new_order_confusion as the default
+// audio source.
+function pickDefaultFixture(fixtures) {
+  if (fixtures.length === 0) return null;
+  const m = fixtures.find((f) => f.toLowerCase().includes("new_order_confusion"));
+  return m || fixtures[0];
+}
+
+function populateFixtureSelect(fixtures, selected) {
+  fixtureSelect.innerHTML = "";
+  for (const name of fixtures) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    if (name === selected) opt.selected = true;
+    fixtureSelect.appendChild(opt);
+  }
+}
+
+async function loadFixtureAudio(name) {
+  const resp = await fetch(`/fixtures/${encodeURIComponent(name)}`);
+  if (!resp.ok) throw new Error(`Failed to fetch fixture: ${resp.status}`);
+  const arrayBuf = await resp.arrayBuffer();
+  return decodeAudioBuffer(arrayBuf);
+}
+
+async function startWithFixture(name) {
+  showStatus(`Decoding ${name}...`);
+  const { interleaved, channels, frames } = await loadFixtureAudio(name);
+  await startSession(interleaved, channels, frames, availableVideos);
+}
+
+// Populate the fixture selector on page load so the user can pick a
+// different track before clicking Play. The /api/videos result is also
+// cached here so Play and the fixture-switch handler don't refetch.
+async function preloadCatalog() {
+  try {
+    const [fixturesResp, videosResp] = await Promise.all([
+      fetch("/api/fixtures"),
+      fetch("/api/videos").catch(() => null),
+    ]);
+    if (fixturesResp.ok) availableFixtures = await fixturesResp.json();
+    if (videosResp && videosResp.ok) availableVideos = await videosResp.json();
+    if (availableFixtures.length > 0) {
+      populateFixtureSelect(availableFixtures, pickDefaultFixture(availableFixtures));
+    }
+  } catch (e) {
+    console.warn("Catalog preload failed:", e);
+  }
+}
+preloadCatalog();
+
 playBtn.addEventListener("click", async () => {
   startOverlay.classList.add("hidden");
 
-  showStatus("Loading video...");
+  showStatus("Loading fixtures...");
   try {
-    const resp = await fetch("/api/videos");
-    if (!resp.ok) throw new Error("Could not fetch video list");
-    const videos = await resp.json();
-    if (videos.length === 0) throw new Error("No videos found on server");
+    // If preload succeeded the selector is already populated; if not,
+    // refetch here so a transient startup race doesn't strand the user.
+    if (availableFixtures.length === 0) {
+      await preloadCatalog();
+    }
+    if (availableFixtures.length === 0) {
+      throw new Error(
+        "No audio fixtures found. Run `python tests/fixtures/download.py` to fetch them."
+      );
+    }
 
-    showStatus("Decoding audio from video...");
-    const videoResp = await fetch(`videos/${videos[0]}`);
-    if (!videoResp.ok) throw new Error(`Failed to fetch video: ${videoResp.status}`);
-    const arrayBuf = await videoResp.arrayBuffer();
-    const { interleaved, channels, frames } = await decodeAudioBuffer(arrayBuf);
+    const selected = fixtureSelect.value || pickDefaultFixture(availableFixtures);
+    if (!fixtureSelect.value) {
+      populateFixtureSelect(availableFixtures, selected);
+    }
 
-    await startSession(interleaved, channels, frames, videos);
+    await startWithFixture(selected);
+  } catch (e) {
+    showStatus(`Error: ${e.message}`);
+  }
+});
+
+// Switching fixtures: if there's a live session with a backend, swap the
+// source in-place (server keeps the model loaded; the audio worklet
+// crossfades the new buffer in over 50 ms — no cold restart, no audio
+// gap). If there's no live session, or no backend, fall back to a full
+// startSession.
+async function swapToFixture(name) {
+  showStatus(`Decoding ${name}...`);
+  const { interleaved, channels, frames } = await loadFixtureAudio(name);
+
+  const remote = session?.remote;
+  if (!remote || serverInfo.no_backend) {
+    await startSession(interleaved, channels, frames, availableVideos);
+    return;
+  }
+
+  // Race-safe: hook the swap_ready listener BEFORE sending so we never
+  // miss a fast server reply. Server eventually emits exactly one of
+  // swap_ready / swap_failed per request.
+  showStatus(`Swapping to ${name}...`);
+  const swapped = await new Promise((resolve) => {
+    const onReady = (e) => {
+      remote.removeEventListener("swap_ready", onReady);
+      remote.removeEventListener("swap_failed", onFail);
+      session.audio.swap(e.detail.interleaved, e.detail.channels);
+      // Server already encoded with this key; just align the UI/state so
+      // future prompt re-sends carry the right key. "auto" prevents a
+      // redundant prompt re-send (server is already on the new key).
+      if (e.detail.key) setActiveKey(e.detail.key, "auto");
+      resolve(true);
+    };
+    const onFail = (e) => {
+      remote.removeEventListener("swap_ready", onReady);
+      remote.removeEventListener("swap_failed", onFail);
+      console.warn("Server swap_failed:", e.detail);
+      resolve(false);
+    };
+    remote.addEventListener("swap_ready", onReady);
+    remote.addEventListener("swap_failed", onFail);
+    const ok = remote.sendSwapSource(interleaved, channels, activePrompt, activeKey);
+    if (!ok) {
+      remote.removeEventListener("swap_ready", onReady);
+      remote.removeEventListener("swap_failed", onFail);
+      resolve(false);
+    }
+  });
+
+  if (!swapped) {
+    // Server-side swap failed; fall back to a full session restart so
+    // the user still ends up on the requested fixture.
+    await startSession(interleaved, channels, frames, availableVideos);
+    return;
+  }
+  hideStatus();
+}
+
+fixtureSelect.addEventListener("change", async () => {
+  const name = fixtureSelect.value;
+  if (!name) return;
+  bumpIdleTimer();
+  try {
+    await swapToFixture(name);
   } catch (e) {
     showStatus(`Error: ${e.message}`);
   }
@@ -1526,10 +1763,11 @@ function resolveCcParam(name) {
 // Note actions are looked up by name (the value in midiMap.notes) so
 // localStorage can serialize the binding without holding function refs.
 const NOTE_ACTIONS = {
-  seed:        () => randomizeSeed(),
-  send_prompt: () => sendCurrentPrompt(),
-  mode_toggle: () => modeToggle?.click(),
-  pause:       () => pauseBtn?.click(),
+  seed:         () => randomizeSeed(),
+  send_prompt:  () => sendCurrentPrompt(),
+  mode_toggle:  () => modeToggle?.click(),
+  pause:        () => pauseBtn?.click(),
+  kiosk_toggle: () => kioskToggle?.click(),
 };
 
 const MIDI_STORAGE_KEY = "demon_midi_map_v1";
@@ -1840,8 +2078,15 @@ try {
 } catch (e) { console.error("applyLoraCatalog(initial) failed:", e); }
 try { initEdgeBars(); } catch (e) { console.error("initEdgeBars failed:", e); }
 try { initPrompts(); } catch (e) { console.error("initPrompts failed:", e); }
+try { initKeySelect(); } catch (e) { console.error("initKeySelect failed:", e); }
 try { initKeyboard(); } catch (e) { console.error("initKeyboard failed:", e); }
+// Installation features (cursor auto-hide, idle settings reset) are gated
+// by the runtime `kioskActive` flag — see setKiosk() below. The init
+// functions only attach listeners; the bump/showCursor functions early-out
+// when kiosk is off, so a developer running locally isn't fighting an
+// auto-hiding cursor or having their tweaks reverted while they think.
 try { initIdleReset(); } catch (e) { console.error("initIdleReset failed:", e); }
 try { initCursorAutoHide(); } catch (e) { console.error("initCursorAutoHide failed:", e); }
+setKiosk(serverInfo.kiosk === true);
 try { initMidiLearnUI(); } catch (e) { console.error("initMidiLearnUI failed:", e); }
 initMidi();

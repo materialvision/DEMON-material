@@ -34,10 +34,22 @@ from websockets.sync.server import serve as ws_serve
 
 STATIC_DIR = Path(__file__).parent / "static"
 VIDEOS_DIR = STATIC_DIR / "videos"
+# tests/fixtures lives at the repo root, two levels above this module
+# (demos/realtime_motion_graph_web/ -> repo root -> tests/fixtures).
+FIXTURES_DIR = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
+_AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
 
 # Set in main() based on --no-backend; read by _process_request when the
 # client polls /api/server-info on startup.
 _NO_BACKEND = False
+# Set in main() based on --accel; read by the WS handler wrapper.
+_ACCEL = "tensorrt"
+# Set in main() based on --kiosk / --mode; surfaced to the client via
+# /api/server-info so installation-only behaviors (cursor auto-hide,
+# idle settings reset) and the initial display mode can be CLI-driven.
+_KIOSK = False
+_DEFAULT_MODE = "graph"
+_VALID_MODES = ("graph", "video")
 
 # Keep the wire compact and don't cache anything so the product team
 # always sees the latest JS after a redeploy.
@@ -120,7 +132,11 @@ def _process_request(connection, request):
     # In --no-backend mode the client takes the video-only path: it plays
     # the source audio directly and skips the WebSocket connection entirely.
     if url.split("?", 1)[0] == "/api/server-info":
-        body = json.dumps({"no_backend": _NO_BACKEND}).encode()
+        body = json.dumps({
+            "no_backend": _NO_BACKEND,
+            "kiosk": _KIOSK,
+            "default_mode": _DEFAULT_MODE,
+        }).encode()
         _log_http(remote, 200, "GET", url)
         return Response(
             200, "OK",
@@ -186,6 +202,62 @@ def _process_request(connection, request):
             body,
         )
 
+    # API: list audio fixtures from tests/fixtures/
+    if url.split("?", 1)[0] == "/api/fixtures":
+        fixtures = []
+        if FIXTURES_DIR.is_dir():
+            fixtures = sorted(
+                f.name for f in FIXTURES_DIR.iterdir()
+                if f.is_file() and f.suffix.lower() in _AUDIO_EXTS
+            )
+        body = json.dumps(fixtures).encode()
+        _log_http(remote, 200, "GET", url)
+        return Response(
+            200, "OK",
+            Headers([
+                ("Content-Type", "application/json; charset=utf-8"),
+                ("Content-Length", str(len(body))),
+                *_NO_CACHE_HEADERS,
+            ]),
+            body,
+        )
+
+    # Serve files from tests/fixtures/ under /fixtures/<name>.
+    fixture_match = url.split("?", 1)[0].split("#", 1)[0]
+    if fixture_match.startswith("/fixtures/"):
+        rel = fixture_match[len("/fixtures/"):]
+        if rel and "/" not in rel and "\\" not in rel and not rel.startswith("."):
+            candidate = (FIXTURES_DIR / rel).resolve()
+            try:
+                candidate.relative_to(FIXTURES_DIR.resolve())
+            except ValueError:
+                candidate = None  # path escape attempt
+            if candidate and candidate.is_file() and candidate.suffix.lower() in _AUDIO_EXTS:
+                try:
+                    body = candidate.read_bytes()
+                except OSError as e:
+                    msg = f"500 {e}\n".encode()
+                    _log_http(remote, 500, "GET", url)
+                    return Response(
+                        500, "Internal Server Error",
+                        Headers([
+                            ("Content-Type", "text/plain; charset=utf-8"),
+                            ("Content-Length", str(len(msg))),
+                            *_NO_CACHE_HEADERS,
+                        ]),
+                        msg,
+                    )
+                _log_http(remote, 200, "GET", url)
+                return Response(
+                    200, "OK",
+                    Headers([
+                        ("Content-Type", _content_type_for(candidate)),
+                        ("Content-Length", str(len(body))),
+                        *_NO_CACHE_HEADERS,
+                    ]),
+                    body,
+                )
+
     target = _resolve_static(url)
     if target is None:
         body = b"404 not found\n"
@@ -238,6 +310,7 @@ def _stub_handle_client(ws):
 def main():
     host = "0.0.0.0"
     port = 8765  # single port: serves both HTTP and WebSocket
+    accel = "tensorrt"  # decoder + vae backend; overridden by --accel
 
     args = sys.argv[1:]
     no_backend = "--no-backend" in args or "--ui-only" in args
@@ -254,12 +327,33 @@ def main():
     if "--ws-port" in args and "--http-port" not in args:
         idx = args.index("--ws-port")
         port = int(args[idx + 1])
+    if "--accel" in args:
+        idx = args.index("--accel")
+        accel = args[idx + 1]
+    _VALID_ACCEL = ("tensorrt", "compile", "eager")
+    if accel not in _VALID_ACCEL:
+        raise SystemExit(
+            f"[Server] --accel must be one of {_VALID_ACCEL}, got {accel!r}"
+        )
+
+    kiosk = "--kiosk" in args
+    default_mode = "graph"
+    if "--mode" in args:
+        idx = args.index("--mode")
+        default_mode = args[idx + 1]
+    if default_mode not in _VALID_MODES:
+        raise SystemExit(
+            f"[Server] --mode must be one of {_VALID_MODES}, got {default_mode!r}"
+        )
 
     if not STATIC_DIR.exists():
         raise SystemExit(f"[Server] static dir missing: {STATIC_DIR}")
 
-    global _NO_BACKEND
+    global _NO_BACKEND, _ACCEL, _KIOSK, _DEFAULT_MODE
     _NO_BACKEND = no_backend
+    _ACCEL = accel
+    _KIOSK = kiosk
+    _DEFAULT_MODE = default_mode
 
     if no_backend:
         ws_handler = _stub_handle_client
@@ -269,7 +363,9 @@ def main():
         # loads torch + acestep + TRT machinery; in --no-backend we never
         # touch any of it.
         from demos.realtime_motion_graph.server import handle_client
-        ws_handler = handle_client
+
+        def ws_handler(ws):
+            handle_client(ws, decoder_backend=accel, vae_backend=accel)
 
     print(f"[Server] Starting single-port HTTP+WS on :{port}")
     srv = ws_serve(
@@ -283,13 +379,18 @@ def main():
     ws_thread.start()
 
     browsable_host = "localhost" if host in ("0.0.0.0", "::", "") else host
-    mode = "UI-ONLY (no backend)" if no_backend else "WEB APP, single port"
+    extras = [f"mode={default_mode}"]
+    if kiosk:
+        extras.append("kiosk")
+    extra_str = " " + " ".join(f"[{e}]" for e in extras)
+    mode = "UI-ONLY (no backend)" if no_backend else f"WEB APP, single port, accel={accel}{extra_str}"
     print()
     print("=" * 60)
     print(f"  Real-Time Motion-to-Music  ({mode})")
     print("=" * 60)
     print(f"  Open:      http://{browsable_host}:{port}/")
     print(f"  WebSocket: ws://{browsable_host}:{port}/")
+    print(f"  Fixtures:  {FIXTURES_DIR}")
     print("  Ctrl+C to stop")
     print("=" * 60)
     print()
