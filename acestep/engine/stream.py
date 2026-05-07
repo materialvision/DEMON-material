@@ -80,7 +80,11 @@ class SlotRequest:
     velocity_scale: Optional[torch.Tensor] = None     # [1, T, 1] per-frame velocity scaling
     ode_noise_curve: Optional[torch.Tensor] = None    # [1, T, 1] per-step noise injection
     x0_target: Optional[torch.Tensor] = None         # [1, T, D] target latent for blending
-    x0_target_strength: float = 0.0                   # scalar blend toward x0_target (legacy)
+    # Blend strength toward x0_target. Scalar (uniform across the timeline)
+    # or per-frame curve; both flow through normalize_curve at the read
+    # site so the engine sees a uniform [B, T, 1] tensor. Hot-mutable via
+    # set_shared_curve("x0_target_strength", value).
+    x0_target_strength: "float | torch.Tensor" = 0.0
     # --- New in Phase 1: absorb one-shot generate() features ---
     x0_target_curve: Optional[torch.Tensor] = None   # per-frame blend curve [T], [1,T], or [1,T,1]
     x0_target_gate: float = 0.0                       # gate-start fraction (matches DiffusionConfig default)
@@ -97,6 +101,11 @@ class SlotRequest:
     # Empty list disables CFG.
     neg_conditions: List[SlotCondition] = field(default_factory=list)
     guidance_curve: Optional[torch.Tensor] = None  # [T], [1,T], or [1,T,1]
+    # APG momentum coefficient. Scalar (Python number) or per-frame curve;
+    # both flow through normalize_curve at the apg_forward boundary so the
+    # MomentumBuffer update sees a uniform tensor. Hot-mutable via
+    # set_shared_curve("apg_momentum", value) on the pipeline.
+    apg_momentum: "float | torch.Tensor" = -0.75
 
     def all_conditions(self) -> List[SlotCondition]:
         """Return primary + extra conditions as a single ordered list."""
@@ -186,19 +195,23 @@ class StreamPipeline:
         self._trt_bufs: Optional[dict] = None
         self._trt_out_buf: Optional[torch.Tensor] = None
 
-        # Shared mutable curves: when set, these override per-slot curves
-        # for ALL in-flight slots on the very next tick. This bypasses the
-        # ring-buffer drain, giving 1-tick latency for curve updates.
-        # Set to None to revert to per-slot behavior.
-        self._shared_sde_curve: Optional[torch.Tensor] = None
-        self._shared_velocity_scale: Optional[torch.Tensor] = None
-        self._shared_ode_noise_curve: Optional[torch.Tensor] = None
+        # Shared mutable curves: when a name is present, the corresponding
+        # per-slot field on every in-flight SlotRequest is overridden for
+        # that slot's next tick. Bypasses the ring-buffer drain, giving
+        # 1-tick latency. Invariant: every value is a normalized
+        # ``[1, T, 1]`` tensor (scalar-or-per-frame multiplier broadcast
+        # against ``[B, T, *]`` operands). Floats auto-lift to ``[1, 1, 1]``
+        # at the setter so callers can pass scalars without thinking
+        # about shape.
+        self._shared_curves: dict[str, torch.Tensor] = {}
 
-        # Channel guidance: [1, 1, 64] gain tensor applied to xt before
-        # each forward pass (input scaling). Built from ChannelGuidanceEntry
-        # configs. None = no-op. Updated via set_channel_guidance(). The
-        # tensor is kept pre-converted to the pipeline's device/dtype so
-        # the hot path can read it without per-tick ``.to()`` conversions.
+        # Channel guidance: a ``[1, T, 64]`` per-channel gain applied to
+        # ``xt`` before each forward pass. Lives in its own field rather
+        # than ``_shared_curves`` because its shape (per-channel) breaks
+        # the dict's per-frame invariant. Updated via
+        # :meth:`set_channel_guidance` / :meth:`set_channel_gain_tensor`,
+        # pre-cast to the pipeline's device/dtype so the hot-path
+        # ``.to(...)`` is a no-op.
         self._channel_gain: Optional[torch.Tensor] = None
 
         # Sentinel tensors for the "always-on multiply" idiom in the step
@@ -464,42 +477,21 @@ class StreamPipeline:
         """
         ones_3d, zeros_3d = self._ensure_sentinels()
 
-        eff_vs = (
-            self._shared_velocity_scale
-            if self._shared_velocity_scale is not None
-            else slot.request.velocity_scale
-        )
-        eff_sdc = (
-            self._shared_sde_curve
-            if self._shared_sde_curve is not None
-            else slot.request.sde_denoise_curve
-        )
-        eff_onc = (
-            self._shared_ode_noise_curve
-            if self._shared_ode_noise_curve is not None
-            else slot.request.ode_noise_curve
-        )
+        eff_vs = self._eff_shared(slot, "velocity_scale")
+        eff_sdc = self._eff_shared(slot, "sde_denoise_curve")
+        eff_onc = self._eff_shared(slot, "ode_noise_curve")
 
         vs = (
-            ode_steps.normalize_curve(eff_vs).to(
-                device=vt.device, dtype=vt.dtype,
-            )
-            if eff_vs is not None
-            else ones_3d
+            eff_vs.to(device=vt.device, dtype=vt.dtype)
+            if eff_vs is not None else ones_3d
         )
         sdc = (
-            ode_steps.normalize_curve(eff_sdc).to(
-                device=slot.xt.device, dtype=slot.xt.dtype,
-            )
-            if eff_sdc is not None
-            else None
+            eff_sdc.to(device=slot.xt.device, dtype=slot.xt.dtype)
+            if eff_sdc is not None else None
         )
         onc = (
-            ode_steps.normalize_curve(eff_onc).to(
-                device=slot.xt.device, dtype=slot.xt.dtype,
-            )
-            if eff_onc is not None
-            else zeros_3d
+            eff_onc.to(device=slot.xt.device, dtype=slot.xt.dtype)
+            if eff_onc is not None else zeros_3d
         )
         return vs, sdc, onc
 
@@ -828,8 +820,8 @@ class StreamPipeline:
                     slot.step_idx, total_steps,
                 )
             xt_mask_list.append(xt)
-            # _channel_gain is pre-converted to device/dtype by the setters,
-            # so no per-tick ``.to(...)`` cast is needed in the hot path.
+            # ``_channel_gain`` is pre-converted to device/dtype by the
+            # setters, so no per-tick ``.to(...)`` cast is needed.
             if self._channel_gain is not None:
                 xt_decoder_list.append(xt * self._channel_gain)
             else:
@@ -916,10 +908,12 @@ class StreamPipeline:
                 gc = ode_steps.normalize_curve(slot.request.guidance_curve).to(
                     device=vt_pos.device, dtype=vt_pos.dtype,
                 )
+                mom = self._eff_shared(slot, "apg_momentum")
                 vt_per_slot[si] = ode_steps.apg_forward(
                     vt_pos, vt_neg,
                     guidance_scale=gc,
                     momentum_buffer=slot.momentum_buffer,
+                    momentum=mom if mom is not None else -0.75,
                 )
             else:
                 vt_per_slot[si] = vt_pos
@@ -947,12 +941,21 @@ class StreamPipeline:
             # re-noise, matching upstream's stock SDE behavior).
             use_sde = sde_curve_active or self.config.infer_method == "sde"
 
-            # Legacy scalar ``x0_target_strength`` path (no curve, gated
-            # to the refinement half). Preserved for realtime-motion
-            # demos and the scope_plugin workflows.
+            # ``x0_target_strength`` path: blend toward a target latent
+            # at scalar (or per-frame curve) strength, gated to the
+            # refinement half.  Preserving the historical "strength==0
+            # falls through to the fast path" behavior — checks the
+            # effective (shared override or slot field) strength via a
+            # tensor.any() sync, which costs one host-device fence per
+            # slot per step but lets the gate stay tensor-safe.
+            eff_strength = self._eff_shared(slot, "x0_target_strength")
+            strength_active = (
+                eff_strength is not None
+                and bool(eff_strength.abs().any().item())
+            )
             scalar_x0_target = (
                 req.x0_target is not None
-                and req.x0_target_strength > 0.0
+                and strength_active
                 and req.x0_target_curve is None
                 and slot.step_idx >= total_steps // 2
                 and t_curr > 0
@@ -1022,7 +1025,7 @@ class StreamPipeline:
                         x0_pred, req.x0_target, curve * blend_gate,
                     )
             elif scalar_x0_target:
-                alpha = req.x0_target_strength
+                alpha = eff_strength.to(device=x0_pred.device, dtype=x0_pred.dtype)
                 x0_pred = (1.0 - alpha) * x0_pred + alpha * req.x0_target
 
             if t_next <= 0:
@@ -1109,38 +1112,62 @@ class StreamPipeline:
     # Shared mutable curves (bypass ring-buffer drain)
     # ------------------------------------------------------------------
 
-    def set_shared_sde_curve(self, curve: Optional[torch.Tensor]) -> None:
-        """Set a shared SDE denoise curve that overrides per-slot curves.
+    def set_shared_curve(
+        self,
+        name: str,
+        value: "float | int | torch.Tensor | None",
+    ) -> None:
+        """Set (or clear) a shared per-step override.
 
-        When set, ALL in-flight slots use this curve on the very next
-        tick, giving 1-tick latency regardless of pipeline depth.
-        Set to None to revert to per-slot behavior.
+        ``name`` is the SlotRequest field name to override (e.g.
+        ``"sde_denoise_curve"``, ``"velocity_scale"``,
+        ``"ode_noise_curve"``).  When set, ALL in-flight slots use this
+        value on the very next tick, regardless of pipeline depth.
+
+        ``value`` can be a scalar or a per-frame tensor; both flow
+        through :func:`ode_steps.normalize_curve` so the storage form is
+        always ``[B, T, 1]`` and downstream consumers do not need to
+        type-discriminate. Pass ``None`` to revert that name to per-slot
+        behavior.
         """
-        self._shared_sde_curve = curve
+        if value is None:
+            self._shared_curves.pop(name, None)
+            return
+        self._shared_curves[name] = ode_steps.normalize_curve(value)
 
-    def set_shared_velocity_scale(self, curve: Optional[torch.Tensor]) -> None:
-        """Set a shared velocity scale curve for all in-flight slots."""
-        self._shared_velocity_scale = curve
+    def _eff_shared(self, slot: "_Slot", name: str):
+        """Return shared override for ``name`` if set, else slot's field.
 
-    def set_shared_ode_noise_curve(self, curve: Optional[torch.Tensor]) -> None:
-        """Set a shared ODE noise injection curve for all in-flight slots."""
-        self._shared_ode_noise_curve = curve
+        Output is always either ``None`` or a normalized ``[B, T, 1]``
+        tensor — the shared override is canonicalized at the setter, and
+        any ``SlotRequest`` field is normalized here so callers never
+        need to ``isinstance``-check.
+        """
+        v = self._shared_curves.get(name)
+        if v is None:
+            v = getattr(slot.request, name, None)
+            if v is None:
+                return None
+        return ode_steps.normalize_curve(v)
 
     def set_dcw(
         self,
         *,
         enabled: bool,
         mode: Optional[str] = None,
-        scaler: Optional[float] = None,
-        high_scaler: Optional[float] = None,
+        scaler: "Optional[float | torch.Tensor]" = None,
+        high_scaler: "Optional[float | torch.Tensor]" = None,
         wavelet: Optional[str] = None,
     ) -> None:
         """Replace the DCW corrector. Takes effect on the next tick.
 
-        Hot-updatable for all in-flight slots — toggling DCW does not
+        Hot-updatable for all in-flight slots, toggling DCW does not
         rebuild the pipeline or invalidate the compiled step graphs
         (DCW runs outside the compiled region as a per-slot post-step
-        transform).
+        transform). ``scaler`` and ``high_scaler`` may each be a Python
+        scalar or a per-frame curve in latent layout (``[T]`` /
+        ``[1, T]`` / ``[1, T, 1]``); curves are resampled to the
+        wavelet band's downsampled length inside the DCW kernel.
         """
         cur = self._dcw_corrector
         self._dcw_corrector = DCWCorrector(
@@ -1174,9 +1201,9 @@ class StreamPipeline:
     def set_channel_guidance(self, configs) -> None:
         """Set channel guidance configs for input scaling during denoising.
 
-        Builds a [1, 1, 64] gain tensor from the configs and caches it.
-        Takes effect on the very next tick for ALL in-flight slots.
-        Pass an empty list or None to disable.
+        Builds a gain tensor from the configs and caches it on
+        ``self._channel_gain``.  Takes effect on the very next tick for
+        ALL in-flight slots.  Pass an empty list or None to disable.
 
         Args:
             configs: List of ChannelGuidanceEntry, or None to clear.
