@@ -1,5 +1,5 @@
 // Parameter-history graph display. Maintains a rolling buffer per signal
-// and renders glowing polylines + a playhead. Direct port of static/graph.js.
+// and renders glowing polylines + a playhead.
 //
 // Phase 4 perf note: ctx.filter:blur is software-rendered in many browsers;
 // reduce blur intensity slightly vs. the original (4px → 3px baseline) to

@@ -1,8 +1,6 @@
 // Main-thread wrapper around the realtime-buffer AudioWorklet.
 // Falls back to ScriptProcessorNode when AudioWorklet is unavailable
 // (non-secure contexts like plain HTTP to a remote IP).
-//
-// Direct TS port of DEMON/demos/realtime_motion_graph_web/static/audio.js.
 
 import { SAMPLE_RATE } from "@/engine/protocol";
 

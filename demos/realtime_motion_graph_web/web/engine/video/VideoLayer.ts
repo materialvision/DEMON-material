@@ -1,6 +1,6 @@
 // Video layer: crossfade player with beat-grid sync and marker detection.
-// Direct port of static/video.js. Phase 5 perf: pause inactive <video> once
-// the crossfade window finishes, halving video decoder cost between swaps.
+// Pauses the inactive <video> once the crossfade window finishes, halving
+// video decoder cost between swaps.
 
 import { podHttp } from "@/engine/podUrl";
 

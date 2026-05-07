@@ -1,5 +1,4 @@
 // WebSocket client for the DEMON realtime motion-to-music backend.
-// Direct TS port of DEMON/demos/realtime_motion_graph_web/static/protocol.js.
 //
 // Phases:
 //   1. config   client sends JSON config + binary (uint32 channels, uint32

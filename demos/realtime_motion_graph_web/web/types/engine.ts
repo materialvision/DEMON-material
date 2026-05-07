@@ -1,5 +1,4 @@
-// Slider definitions and engine-side knobs. Mirrors the SLIDER_META and
-// CONFIG.controls shape from DEMON's static/app.js.
+// Slider definitions and engine-side knobs.
 
 export interface SliderMeta {
   /** Maximum value (slider top). */

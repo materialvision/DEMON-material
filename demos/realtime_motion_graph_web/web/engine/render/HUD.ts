@@ -1,5 +1,5 @@
 // Scrolling waveform HUD. Playhead fixed at horizontal center; waveform
-// scrolls past it. Direct port of static/hud.js, no behavior changes.
+// scrolls past it.
 
 export class HUD {
   readonly canvas: HTMLCanvasElement;

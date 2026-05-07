@@ -141,8 +141,7 @@ def main() -> int:
     )
     banner = _color("\x1b[1;32m")
     print(
-        f"\n{banner}>>> Open http://localhost:{args.web_port}/ "
-        f"(NOT :{args.port} — that's the legacy static UI){_RESET}\n",
+        f"\n{banner}>>> Open http://localhost:{args.web_port}/{_RESET}\n",
         flush=True,
     )
 

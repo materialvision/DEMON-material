@@ -2,9 +2,7 @@ import type { NextConfig } from "next";
 
 // During development, Next runs on :6660 and the Python engine on :1318.
 // The UI's engine-URL builder fetches /api/* and /fixtures/* (etc.) at
-// the same origin; rewrites bridge those to the engine. Same trick the
-// vanilla static demo gets for free since it's served by the engine
-// directly.
+// the same origin; rewrites bridge those to the engine.
 //
 // In production, you'd typically `next build && next start` and run the
 // engine on a different port (or front Next behind nginx that does the

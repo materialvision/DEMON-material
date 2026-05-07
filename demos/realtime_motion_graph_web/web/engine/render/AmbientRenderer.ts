@@ -2,9 +2,8 @@
 // ---------------------------------------------------------------------------
 // AmbientRenderer.ts -- WebGL2 GPU fluid simulation for ambient light effects.
 //
-// Direct port of static/ambient.js. The implementation is shader-heavy and
-// already verified against the existing visual; @ts-nocheck above keeps the
-// TS compiler off our back rather than annotating ~1100 lines of GL state.
+// The implementation is shader-heavy; @ts-nocheck above keeps the TS compiler
+// off our back rather than annotating ~1100 lines of GL state.
 //
 // Phase 7 perf tweaks vs. the original:
 //   SIM_RESOLUTION      128 -> 96    (fluid grid; ~40% cheaper)

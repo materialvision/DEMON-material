@@ -1,7 +1,6 @@
 // Audio-reactive video shader pipeline (WebGL2, 5-pass).
-// Direct port of static/effects.js. Phase 6 perf: blur radius 18 → 12 (looks
-// nearly identical, ~1.5x cheaper); render targets resize only on actual
-// viewport change (already in place).
+// Phase 6 perf: blur radius 18 → 12 (looks nearly identical, ~1.5x cheaper);
+// render targets resize only on actual viewport change (already in place).
 //
 // Pipeline:
 //   1. parallax  video -> sceneRT       (saturation-masked horizontal shift + warp)

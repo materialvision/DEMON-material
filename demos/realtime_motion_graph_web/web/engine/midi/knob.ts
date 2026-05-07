@@ -1,7 +1,6 @@
 // Per-CC knob mode auto-detect (absolute vs relative 2's complement). Some
 // MIDI controllers (MPK Mini in increment/decrement mode, many endless
-// encoders) send relative deltas instead of absolute positions. Direct port
-// of the decodeKnob() helper in static/app.js.
+// encoders) send relative deltas instead of absolute positions.
 
 interface KnobState {
   history: number[];
