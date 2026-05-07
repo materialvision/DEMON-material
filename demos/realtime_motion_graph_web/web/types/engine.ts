@@ -68,6 +68,16 @@ export const LORA_DEFAULT_STRENGTH_FRACTION = 0.7;
  * the hint floating below the ribbon's visible end. */
 export const LORA_SIDE_VISIBLE_FLOOR = 0.25;
 
+/** Visibility floor for the top (Remix Strength) ribbon. Same role
+ * as LORA_SIDE_VISIBLE_FLOOR but for the horizontal bar. Without it,
+ * dragging denoise to 0 collapses the ribbon to nothing and the user
+ * has no visual cue that the slider still exists along the top edge.
+ * The drag overlay stays mounted at full width either way — the floor
+ * only affects rendering, not the stored value (engine still receives
+ * 0). Smaller than the side-bar floor because the top bar spans most
+ * of the viewport: 4% is still ~50-80px of grabbable ribbon. */
+export const REMIX_VISIBLE_FLOOR = 0.04;
+
 export type DisplayMode = "graph" | "video";
 
 /** Full keyscale set the model accepts (mirrors VALID_KEYSCALES in app.js). */
