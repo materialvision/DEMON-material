@@ -1,10 +1,17 @@
 // Parameter-history graph display. Maintains a rolling buffer per signal
 // and renders glowing polylines + a playhead.
 //
-// Phase 4 perf note: ctx.filter:blur is software-rendered in many browsers;
-// reduce blur intensity slightly vs. the original (4px → 3px baseline) to
-// keep frame budget healthy. Visually nearly identical at typical pulse
-// values.
+// Glow uses the GPU-accelerated shadowBlur path (not ctx.filter:blur,
+// which falls back to software in Skia). The glow pass is intentionally
+// dialed back from earlier iterations — at full pulse the bloom should
+// read as a gentle in-color smear, not an additive white flash. Tuning
+// knobs live in the per-line loop below; bump them in lockstep if the
+// pulse needs to read more aggressively again.
+//
+// Independently of pulse, each signal renders a small orbital dot at its
+// playhead intersection (a colored disc + a white satellite on a slow
+// orbit driven by `now`). Echoes the cursor's 4-particle constellation
+// so the graph never reads as frozen between samples.
 
 import { SLIDER_META, type SliderMeta } from "@/types/engine";
 
@@ -85,11 +92,35 @@ interface History {
   filled: number;
 }
 
+// Beat-triggered confetti sparks (cursor.ts vocabulary). Spawned in
+// starburst patterns from each satellite on the rising edge of `pulse`,
+// then aged + simulated under gravity until they fade out. Stateful
+// across frames; capped at MAX_SPARKS so dense music can't run away.
+interface Spark {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  age: number;
+  life: number;
+  r: number;
+  g: number;
+  b: number;
+}
+
+const SPARK_GRAVITY = 0.15; // px/frame² @ 60fps; scaled by dt/16 each tick
+const SPARKS_PER_BEAT = 5;
+const MAX_SPARKS = 160;
+const BEAT_THRESH = 0.4; // rising-edge pulse threshold for "beat hit"
+
 export class GraphRenderer {
   readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
   private readonly histories: Map<string, History> = new Map();
   private readonly _resizeObs: ResizeObserver;
+  private readonly _sparks: Spark[] = [];
+  private _lastPulse = 0;
+  private _lastNow = 0;
   private w = 1;
   private h = 1;
 
@@ -135,7 +166,7 @@ export class GraphRenderer {
     }
   }
 
-  draw(pulse = 0): void {
+  draw(pulse = 0, now: number = performance.now()): void {
     // ResizeObserver in the constructor already keeps {w, h} in sync,
     // including the display:none → block transition. The legacy
     // getBoundingClientRect() self-heal that used to live here forced a
@@ -194,15 +225,15 @@ export class GraphRenderer {
         else ctx.lineTo(x, y);
       }
 
-      if (pulse > 0.05) {
+      if (pulse > 0.1) {
         ctx.save();
         ctx.globalCompositeOperation = "lighter";
-        ctx.shadowColor = `rgba(${r},${g},${b},${0.8 + 0.2 * pulse})`;
-        ctx.shadowBlur = 3 + 2 * pulse;
+        ctx.shadowColor = `rgba(${r},${g},${b},${0.25 + 0.25 * pulse})`;
+        ctx.shadowBlur = 1 + 1.5 * pulse;
         ctx.shadowOffsetX = 0;
         ctx.shadowOffsetY = 0;
-        ctx.strokeStyle = `rgba(${r},${g},${b},${0.6 + 0.4 * pulse})`;
-        ctx.lineWidth = 3 + 2 * pulse;
+        ctx.strokeStyle = `rgba(${r},${g},${b},${0.3 + 0.4 * pulse})`;
+        ctx.lineWidth = 1.5 + 1.5 * pulse;
         ctx.stroke();
         ctx.restore();
       }
@@ -211,6 +242,127 @@ export class GraphRenderer {
       ctx.strokeStyle = `rgba(${r},${g},${b},1)`;
       ctx.lineWidth = 1;
       ctx.stroke();
+    }
+
+    // Whimsical orbital dots + beat-triggered sparks. Each signal gets
+    // a colored disc anchored on the line at the playhead, plus a
+    // colored satellite orbiting it. Speed and radius are hashed from
+    // the line name (cursor.ts:47-50 PARTICLE_CONFIG vocabulary) so the
+    // cluster reads as a flock, not a metronome — different lines orbit
+    // at different rates, in different directions, on different shells.
+    //
+    // Orbits are time-driven so the cluster never freezes between data
+    // samples. On the rising edge of `pulse` (audio kick), each
+    // satellite fires a starburst of palette-colored sparks that arc
+    // outward under gravity and fade — punctuation on the beat instead
+    // of a constant trail. Sparks live in `this._sparks`, capped at
+    // MAX_SPARKS to keep dense music bounded.
+    {
+      const dt = this._lastNow ? Math.min(50, now - this._lastNow) : 16;
+      this._lastNow = now;
+      const dtScale = dt / 16;
+      const beat = pulse > BEAT_THRESH && this._lastPulse <= BEAT_THRESH;
+      this._lastPulse = pulse;
+
+      const orbitTheta = (now / 1800) * Math.PI * 2; // ~1.8s base period
+      const baseOrbitR = 6 * (1 + 0.4 * pulse);
+      const pxPerSample = w / (VISIBLE_SAMPLES - 1);
+      const samplesFromHead = Math.round((w - playheadX) / pxPerSample);
+
+      ctx.save();
+      ctx.globalCompositeOperation = "source-over";
+      ctx.shadowBlur = 0;
+
+      for (const [name, hist] of this.histories) {
+        const n = Math.min(hist.filled, VISIBLE_SAMPLES);
+        if (n < 2 || samplesFromHead >= n) continue;
+        const headIdx =
+          (hist.head - 1 - samplesFromHead + HISTORY_LEN) % HISTORY_LEN;
+        const v = hist.buf[headIdx];
+        const yAtHead = h - Y_PAD - v * (h - 2 * Y_PAD);
+        const [r, g, b] = _colorFor(name);
+
+        // Hash → phase, spin direction, speed mul ∈ [0.7, 1.4],
+        // radius mul ∈ [0.85, 1.15]. Different bits feed each so a
+        // small name change scrambles all four — no two signals end up
+        // visually paired by accident.
+        let hash = 0;
+        for (let i = 0; i < name.length; i++) {
+          hash = (hash * 31 + name.charCodeAt(i)) | 0;
+        }
+        const phase = ((Math.abs(hash) % 1000) / 1000) * Math.PI * 2;
+        const dir = hash & 1 ? 1 : -1;
+        const speedMul = 0.7 + ((Math.abs(hash >> 5) % 1000) / 1000) * 0.7;
+        const radiusMul =
+          0.85 + ((Math.abs(hash >> 11) % 1000) / 1000) * 0.3;
+
+        const orbitR = baseOrbitR * radiusMul;
+        const angle = phase + dir * orbitTheta * speedMul;
+        const satX = playheadX + Math.cos(angle) * orbitR;
+        const satY = yAtHead + Math.sin(angle) * orbitR;
+
+        // Disc anchored on the line.
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.beginPath();
+        ctx.arc(playheadX, yAtHead, 3, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Colored satellite head (slightly larger than the line disc so
+        // it reads as the lead element of the pair).
+        ctx.beginPath();
+        ctx.arc(satX, satY, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Beat → starburst of sparks from the satellite. Equal-spaced
+        // angles + a random rotation per burst + a touch of jitter →
+        // reads as "boom" rather than "scatter".
+        if (beat) {
+          const baseAngle = Math.random() * Math.PI * 2;
+          for (let i = 0; i < SPARKS_PER_BEAT; i++) {
+            if (this._sparks.length >= MAX_SPARKS) this._sparks.shift();
+            const sa =
+              baseAngle +
+              (i / SPARKS_PER_BEAT) * Math.PI * 2 +
+              (Math.random() - 0.5) * 0.6;
+            const sp = 1.6 + Math.random() * 2.4;
+            this._sparks.push({
+              x: satX,
+              y: satY,
+              vx: Math.cos(sa) * sp,
+              vy: Math.sin(sa) * sp - 0.6, // slight upward bias
+              age: 0,
+              life: 500 + Math.random() * 400,
+              r,
+              g,
+              b,
+            });
+          }
+        }
+      }
+
+      // Sparks — physics + render + cull. Walking backwards so splice
+      // doesn't shift indices we still need to visit.
+      for (let i = this._sparks.length - 1; i >= 0; i--) {
+        const s = this._sparks[i];
+        s.age += dt;
+        if (s.age >= s.life) {
+          this._sparks.splice(i, 1);
+          continue;
+        }
+        s.vy += SPARK_GRAVITY * dtScale;
+        s.x += s.vx * dtScale;
+        s.y += s.vy * dtScale;
+        const f = s.age / s.life;
+        const alpha = 1 - f;
+        const radius = 1.5 * (1 - f * 0.7);
+        if (radius <= 0.1) continue;
+        ctx.fillStyle = `rgba(${s.r},${s.g},${s.b},${alpha.toFixed(3)})`;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.restore();
     }
 
     // Playhead — same shadowBlur trick. Glow halo + crisp 1px line.
