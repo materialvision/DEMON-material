@@ -9,7 +9,7 @@
 // --bloom-amount. Drop-shadow glow filters live in CSS on the canvas
 // elements (CSS filter applies to canvases just like SVG).
 
-import { LORA_SIDE_VISIBLE_FLOOR } from "@/types/engine";
+import { LORA_SIDE_VISIBLE_FLOOR, REMIX_VISIBLE_FLOOR } from "@/types/engine";
 
 const PALETTE = [
   "#3db6be", // teal
@@ -32,12 +32,12 @@ const INWARD_DISTANCE = 8;
 // max --bloom-amount, so 16 px leaves clear headroom on both ends.
 const ALONG_END_INSET_PX = 16;
 
-// Floor for the side-bar (LoRA) ribbon length. Defined in types/engine
-// so DesktopEdgeDrag can floor the hint head against the same value —
-// otherwise drags below this threshold leave the hint floating below
-// the ribbon's visible end. Top bar (Remix Strength) is excluded —
-// denoise=0 there is a meaningful "off" that should collapse the ribbon
-// fully so the user can grade all the way to zero.
+// Floors for ribbon length, defined in types/engine. The side floor
+// is also consumed by DesktopEdgeDrag for the hint head position so
+// the hint stays attached to the ribbon's visible end. The top floor
+// is render-only — denoise=0 still passes through to the engine
+// untouched; the sliver only ensures the user can find the slider
+// after dragging it all the way left.
 
 interface BarConfig {
   sel: string;
@@ -183,11 +183,12 @@ function drawRibbon(
   bar: RibbonBar,
   bleedPx: number,
 ): void {
-  // Side bars (LoRA strengths) get a visibility floor so the ribbon
-  // never disappears even at strength=0. Top bar (Remix) is excluded —
-  // see LORA_SIDE_VISIBLE_FLOOR comment.
+  // Both axes get a visibility floor so the ribbon never disappears at
+  // strength=0 — otherwise the user has no cue the slider still exists.
+  // The top (Remix) floor is smaller than the side floor because the
+  // top bar is much wider; same proportional readability either way.
   const drawProgress = bar.horizontal
-    ? progress
+    ? Math.max(progress, REMIX_VISIBLE_FLOOR)
     : Math.max(progress, LORA_SIDE_VISIBLE_FLOOR);
   const drawLen = drawProgress * ALONG;
   const lateral = (ribbonIdx - (PALETTE.length - 1) / 2) * RIBBON_SPACING;
