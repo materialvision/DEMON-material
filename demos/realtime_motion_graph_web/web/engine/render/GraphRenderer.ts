@@ -123,7 +123,18 @@ const SPARK_LIFE_MS = 900; // matches CONFETTI_LIFE_MS (±100ms jitter applied p
 const SPARK_CONE_RAD = Math.PI / 7; // ~25° spread around the satellite's tangent
 const SPARKS_PER_BEAT = 8;
 const MAX_SPARKS = 240;
-const BEAT_THRESH = 0.4; // rising-edge pulse threshold for "beat hit"
+const BEAT_THRESH = 0.4; // pulse threshold for "kick is happening"
+
+// Per-line firing gate. Each beat, every line independently rolls
+// against `fireProb`, which scales linearly with the kick's peak
+// strength: soft kicks fire only ~40% of lines (sparse, syncopated),
+// peak kicks fire ~100% (full swarm). After firing, a line is muted
+// for COOLDOWN_MIN..COOLDOWN_MAX ms — independent across lines, so
+// dense music desyncs naturally instead of repeating in lockstep.
+const FIRE_PROB_AT_THRESHOLD = 0.4;
+const FIRE_PROB_AT_PEAK = 1.0;
+const COOLDOWN_MIN_MS = 100;
+const COOLDOWN_MAX_MS = 400;
 
 export class GraphRenderer {
   readonly canvas: HTMLCanvasElement;
@@ -131,7 +142,17 @@ export class GraphRenderer {
   private readonly histories: Map<string, History> = new Map();
   private readonly _resizeObs: ResizeObserver;
   private readonly _sparks: Spark[] = [];
-  private _lastPulse = 0;
+  // Cooldown timestamps per line — `now`-domain wall-clock millis after
+  // which the line is eligible to fire again.
+  private readonly _lineCooldowns: Map<string, number> = new Map();
+  // Beat detection state — track whether pulse is currently above
+  // threshold and the peak it's hit during this above-threshold span.
+  // Firing on the falling edge (when pulse drops back below threshold)
+  // means we know the kick's actual peak strength, not just the
+  // rising-edge value (always ≈ threshold). ~50–100ms of perceptual
+  // latency from kick onset; well within sync tolerance.
+  private _aboveThresh = false;
+  private _peakPulse = 0;
   private _lastNow = 0;
   private w = 1;
   private h = 1;
@@ -264,17 +285,40 @@ export class GraphRenderer {
     // at different rates, in different directions, on different shells.
     //
     // Orbits are time-driven so the cluster never freezes between data
-    // samples. On the rising edge of `pulse` (audio kick), each
-    // satellite fires a starburst of palette-colored sparks that arc
-    // outward under gravity and fade — punctuation on the beat instead
-    // of a constant trail. Sparks live in `this._sparks`, capped at
-    // MAX_SPARKS to keep dense music bounded.
+    // samples. When an audio kick happens, each satellite has an
+    // independent chance to fire a comet trail of palette-colored
+    // sparks along its tangent — chance scales with the kick's peak
+    // strength (soft kicks: sparse syncopation, peak kicks: full
+    // swarm), gated by a per-line cooldown so dense music desyncs
+    // organically instead of marching in lockstep. Sparks live in
+    // `this._sparks`, capped at MAX_SPARKS.
     {
       const dt = this._lastNow ? Math.min(50, now - this._lastNow) : 16;
       this._lastNow = now;
       const dtScale = dt / 16;
-      const beat = pulse > BEAT_THRESH && this._lastPulse <= BEAT_THRESH;
-      this._lastPulse = pulse;
+
+      // Falling-edge peak detection: arm when pulse crosses threshold,
+      // track the max while above, fire on the frame that drops back
+      // below. `beatPulse` is the peak strength observed during the
+      // above-threshold span — used to scale per-line fire probability.
+      let beat = false;
+      let beatPulse = 0;
+      if (pulse > BEAT_THRESH) {
+        this._aboveThresh = true;
+        if (pulse > this._peakPulse) this._peakPulse = pulse;
+      } else if (this._aboveThresh) {
+        beat = true;
+        beatPulse = this._peakPulse;
+        this._aboveThresh = false;
+        this._peakPulse = 0;
+      }
+      const fireProb =
+        FIRE_PROB_AT_THRESHOLD +
+        (FIRE_PROB_AT_PEAK - FIRE_PROB_AT_THRESHOLD) *
+          Math.min(
+            1,
+            Math.max(0, (beatPulse - BEAT_THRESH) / (1 - BEAT_THRESH)),
+          );
 
       const orbitTheta = (now / 1800) * Math.PI * 2; // ~1.8s base period
       const baseOrbitR = 6 * (1 + 0.4 * pulse);
@@ -330,7 +374,17 @@ export class GraphRenderer {
         // orbit `dir`, so sparks always fly in the direction of motion.
         // Narrow ±25° cone keeps them tightly behind the satellite
         // instead of fanning out; gravity arcs the trail downward.
-        if (beat) {
+        //
+        // Two gates layer here: per-line probability (scales with kick
+        // strength via fireProb) and an independent cooldown so a line
+        // that just fired doesn't immediately re-fire on the next beat.
+        // Together they break the unison and add organic syncopation.
+        const eligibleAt = this._lineCooldowns.get(name) ?? 0;
+        if (beat && now >= eligibleAt && Math.random() < fireProb) {
+          this._lineCooldowns.set(
+            name,
+            now + COOLDOWN_MIN_MS + Math.random() * (COOLDOWN_MAX_MS - COOLDOWN_MIN_MS),
+          );
           const tangentAngle = angle + dir * (Math.PI / 2);
           for (let i = 0; i < SPARKS_PER_BEAT; i++) {
             if (this._sparks.length >= MAX_SPARKS) this._sparks.shift();
