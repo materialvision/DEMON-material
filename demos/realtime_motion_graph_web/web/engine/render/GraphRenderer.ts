@@ -92,10 +92,17 @@ interface History {
   filled: number;
 }
 
-// Beat-triggered confetti sparks (cursor.ts vocabulary). Spawned in
-// starburst patterns from each satellite on the rising edge of `pulse`,
-// then aged + simulated under gravity until they fade out. Stateful
-// across frames; capped at MAX_SPARKS so dense music can't run away.
+// Confetti sparks (cursor.ts vocabulary). Each line fires on its own
+// jittered ~250ms schedule, independent of audio, so the cluster reads
+// as a constant party — there's almost always a burst in flight from
+// somewhere. `pulse` modulates burst *intensity* (more sparks per
+// burst on loud moments) rather than gating triggers, so the graph
+// still responds to music without going silent in quiet sections.
+//
+// All sparks fly leftward (toward the past, away from the playhead's
+// "now"). The result reads as a chromatic comet trail behind the
+// playhead — sparks streak across the rendered line history in their
+// line's color, reinforcing the "time is flowing past you" cue.
 interface Spark {
   x: number;
   y: number;
@@ -108,33 +115,29 @@ interface Spark {
   b: number;
 }
 
-// Spark size + physics lifted from engine/cursor.ts confetti — same
-// disc, same speed range, same gravity, same life. Direction is
-// different though: a cursor click is stationary, so confetti goes
-// radial-random; a satellite is moving along its orbit, so sparks shed
-// in its direction of motion (tangent ± a narrow cone) → reads as a
-// comet trail rather than a puff. Gravity arcs the trail downward
-// naturally, no upward bias needed.
-const SPARK_GRAVITY = 0.16; // matches GRAVITY in cursor.ts
+// Spark physics. Disc size still matches cursor.ts confetti (2px), but
+// trails are tuned longer + flatter than the cursor click: faster
+// speeds, lower gravity, longer life — the playhead leaves a chromatic
+// streak behind it rather than a tight burst.
+const SPARK_GRAVITY = 0.10; // was 0.16 (cursor confetti); reduced for flatter trails
 const SPARK_RADIUS = 2; // matches SPARK_RADIUS in cursor.ts (4px diameter)
-const SPARK_MIN_SPEED = 3.2; // matches CONFETTI_MIN_SPEED
-const SPARK_MAX_SPEED = 7.0; // matches CONFETTI_MAX_SPEED
-const SPARK_LIFE_MS = 900; // matches CONFETTI_LIFE_MS (±100ms jitter applied per spark)
-const SPARK_CONE_RAD = Math.PI / 7; // ~25° spread around the satellite's tangent
-const SPARKS_PER_BEAT = 8;
-const MAX_SPARKS = 240;
-const BEAT_THRESH = 0.4; // pulse threshold for "kick is happening"
+const SPARK_MIN_SPEED = 4.5; // was 3.2; faster baseline → longer trails
+const SPARK_MAX_SPEED = 8.5; // was 7.0; faster ceiling for the loud-moment streaks
+const SPARK_LIFE_MS = 1100; // was 900; longer fade so the trail extends visibly farther
+const SPARK_CONE_RAD = Math.PI / 5; // ~36° spread around the leftward axis
+const LEFT_ANGLE = Math.PI; // 180° — pure leftward, toward the past
 
-// Per-line firing gate. Each beat, every line independently rolls
-// against `fireProb`, which scales linearly with the kick's peak
-// strength: soft kicks fire only ~40% of lines (sparse, syncopated),
-// peak kicks fire ~100% (full swarm). After firing, a line is muted
-// for COOLDOWN_MIN..COOLDOWN_MAX ms — independent across lines, so
-// dense music desyncs naturally instead of repeating in lockstep.
-const FIRE_PROB_AT_THRESHOLD = 0.4;
-const FIRE_PROB_AT_PEAK = 1.0;
-const COOLDOWN_MIN_MS = 100;
-const COOLDOWN_MAX_MS = 400;
+// Per-line burst scheduler. Every line picks its own next-fire time
+// in [BURST_INTERVAL_MIN_MS, BURST_INTERVAL_MAX_MS] after its last
+// burst — independent across lines, so the cluster fires constantly
+// but desynced. `pulse` doesn't gate firing; it just bumps the burst's
+// spark count via SPARKS_PER_BURST_PULSE so loud moments visibly
+// thicken without quiet moments going silent.
+const SPARKS_PER_BURST_BASE = 6;
+const SPARKS_PER_BURST_PULSE = 6; // up to +6 more sparks at peak pulse
+const MAX_SPARKS = 400; // raised — constant firing × 8+ lines × ~1s life sustains a higher steady state
+const BURST_INTERVAL_MIN_MS = 150;
+const BURST_INTERVAL_MAX_MS = 350;
 
 export class GraphRenderer {
   readonly canvas: HTMLCanvasElement;
@@ -142,17 +145,10 @@ export class GraphRenderer {
   private readonly histories: Map<string, History> = new Map();
   private readonly _resizeObs: ResizeObserver;
   private readonly _sparks: Spark[] = [];
-  // Cooldown timestamps per line — `now`-domain wall-clock millis after
-  // which the line is eligible to fire again.
-  private readonly _lineCooldowns: Map<string, number> = new Map();
-  // Beat detection state — track whether pulse is currently above
-  // threshold and the peak it's hit during this above-threshold span.
-  // Firing on the falling edge (when pulse drops back below threshold)
-  // means we know the kick's actual peak strength, not just the
-  // rising-edge value (always ≈ threshold). ~50–100ms of perceptual
-  // latency from kick onset; well within sync tolerance.
-  private _aboveThresh = false;
-  private _peakPulse = 0;
+  // Per-line `now`-domain wall-clock millis at which the line's next
+  // burst should fire. Initialized lazily on first fire so freshly
+  // added lines join the party immediately.
+  private readonly _nextFireAt: Map<string, number> = new Map();
   private _lastNow = 0;
   private w = 1;
   private h = 1;
@@ -285,40 +281,19 @@ export class GraphRenderer {
     // at different rates, in different directions, on different shells.
     //
     // Orbits are time-driven so the cluster never freezes between data
-    // samples. When an audio kick happens, each satellite has an
-    // independent chance to fire a comet trail of palette-colored
-    // sparks along its tangent — chance scales with the kick's peak
-    // strength (soft kicks: sparse syncopation, peak kicks: full
-    // swarm), gated by a per-line cooldown so dense music desyncs
-    // organically instead of marching in lockstep. Sparks live in
+    // samples. Each line fires a leftward comet trail on its own
+    // jittered ~250ms schedule (independent across lines), so the
+    // graph reads as a constant chromatic party flowing past the
+    // playhead. `pulse` doesn't gate the trigger — it just thickens
+    // each burst (more sparks) on loud moments. Sparks live in
     // `this._sparks`, capped at MAX_SPARKS.
     {
       const dt = this._lastNow ? Math.min(50, now - this._lastNow) : 16;
       this._lastNow = now;
       const dtScale = dt / 16;
 
-      // Falling-edge peak detection: arm when pulse crosses threshold,
-      // track the max while above, fire on the frame that drops back
-      // below. `beatPulse` is the peak strength observed during the
-      // above-threshold span — used to scale per-line fire probability.
-      let beat = false;
-      let beatPulse = 0;
-      if (pulse > BEAT_THRESH) {
-        this._aboveThresh = true;
-        if (pulse > this._peakPulse) this._peakPulse = pulse;
-      } else if (this._aboveThresh) {
-        beat = true;
-        beatPulse = this._peakPulse;
-        this._aboveThresh = false;
-        this._peakPulse = 0;
-      }
-      const fireProb =
-        FIRE_PROB_AT_THRESHOLD +
-        (FIRE_PROB_AT_PEAK - FIRE_PROB_AT_THRESHOLD) *
-          Math.min(
-            1,
-            Math.max(0, (beatPulse - BEAT_THRESH) / (1 - BEAT_THRESH)),
-          );
+      const burstCount =
+        SPARKS_PER_BURST_BASE + Math.round(SPARKS_PER_BURST_PULSE * pulse);
 
       const orbitTheta = (now / 1800) * Math.PI * 2; // ~1.8s base period
       const baseOrbitR = 6 * (1 + 0.4 * pulse);
@@ -369,27 +344,25 @@ export class GraphRenderer {
         ctx.arc(satX, satY, 2.5, 0, Math.PI * 2);
         ctx.fill();
 
-        // Beat → comet trail shed from the satellite along its tangent.
-        // Tangent direction is perpendicular to the radial, signed by
-        // orbit `dir`, so sparks always fly in the direction of motion.
-        // Narrow ±25° cone keeps them tightly behind the satellite
-        // instead of fanning out; gravity arcs the trail downward.
-        //
-        // Two gates layer here: per-line probability (scales with kick
-        // strength via fireProb) and an independent cooldown so a line
-        // that just fired doesn't immediately re-fire on the next beat.
-        // Together they break the unison and add organic syncopation.
-        const eligibleAt = this._lineCooldowns.get(name) ?? 0;
-        if (beat && now >= eligibleAt && Math.random() < fireProb) {
-          this._lineCooldowns.set(
+        // Per-line burst: fire whenever the wall clock passes the
+        // line's scheduled next-fire time, then reschedule with fresh
+        // jitter. Independent across lines so the cluster fires
+        // constantly but desynced — there's almost always a trail in
+        // flight from somewhere on the graph. Direction is fixed
+        // leftward (LEFT_ANGLE = π) so the trail streaks toward the
+        // past instead of orbiting outward — reads as the playhead
+        // shedding history behind itself as time flows.
+        const nextFireAt = this._nextFireAt.get(name) ?? 0;
+        if (now >= nextFireAt) {
+          this._nextFireAt.set(
             name,
-            now + COOLDOWN_MIN_MS + Math.random() * (COOLDOWN_MAX_MS - COOLDOWN_MIN_MS),
+            now +
+              BURST_INTERVAL_MIN_MS +
+              Math.random() * (BURST_INTERVAL_MAX_MS - BURST_INTERVAL_MIN_MS),
           );
-          const tangentAngle = angle + dir * (Math.PI / 2);
-          for (let i = 0; i < SPARKS_PER_BEAT; i++) {
+          for (let i = 0; i < burstCount; i++) {
             if (this._sparks.length >= MAX_SPARKS) this._sparks.shift();
-            const sa =
-              tangentAngle + (Math.random() - 0.5) * 2 * SPARK_CONE_RAD;
+            const sa = LEFT_ANGLE + (Math.random() - 0.5) * 2 * SPARK_CONE_RAD;
             const sp =
               SPARK_MIN_SPEED +
               Math.random() * (SPARK_MAX_SPEED - SPARK_MIN_SPEED);
