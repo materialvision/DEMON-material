@@ -108,15 +108,19 @@ interface Spark {
   b: number;
 }
 
-// Tuning lifted from engine/cursor.ts so a beat-spark burst reads
-// visually identical to a mousedown confetti burst — same disc size,
-// same speed range, same upward bias, same gravity, same life.
+// Spark size + physics lifted from engine/cursor.ts confetti — same
+// disc, same speed range, same gravity, same life. Direction is
+// different though: a cursor click is stationary, so confetti goes
+// radial-random; a satellite is moving along its orbit, so sparks shed
+// in its direction of motion (tangent ± a narrow cone) → reads as a
+// comet trail rather than a puff. Gravity arcs the trail downward
+// naturally, no upward bias needed.
 const SPARK_GRAVITY = 0.16; // matches GRAVITY in cursor.ts
 const SPARK_RADIUS = 2; // matches SPARK_RADIUS in cursor.ts (4px diameter)
 const SPARK_MIN_SPEED = 3.2; // matches CONFETTI_MIN_SPEED
 const SPARK_MAX_SPEED = 7.0; // matches CONFETTI_MAX_SPEED
 const SPARK_LIFE_MS = 900; // matches CONFETTI_LIFE_MS (±100ms jitter applied per spark)
-const SPARK_UP_BIAS = 1.2; // matches the -1.2 vy bias on confetti
+const SPARK_CONE_RAD = Math.PI / 7; // ~25° spread around the satellite's tangent
 const SPARKS_PER_BEAT = 8;
 const MAX_SPARKS = 240;
 const BEAT_THRESH = 0.4; // rising-edge pulse threshold for "beat hit"
@@ -321,14 +325,17 @@ export class GraphRenderer {
         ctx.arc(satX, satY, 2.5, 0, Math.PI * 2);
         ctx.fill();
 
-        // Beat → confetti cloud from the satellite. Random angle per
-        // spark (chaotic, like a click) — not equal-spaced — so each
-        // burst feels like the cursor's mousedown burst rather than a
-        // symmetric starburst.
+        // Beat → comet trail shed from the satellite along its tangent.
+        // Tangent direction is perpendicular to the radial, signed by
+        // orbit `dir`, so sparks always fly in the direction of motion.
+        // Narrow ±25° cone keeps them tightly behind the satellite
+        // instead of fanning out; gravity arcs the trail downward.
         if (beat) {
+          const tangentAngle = angle + dir * (Math.PI / 2);
           for (let i = 0; i < SPARKS_PER_BEAT; i++) {
             if (this._sparks.length >= MAX_SPARKS) this._sparks.shift();
-            const sa = Math.random() * Math.PI * 2;
+            const sa =
+              tangentAngle + (Math.random() - 0.5) * 2 * SPARK_CONE_RAD;
             const sp =
               SPARK_MIN_SPEED +
               Math.random() * (SPARK_MAX_SPEED - SPARK_MIN_SPEED);
@@ -336,7 +343,7 @@ export class GraphRenderer {
               x: satX,
               y: satY,
               vx: Math.cos(sa) * sp,
-              vy: Math.sin(sa) * sp - SPARK_UP_BIAS,
+              vy: Math.sin(sa) * sp,
               age: 0,
               life: SPARK_LIFE_MS - 100 + Math.random() * 200,
               r,
