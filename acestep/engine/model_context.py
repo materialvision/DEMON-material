@@ -114,8 +114,8 @@ class ModelContext:
         if self._diffusion_engine is not None:
             try:
                 self._diffusion_engine.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("DiffusionEngine.close raised: %s", e)
             self._diffusion_engine = None
         # Drop tensor-bearing attributes. Setting to None is enough — the
         # nn.Module / tensor objects have no CUDA-side finalizer that
@@ -123,10 +123,7 @@ class ModelContext:
         # subsequent gc.collect() + empty_cache() drains them.
         for attr in ("model", "vae", "text_encoder",
                      "text_tokenizer", "silence_latent", "config"):
-            try:
-                setattr(self, attr, None)
-            except Exception:
-                pass
+            setattr(self, attr, None)
 
     # ------------------------------------------------------------------
     # Initialization

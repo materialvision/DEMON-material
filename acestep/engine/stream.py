@@ -1305,18 +1305,9 @@ class StreamPipeline:
         self._channel_gain = None
         self._ones_3d = None
         self._zeros_3d = None
-        try:
-            self._schedule_cache.clear()
-        except Exception:
-            pass
-        try:
-            self._compiled_cache.clear()
-        except Exception:
-            pass
-        try:
-            self._shared_curves.clear()
-        except Exception:
-            pass
+        self._schedule_cache.clear()
+        self._compiled_cache.clear()
+        self._shared_curves.clear()
         # DCW corrector holds wavelet basis tensors on GPU; drop it.
         self._dcw_corrector = None
         # Detach references to the engine + decoder so DiffusionEngine.close

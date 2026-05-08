@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional
 
+from loguru import logger
+
 from acestep.constants import TASK_INSTRUCTIONS
 from acestep.nodes.types import (
     Audio,
@@ -618,6 +620,41 @@ class Session:
             },
         )
 
+    def close(self) -> None:
+        """Release all GPU + CPU state owned by this session.
+
+        Tears down the model context (which chains DiffusionEngine →
+        LoRAManagerBase → TRT execution context destruction), then runs
+        ``gc.collect()`` and ``torch.cuda.empty_cache()`` so PyTorch
+        returns its caching-allocator pages to CUDA. TRT contexts free
+        directly through their finalizers and don't go through torch.
+
+        Outstanding ``StreamHandle`` instances should be ``close()``'d
+        BEFORE this; the handle's pipeline references the engine, and
+        closing the engine while a handle still holds it works (the
+        handle's refs are simply dangling) but defeats the cleanup
+        ordering documented on each component's close.
+
+        Idempotent: subsequent calls are no-ops.
+        """
+        import gc
+        import torch
+
+        ctx = getattr(self.model, "handler", None) if self.model is not None else None
+        if ctx is not None:
+            try:
+                ctx.close()
+            except Exception as e:
+                logger.warning("ModelContext.close raised: %s", e)
+        # Drop the handle wrappers so nothing else can dereference the
+        # now-closed context through them.
+        self.model = None  # type: ignore[assignment]
+        self.clip = None  # type: ignore[assignment]
+        self.vae = None  # type: ignore[assignment]
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
 
 @dataclass
 class StreamHandle:
@@ -709,8 +746,8 @@ class StreamHandle:
             if pipeline is not None:
                 try:
                     pipeline.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("StreamPipeline.close raised: %s", e)
                 node._pipeline = None
             node._engine = None
         # Detach top-level refs so the session-level close is the
@@ -722,4 +759,4 @@ class StreamHandle:
         self.source = None  # type: ignore[assignment]
         self.conditioning = None  # type: ignore[assignment]
         self.context_latent = None  # type: ignore[assignment]
-        self.base_kwargs = {}
+        self.base_kwargs = None  # type: ignore[assignment]

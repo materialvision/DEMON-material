@@ -478,13 +478,16 @@ class LoRAManagerBase(abc.ABC):
         # REGISTERED first so that hook fires once per ever-enabled LoRA.
         for entry in self._loras.values():
             if entry.state == LoRAState.ENABLED:
+                entry.state = LoRAState.REGISTERED
+                entry.deltas = None
+                entry.materialized_bytes = 0
                 try:
-                    entry.state = LoRAState.REGISTERED
-                    entry.deltas = None
-                    entry.materialized_bytes = 0
                     self._on_disabled(entry)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(
+                        "_on_disabled raised for %s during close: %s",
+                        entry.lora_id, e,
+                    )
             else:
                 entry.deltas = None
                 entry.materialized_bytes = 0
@@ -492,10 +495,7 @@ class LoRAManagerBase(abc.ABC):
         # Drop base-weight snapshots (TRT: CPU, Eager: same dtype/device
         # as live params — GPU on a normal session). Refit buffers
         # (TRT only) live alongside.
-        try:
-            self._base_weights.clear()
-        except Exception:
-            pass
+        self._base_weights.clear()
         for attr in ("_refit_bufs", "_param_to_trt", "_np_dtype",
                      "_param_dtype", "_decoder_params", "_gpu_deltas"):
             d = getattr(self, attr, None)
@@ -505,20 +505,13 @@ class LoRAManagerBase(abc.ABC):
         # reference to a partially-materialized entry's deltas would
         # otherwise keep CPU buffers alive past close().
         if self._executor is not None:
-            try:
-                self._executor.shutdown(wait=False, cancel_futures=True)
-            except TypeError:
-                # Older Python lacks cancel_futures; fall through.
-                self._executor.shutdown(wait=False)
+            self._executor.shutdown(wait=False, cancel_futures=True)
             self._executor = None
         # Drop TRT-specific bookkeeping last so the IRefitter's reference
         # to the engine clears before the engine is destroyed.
         for attr in ("_refitter", "_engine", "_trt", "_trt_logger"):
             if hasattr(self, attr):
-                try:
-                    setattr(self, attr, None)
-                except Exception:
-                    pass
+                setattr(self, attr, None)
 
     # ------------------------------------------------------------------
     # Backward-compat one-shot API

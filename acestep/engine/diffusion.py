@@ -360,7 +360,9 @@ class DiffusionEngine:
     def close(self) -> None:
         """Release per-engine TRT + LoRA state.
 
-        Called by :meth:`Session.close`. Drops:
+        Called by :meth:`acestep.engine.model_context.ModelContext.close`
+        as part of the :meth:`acestep.engine.session.Session.close` chain.
+        Drops:
 
         - the TRT execution context (the dominant non-PyTorch GPU buffer:
           activation/workspace memory, ~1–2 GB for a turbo decoder profile)
@@ -378,28 +380,27 @@ class DiffusionEngine:
         """
         # Drop the buffer cache first (each entry holds a torch.Tensor on
         # CUDA); it indirectly references the engine via the context.
-        try:
-            self._trt_buf_cache.clear()
-        except Exception:
-            pass
+        self._trt_buf_cache.clear()
         # LoRA manager next. It holds a Refitter, which holds an engine
         # reference. Closing it before the engine clears that ref.
         if self._lora_manager is not None:
             try:
                 self._lora_manager.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("LoRAManagerBase.close raised: %s", e)
             self._lora_manager = None
-        # Now the TRT context + engine. ``del`` (or rebind to None) is
-        # what triggers the polygraphy/pycuda finalizer that actually
-        # frees the CUDA workspace; setting attributes to None alone is
-        # not enough if some other transient name holds the previous
-        # value, so we explicitly ``del`` the instance attribute too.
+        # Now the TRT context + engine. ``del`` on the instance attribute
+        # is what triggers the polygraphy/pycuda finalizer that frees the
+        # CUDA workspace. Rebinding to None works only when no other
+        # name holds the previous value; ``del`` removes the binding
+        # unconditionally.
         for attr in ("_trt_ctx", "_trt_engine"):
-            try:
-                setattr(self, attr, None)
-            except Exception:
-                pass
+            if hasattr(self, attr):
+                delattr(self, attr)
+        # Re-establish the attributes as None so the rest of the API
+        # (load_trt_engine, etc.) keeps working if the engine is reused.
+        self._trt_ctx = None
+        self._trt_engine = None
         # The CUDA stream is process-shared (see vae_nodes._get_trt_stream)
         # so we just drop our reference, not destroy the stream.
         self._trt_stream = None
