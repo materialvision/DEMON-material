@@ -166,12 +166,22 @@ const CHORUS_BURST_BASE = 6;
 const CHORUS_BURST_PEAK = 6; // up to +6 more sparks per line scaled by peakPulse
 
 // Bouncy spark trait. Each spawned spark has BOUNCE_PROB chance of
-// being tagged bouncy; bouncy sparks bounce ONCE off their spawn-line
-// y when gravity pulls them across it, then fall through normally.
-// Reads as a "skipping stone" off the polyline — gives the eye a hint
-// of physics interaction with the line geometry.
-const BOUNCE_PROB = 0.35;
-const BOUNCE_DAMPING = 0.55;
+// being tagged bouncy; bouncy sparks rise above their spawn-line y,
+// fall back, and bounce off that y. Each bounce loses BOUNCE_DAMPING
+// of vy magnitude, so successive hops are smaller; once the bounced
+// vy drops below BOUNCE_MIN_SPEED the trait clears and the spark
+// falls through. Reads as a "skipping stone" off the polyline — gives
+// the eye line/spark interaction without coupling spark physics to
+// per-frame polyline geometry.
+const BOUNCE_PROB = 0.4;
+// Initial upward velocity for bouncy sparks. Tuned so the round trip
+// (rise + fall) fits comfortably in SPARK_LIFE_MS — at vy=-1.5 with
+// gravity 0.06, peak is ~19 px above the line and round trip is
+// ~830 ms, leaving ~400 ms after the first bounce for one or two
+// smaller hops before the spark fades out.
+const BOUNCE_INIT_VY = -1.5;
+const BOUNCE_DAMPING = 0.7;
+const BOUNCE_MIN_SPEED = 0.5;
 
 // Pool size. Sized so a full chorus burst (~20 lines × up to 12 sparks
 // = 240) plus baseline trails (~7 / 250 ms = ~36 alive over a 1.3 s
@@ -500,16 +510,16 @@ export class GraphRenderer {
             this._spX[slot] = playheadX;
             this._spY[slot] = sparkY;
             this._spVX[slot] = Math.cos(sa) * sp;
-            // Bouncy sparks need controlled upward velocity at spawn so
-            // they (a) actually rise above the spawn line (b) fall back
-            // within the spark's lifetime. Free-running sa would put
-            // half of them moving DOWN at spawn (instant bounce, no
-            // visible skip) and the other half moving UP fast enough to
-            // exceed lifetime before gravity drags them back. -2 to -3
-            // gives a peak height of ~30 px above the line and a 1.1 s
-            // round-trip — well within SPARK_LIFE_MS.
+            // Bouncy sparks need a controlled, modest upward velocity
+            // at spawn so the rise + fall round trip fits inside
+            // SPARK_LIFE_MS. Free-running sa would put half of them
+            // moving DOWN at spawn (instant bounce, no visible skip)
+            // and the upward half might fly too high to fall back
+            // within the spark's lifetime. BOUNCE_INIT_VY = -1.5 puts
+            // the peak ~19 px above the line at ~415 ms, the first
+            // bounce ~830 ms in, leaving room for 1–2 smaller hops.
             this._spVY[slot] = bouncy
-              ? -(2 + Math.random())
+              ? BOUNCE_INIT_VY
               : Math.sin(sa) * sp;
             this._spAge[slot] = 0;
             this._spLife[slot] = SPARK_LIFE_MS - 150 + Math.random() * 300;
@@ -551,19 +561,35 @@ export class GraphRenderer {
         let y = prevY + newVY * dtScale;
         // Bounce: if this spark is bouncy and we just crossed its
         // spawn-line y while moving down, clamp to the line and flip
-        // vy with damping. One bounce per spark — bouncy clears so
-        // subsequent frames fall through normally. Strict `<` on
-        // prevY: at spawn, prevY === bY, so without strictness the
-        // first frame's downward delta would trigger a sham bounce.
-        // Combined with the upward-velocity force in the spawn loop,
-        // every bouncy spark rises clear of bY first, then falls back
-        // and crosses strictly from above — that's the visible skip.
+        // vy with damping. Multi-bounce: bouncy stays set as long as
+        // the rebound velocity is above BOUNCE_MIN_SPEED, so a spark
+        // can hop 2–3 times before the energy drops too low and we
+        // let it fall through. Strict `<` on prevY: at spawn, prevY
+        // === bY, so without strictness the first frame's downward
+        // delta would trigger a sham bounce. Combined with the
+        // controlled upward initial velocity in the spawn loop, every
+        // bouncy spark rises clear of bY first, then falls back and
+        // crosses strictly from above — that's the visible skip.
         if (this._spBouncy[i] && newVY > 0) {
           const bY = this._spBounceY[i];
           if (prevY < bY && y > bY) {
             y = bY;
             newVY = -newVY * BOUNCE_DAMPING;
-            this._spBouncy[i] = 0;
+            if (-newVY < BOUNCE_MIN_SPEED) {
+              this._spBouncy[i] = 0;
+            }
+            // Dev instrumentation: count bounces under window in
+            // local-test mode so a quick `window.__bounceCount` poll
+            // verifies the bounce path is firing. Cheap (a single
+            // typeof + numeric increment) and removed by minifier in
+            // prod since the global is never read in production code.
+            if (
+              typeof window !== "undefined" &&
+              (window as { __localTestPlayer?: unknown }).__localTestPlayer
+            ) {
+              const w = window as { __bounceCount?: number };
+              w.__bounceCount = (w.__bounceCount ?? 0) + 1;
+            }
           }
         }
         this._spVY[i] = newVY;
