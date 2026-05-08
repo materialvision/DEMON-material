@@ -92,17 +92,23 @@ interface History {
   filled: number;
 }
 
-// Confetti sparks (cursor.ts vocabulary). Each line fires on its own
-// jittered ~250ms schedule, independent of audio, so the cluster reads
-// as a constant party — there's almost always a burst in flight from
-// somewhere. `pulse` modulates burst *intensity* (more sparks per
-// burst on loud moments) rather than gating triggers, so the graph
-// still responds to music without going silent in quiet sections.
+// Confetti sparks (cursor.ts vocabulary). Two firing layers:
+//
+// 1. Baseline — every BASELINE_INTERVAL_MS, ONE randomly-picked line
+//    fires a small comet trail. Single trail in flight at a time;
+//    different y each burst. Reads as a wandering motion across the
+//    graph, with negative space between bursts so the eye can track
+//    each one. Independent of audio.
+//
+// 2. Chorus — when an audio kick's peak strength exceeds CHORUS_THRESH
+//    (a higher bar than just "kick is happening"), every line fires a
+//    bigger burst simultaneously. Punctuates the music: most kicks
+//    pass quietly, but the big ones light up the whole graph.
 //
 // All sparks fly leftward (toward the past, away from the playhead's
-// "now"). The result reads as a chromatic comet trail behind the
-// playhead — sparks streak across the rendered line history in their
-// line's color, reinforcing the "time is flowing past you" cue.
+// "now"). Reads as a chromatic streak behind the playhead — sparks
+// trail across the rendered line history in their line's color,
+// reinforcing the "time is flowing past you" cue.
 interface Spark {
   x: number;
   y: number;
@@ -110,34 +116,68 @@ interface Spark {
   vy: number;
   age: number;
   life: number;
+  // Wall-clock millis at which the spark "activates". Sparks with
+  // birthAt > now are skipped entirely — no aging, no rendering — so
+  // chorus bursts can stagger per line and read as a cascade across
+  // the cluster instead of one synchronized cloud. For non-staggered
+  // (baseline) sparks, set birthAt = now at spawn.
+  birthAt: number;
   r: number;
   g: number;
   b: number;
 }
 
-// Spark physics. Disc size still matches cursor.ts confetti (2px), but
-// trails are tuned longer + flatter than the cursor click: faster
-// speeds, lower gravity, longer life — the playhead leaves a chromatic
-// streak behind it rather than a tight burst.
-const SPARK_GRAVITY = 0.10; // was 0.16 (cursor confetti); reduced for flatter trails
-const SPARK_RADIUS = 2; // matches SPARK_RADIUS in cursor.ts (4px diameter)
-const SPARK_MIN_SPEED = 4.5; // was 3.2; faster baseline → longer trails
-const SPARK_MAX_SPEED = 8.5; // was 7.0; faster ceiling for the loud-moment streaks
-const SPARK_LIFE_MS = 1100; // was 900; longer fade so the trail extends visibly farther
+// Spark physics. Disc size matches cursor.ts confetti (2px); trails
+// are tuned long + flat so they extend visibly along the rendered
+// line history rather than arcing down quickly.
+const SPARK_GRAVITY = 0.06; // was 0.10 (cursor 0.16); even flatter for trails along the line
+const SPARK_RADIUS = 2.5; // bumped from 2 for more visible streaks
+const SPARK_MIN_SPEED = 4.5;
+const SPARK_MAX_SPEED = 8.5;
+const SPARK_LIFE_MS = 1300; // longer so trails reach further into the history
 const SPARK_CONE_RAD = Math.PI / 5; // ~36° spread around the leftward axis
+
+// Per-line cascade stagger on chorus moments. When chorus fires, each
+// line's sparks get a small `birthAt` offset so they don't all spawn
+// on the same frame — reads as a brief sweep across the cluster
+// instead of one big synchronized cloud. Hash-based per line so the
+// cascade order is stable per name.
+const CHORUS_STAGGER_MAX_MS = 120;
 const LEFT_ANGLE = Math.PI; // 180° — pure leftward, toward the past
 
-// Per-line burst scheduler. Every line picks its own next-fire time
-// in [BURST_INTERVAL_MIN_MS, BURST_INTERVAL_MAX_MS] after its last
-// burst — independent across lines, so the cluster fires constantly
-// but desynced. `pulse` doesn't gate firing; it just bumps the burst's
-// spark count via SPARKS_PER_BURST_PULSE so loud moments visibly
-// thicken without quiet moments going silent.
-const SPARKS_PER_BURST_BASE = 6;
-const SPARKS_PER_BURST_PULSE = 6; // up to +6 more sparks at peak pulse
-const MAX_SPARKS = 400; // raised — constant firing × 8+ lines × ~1s life sustains a higher steady state
-const BURST_INTERVAL_MIN_MS = 150;
-const BURST_INTERVAL_MAX_MS = 350;
+// Baseline trigger — fires on the falling edge of small/medium kicks
+// (peak in [BEAT_THRESH, CHORUS_THRESH)). Picks one random line per
+// fire so the eye sees a wandering trail rather than constant rain.
+// Rate-limited to BASELINE_MIN_INTERVAL_MS between fires; if music is
+// silent for longer than BASELINE_MAX_INTERVAL_MS, fires anyway so
+// the graph never goes fully still.
+const BEAT_THRESH = 0.3;
+const BASELINE_MIN_INTERVAL_MS = 250; // was 400; allows ~every-beat firing at 120 BPM
+const BASELINE_MAX_INTERVAL_MS = 1200; // was 1500; silence fallback fires a little sooner
+const BASELINE_BURST_SPARKS = 7; // was 4; denser single trail reads more clearly
+
+// Chorus — when a kick's peak strength exceeds CHORUS_THRESH, every
+// line fires a bigger burst simultaneously. Probabilistic so not
+// every strong kick lights up the whole graph: most do, but enough
+// don't that the chorus moment retains its surprise. A failed chorus
+// roll falls through to a regular baseline fire (subject to its own
+// rate-limit), so the kick still reads — it just gets a wandering
+// single-line trail instead of the full-cluster blast.
+const CHORUS_THRESH = 0.5;
+const CHORUS_FIRE_PROB = 0.55;
+const CHORUS_BURST_BASE = 6;
+const CHORUS_BURST_PEAK = 6; // up to +6 more sparks per line scaled by peakPulse
+
+const MAX_SPARKS = 240;
+
+// Per-line vertical "dodge" so signals with similar values at the
+// playhead don't squish into a single visual blob during chorus. Hash
+// of the line name picks a stable offset, deterministic per line and
+// stable across frames. Dots dodge by a small amount (still close
+// enough to read as "on the line"); spark origins dodge by a larger
+// amount so trails fan out into distinct y-bands instead of stacking.
+const DOT_DODGE_PX = 2;
+const SPARK_DODGE_PX = 5;
 
 export class GraphRenderer {
   readonly canvas: HTMLCanvasElement;
@@ -145,10 +185,17 @@ export class GraphRenderer {
   private readonly histories: Map<string, History> = new Map();
   private readonly _resizeObs: ResizeObserver;
   private readonly _sparks: Spark[] = [];
-  // Per-line `now`-domain wall-clock millis at which the line's next
-  // burst should fire. Initialized lazily on first fire so freshly
-  // added lines join the party immediately.
-  private readonly _nextFireAt: Map<string, number> = new Map();
+  // Wall-clock millis at which the most recent baseline burst fired,
+  // and the line picked to fire it. `_baselineLine` is consumed (set
+  // to null) inside the per-line loop once that line actually fires,
+  // so a single bucket only fires once even if a frame is missed.
+  private _lastBaselineFireAt = 0;
+  private _baselineLine: string | null = null;
+  // Beat arming + peak tracking. Falling-edge dispatch decides whether
+  // the just-ended kick was big enough for chorus or only triggers
+  // baseline (or neither, if too soon since the last baseline).
+  private _aboveBeat = false;
+  private _peakPulse = 0;
   private _lastNow = 0;
   private w = 1;
   private h = 1;
@@ -273,20 +320,76 @@ export class GraphRenderer {
       ctx.stroke();
     }
 
-    // Per-line dot at the playhead intersection + leftward confetti
-    // trails shed from the dot. Each line fires on its own jittered
-    // ~250ms schedule (independent across lines) so the graph reads as
-    // a constant chromatic party flowing past the playhead. `pulse`
-    // doesn't gate the trigger — it just thickens each burst (more
-    // sparks) on loud moments. Sparks live in `this._sparks`, capped
+    // Per-line dot at the playhead + two-layer leftward confetti
+    // trails shed from the dot. Sparks live in `this._sparks`, capped
     // at MAX_SPARKS.
+    //
+    // Layer 1 (baseline): on the falling edge of small/medium kicks
+    // (peakPulse in [BEAT_THRESH, CHORUS_THRESH)), pick ONE random
+    // line and fire a small comet trail from it. Rate-limited so it
+    // can fire at most every BASELINE_MIN_INTERVAL_MS — at the higher
+    // end of the previous range, a deliberate wandering rather than
+    // frantic. Falls back to a time-only fire every
+    // BASELINE_MAX_INTERVAL_MS during silence so the graph never
+    // freezes. Disabled when the curve editor overlay is open so
+    // users editing curves aren't distracted.
+    //
+    // Layer 2 (chorus): on the falling edge of strong kicks (peak ≥
+    // CHORUS_THRESH), every line fires a bigger burst at once. This
+    // layer is NOT gated by the curve editor — big musical moments
+    // still register even while editing.
     {
       const dt = this._lastNow ? Math.min(50, now - this._lastNow) : 16;
       this._lastNow = now;
       const dtScale = dt / 16;
 
-      const burstCount =
-        SPARKS_PER_BURST_BASE + Math.round(SPARKS_PER_BURST_PULSE * pulse);
+      // Falling-edge peak detection over BEAT_THRESH. peakPulse on the
+      // disarm frame tells us which layer (if any) to fire.
+      let chorusFire = false;
+      let chorusPeakStrength = 0;
+      let baselineFire = false;
+      if (pulse > BEAT_THRESH) {
+        this._aboveBeat = true;
+        if (pulse > this._peakPulse) this._peakPulse = pulse;
+      } else if (this._aboveBeat) {
+        const peak = this._peakPulse;
+        // Chorus is probabilistic — even on strong kicks it only
+        // fires CHORUS_FIRE_PROB of the time. A denied chorus roll
+        // falls through to baseline so the kick still registers as
+        // a wandering trail rather than disappearing entirely.
+        if (peak >= CHORUS_THRESH && Math.random() < CHORUS_FIRE_PROB) {
+          chorusFire = true;
+          chorusPeakStrength = peak;
+        } else if (
+          now - this._lastBaselineFireAt >= BASELINE_MIN_INTERVAL_MS
+        ) {
+          baselineFire = true;
+        }
+        this._aboveBeat = false;
+        this._peakPulse = 0;
+      }
+      // Silence fallback: if no beats have fired baseline for too
+      // long, fire one anyway so the graph never goes fully still.
+      if (
+        !chorusFire &&
+        !baselineFire &&
+        now - this._lastBaselineFireAt >= BASELINE_MAX_INTERVAL_MS
+      ) {
+        baselineFire = true;
+      }
+
+      // Pick the baseline line at fire-time so the user sees a fresh
+      // random pick on every burst.
+      if (baselineFire && this.histories.size > 0) {
+        const names = Array.from(this.histories.keys());
+        this._baselineLine = names[Math.floor(Math.random() * names.length)];
+        this._lastBaselineFireAt = now;
+      }
+
+      const chorusBurstCount = chorusFire
+        ? CHORUS_BURST_BASE +
+          Math.round(CHORUS_BURST_PEAK * chorusPeakStrength)
+        : 0;
 
       const pxPerSample = w / (VISIBLE_SAMPLES - 1);
       const samplesFromHead = Math.round((w - playheadX) / pxPerSample);
@@ -304,53 +407,71 @@ export class GraphRenderer {
         const yAtHead = h - Y_PAD - v * (h - 2 * Y_PAD);
         const [r, g, b] = _colorFor(name);
 
+        // Hash → stable [-0.5, 0.5) per-line dodge factor. Reused for
+        // both the dot and the spark spawn origin so a line's burst
+        // always trails from a position related to where its dot sits.
+        let hash = 0;
+        for (let i = 0; i < name.length; i++) {
+          hash = (hash * 31 + name.charCodeAt(i)) | 0;
+        }
+        const dodgeT = ((Math.abs(hash >> 7) % 1000) / 1000) - 0.5;
+        const dotY = yAtHead + dodgeT * 2 * DOT_DODGE_PX;
+        const sparkY = yAtHead + dodgeT * 2 * SPARK_DODGE_PX;
+
         // Disc anchored on the line at the playhead.
         ctx.fillStyle = `rgb(${r},${g},${b})`;
         ctx.beginPath();
-        ctx.arc(playheadX, yAtHead, 3, 0, Math.PI * 2);
+        ctx.arc(playheadX, dotY, 3, 0, Math.PI * 2);
         ctx.fill();
 
-        // Per-line burst: fire whenever the wall clock passes the
-        // line's scheduled next-fire time, then reschedule with fresh
-        // jitter. Independent across lines so the cluster fires
-        // constantly but desynced — there's almost always a trail in
-        // flight from somewhere on the graph. Direction is fixed
-        // leftward (LEFT_ANGLE = π) so the trail streaks toward the
-        // past, reading as the playhead shedding history behind itself
-        // as time flows.
-        const nextFireAt = this._nextFireAt.get(name) ?? 0;
-        if (now >= nextFireAt) {
-          this._nextFireAt.set(
-            name,
-            now +
-              BURST_INTERVAL_MIN_MS +
-              Math.random() * (BURST_INTERVAL_MAX_MS - BURST_INTERVAL_MIN_MS),
-          );
-          for (let i = 0; i < burstCount; i++) {
-            if (this._sparks.length >= MAX_SPARKS) this._sparks.shift();
-            const sa = LEFT_ANGLE + (Math.random() - 0.5) * 2 * SPARK_CONE_RAD;
-            const sp =
-              SPARK_MIN_SPEED +
-              Math.random() * (SPARK_MAX_SPEED - SPARK_MIN_SPEED);
-            this._sparks.push({
-              x: playheadX,
-              y: yAtHead,
-              vx: Math.cos(sa) * sp,
-              vy: Math.sin(sa) * sp,
-              age: 0,
-              life: SPARK_LIFE_MS - 100 + Math.random() * 200,
-              r,
-              g,
-              b,
-            });
-          }
+        // Decide this line's burst size for this frame. Chorus fires
+        // every line; baseline fires only the chosen line. Mutually
+        // exclusive — chorus already fires the chosen line, so baseline
+        // is suppressed during chorus.
+        let burstCount = 0;
+        let burstBirthAt = now;
+        if (chorusFire) {
+          burstCount = chorusBurstCount;
+          // Hash → [0, CHORUS_STAGGER_MAX_MS) per-line cascade offset.
+          // Reuse the same hash already computed for the y dodge;
+          // different bit window so stagger and dodge aren't correlated
+          // (otherwise the line that dodges most would also fire last,
+          // which reads as a single tilted sweep).
+          const staggerMs =
+            (Math.abs(hash >> 17) % 1000) / 1000 * CHORUS_STAGGER_MAX_MS;
+          burstBirthAt = now + staggerMs;
+        } else if (name === this._baselineLine) {
+          burstCount = BASELINE_BURST_SPARKS;
+          this._baselineLine = null; // consumed
+        }
+
+        for (let i = 0; i < burstCount; i++) {
+          if (this._sparks.length >= MAX_SPARKS) this._sparks.shift();
+          const sa = LEFT_ANGLE + (Math.random() - 0.5) * 2 * SPARK_CONE_RAD;
+          const sp =
+            SPARK_MIN_SPEED +
+            Math.random() * (SPARK_MAX_SPEED - SPARK_MIN_SPEED);
+          this._sparks.push({
+            x: playheadX,
+            y: sparkY,
+            vx: Math.cos(sa) * sp,
+            vy: Math.sin(sa) * sp,
+            age: 0,
+            life: SPARK_LIFE_MS - 150 + Math.random() * 300,
+            birthAt: burstBirthAt,
+            r,
+            g,
+            b,
+          });
         }
       }
 
       // Sparks — physics + render + cull. Walking backwards so splice
-      // doesn't shift indices we still need to visit.
+      // doesn't shift indices we still need to visit. Skip sparks that
+      // haven't reached their birthAt yet (pre-birth chorus stagger).
       for (let i = this._sparks.length - 1; i >= 0; i--) {
         const s = this._sparks[i];
+        if (now < s.birthAt) continue;
         s.age += dt;
         if (s.age >= s.life) {
           this._sparks.splice(i, 1);
