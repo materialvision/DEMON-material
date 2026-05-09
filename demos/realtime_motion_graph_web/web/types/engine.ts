@@ -99,3 +99,29 @@ export const VALID_KEYSCALES: string[] = (() => {
   }
   return out;
 })();
+
+/** Time signatures the model accepts. Mirrors
+ *  ``acestep.constants.VALID_TIME_SIGNATURES`` (``[2, 3, 4, 6]``). The
+ *  encoder takes the value as a string in
+ *  ``Session.encode_text(time_signature=...)``, where it gets baked into
+ *  the prompt as ``- timesignature: <value>``. We carry the strings
+ *  end-to-end so there's no int/string round-tripping at the wire. */
+export const VALID_TIME_SIGNATURES = ["2", "3", "4", "6"] as const;
+export type TimeSignature = (typeof VALID_TIME_SIGNATURES)[number];
+
+/** Display labels for the dropdowns. Numerators map to the conventional
+ *  meter notation (4 → 4/4, 6 → 6/8). The wire value stays the bare
+ *  numerator string the encoder expects. */
+export const TIME_SIGNATURE_LABELS: Record<TimeSignature, string> = {
+  "2": "2/4",
+  "3": "3/4",
+  "4": "4/4",
+  "6": "6/8",
+};
+
+export const DEFAULT_TIME_SIGNATURE: TimeSignature = "4";
+
+export function isTimeSignature(v: unknown): v is TimeSignature {
+  return typeof v === "string"
+    && (VALID_TIME_SIGNATURES as readonly string[]).includes(v);
+}

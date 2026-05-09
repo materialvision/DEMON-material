@@ -5,6 +5,7 @@ import { useEffect, useRef } from "react";
 import { loadFixtureAudio } from "@/engine/audio/loadFixture";
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
+import { isTimeSignature } from "@/types/engine";
 
 // In-place fixture swap. Mirrors swapToFixture() in DEMON's app.js: when the
 // user picks a different fixture mid-session, the server keeps the model
@@ -59,26 +60,57 @@ export function useFixtureSwap() {
             interleaved: Float32Array;
             channels: number;
             key?: string;
+            time_signature?: string;
           }>).detail;
           session.player?.swap(detail.interleaved, detail.channels);
-          // Always update detectedKey so the advanced strip's
-          // "Detected: …" readout reflects what the CNN actually
-          // inferred — even when the user overrode it below.
+          // Always update detectedKey / detectedTimeSignature so the
+          // advanced strip's "Detected: …" readout reflects what the
+          // server actually resolved — even when the user overrode it
+          // below.
           const perf = usePerformanceStore.getState();
-          if (detail.key) {
-            perf.setDetected(perf.detectedBpm, detail.key);
+          const rawTs = detail.time_signature;
+          const detectedTs = rawTs != null && isTimeSignature(rawTs)
+            ? rawTs
+            : null;
+          if (detail.key || detectedTs) {
+            perf.setDetected(
+              perf.detectedBpm,
+              detail.key ?? perf.detectedKey,
+              detectedTs ?? perf.detectedTimeSignature,
+            );
           }
           // One-shot override (set by AlmostReadyDialog's "Set
           // manually" mode) wins over the server's detection and is
           // cleared after use. Tell the server too so the model hint
-          // matches what the UI shows.
-          if (perf.pendingKeyOverride) {
-            const override = perf.pendingKeyOverride;
-            perf.setKey(override);
-            perf.setPendingKeyOverride(null);
-            remote.sendPrompt(perf.promptA, override);
-          } else if (detail.key) {
-            perf.setKey(detail.key);
+          // matches what the UI shows. The same prompt re-encode
+          // carries any time-signature override; the server's prompt
+          // handler reads both fields off the same message.
+          const keyOverride = perf.pendingKeyOverride;
+          const tsOverride = perf.pendingTimeSignatureOverride;
+          if (keyOverride || tsOverride) {
+            if (keyOverride) {
+              perf.setKey(keyOverride);
+              perf.setPendingKeyOverride(null);
+            } else if (detail.key) {
+              perf.setKey(detail.key);
+            }
+            if (tsOverride) {
+              perf.setTimeSignature(tsOverride);
+              perf.setPendingTimeSignatureOverride(null);
+            } else if (detectedTs) {
+              perf.setTimeSignature(detectedTs);
+            }
+            const finalKey =
+              keyOverride
+              ?? detail.key
+              ?? usePerformanceStore.getState().activeKey;
+            const finalTs =
+              tsOverride
+              ?? usePerformanceStore.getState().activeTimeSignature;
+            remote.sendPrompt(perf.promptA, finalKey, finalTs);
+          } else {
+            if (detail.key) perf.setKey(detail.key);
+            if (detectedTs) perf.setTimeSignature(detectedTs);
           }
           resolve(true);
         };

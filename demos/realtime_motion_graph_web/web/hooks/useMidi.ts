@@ -25,7 +25,9 @@ function noteAction(action: NoteAction): void {
     case "send_prompt": {
       const perf = usePerformanceStore.getState();
       const remote = useSessionStore.getState().remote;
-      if (remote) remote.sendPrompt(perf.promptA, perf.activeKey);
+      if (remote) {
+        remote.sendPrompt(perf.promptA, perf.activeKey, perf.activeTimeSignature);
+      }
       return;
     }
     case "mode_toggle":

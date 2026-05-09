@@ -5,10 +5,12 @@ import { create } from "zustand";
 import { frameScheduler } from "@/engine/scheduler/FrameScheduler";
 
 import {
+  DEFAULT_TIME_SIGNATURE,
   SLIDER_META,
   type DcwMode,
   type DcwWavelet,
   type DisplayMode,
+  type TimeSignature,
 } from "@/types/engine";
 
 // Top-level performance state. Mirrors app.js's module-level vars
@@ -273,6 +275,12 @@ interface PerformanceState {
   promptB: string;
   /** Currently active key (e.g. "G# minor"). May come from auto-detect. */
   activeKey: string;
+  /** Currently active time-signature numerator as a wire string
+   *  ("2" | "3" | "4" | "6"). The encoder bakes it into the prompt as
+   *  ``- timesignature: <value>``. Source order mirrors activeKey:
+   *  sidecar → operator override (AlmostReadyDialog / advanced strip) →
+   *  default ("4"). */
+  activeTimeSignature: TimeSignature;
   /** Selected fixture name (from /api/fixtures). */
   fixture: string;
   /** Display name of the active uploaded timbre-reference track, or
@@ -288,11 +296,20 @@ interface PerformanceState {
   /** Detected musical metadata from server's "ready" frame. */
   detectedBpm: number | null;
   detectedKey: string | null;
+  /** Last time signature the server reported (sidecar value on a hit,
+   *  "4" otherwise). Mirrors detectedKey: surfaces in the advanced
+   *  strip's "Detected: …" readout even when the operator has
+   *  overridden activeTimeSignature. */
+  detectedTimeSignature: TimeSignature | null;
   /** When non-null, the next swap_ready handler applies this key
    *  instead of the server-detected one and then clears it. Lets the
    *  upload dialog's "Set manually" mode survive the swap roundtrip
    *  without being clobbered by the CNN's result. */
   pendingKeyOverride: string | null;
+  /** Same one-shot semantics as pendingKeyOverride but for time
+   *  signature. Set by AlmostReadyDialog when the user picks "Set
+   *  manually"; useFixtureSwap consumes and clears it on swap_ready. */
+  pendingTimeSignatureOverride: TimeSignature | null;
   /** Display mode toggle. */
   mode: DisplayMode;
   /** Kiosk mode (auto-hide cursor + idle reset). */
@@ -337,15 +354,27 @@ interface PerformanceState {
   setPromptA: (s: string) => void;
   setPromptB: (s: string) => void;
   setKey: (k: string) => void;
+  setTimeSignature: (s: TimeSignature) => void;
   setFixture: (name: string) => void;
   setTimbreName: (name: string | null) => void;
   setStructName: (name: string | null) => void;
-  setDetected: (bpm: number | null, key: string | null) => void;
+  /** Update server-reported metadata. ``timeSignature`` is optional for
+   *  call-site convenience (older callers only carry bpm + key); when
+   *  omitted, ``detectedTimeSignature`` is left untouched. As with key,
+   *  ``activeTimeSignature`` adopts the new value automatically (the
+   *  upload dialog / advanced strip path is responsible for layering
+   *  operator overrides on top via ``pendingTimeSignatureOverride``). */
+  setDetected: (
+    bpm: number | null,
+    key: string | null,
+    timeSignature?: TimeSignature | null,
+  ) => void;
   /** One-shot key override consumed by useFixtureSwap when the next
    *  swap_ready arrives. Set by the AlmostReadyDialog when the user
    *  picks "Set manually" before uploading. Cleared after consumption
    *  so subsequent swaps fall back to server-detected key. */
   setPendingKeyOverride: (k: string | null) => void;
+  setPendingTimeSignatureOverride: (s: TimeSignature | null) => void;
   setMode: (m: DisplayMode) => void;
   toggleMode: () => void;
   setKiosk: (k: boolean) => void;
@@ -419,12 +448,15 @@ export const usePerformanceStore = create<PerformanceState>((set) => ({
   promptA: "heavy dubstep, deathstep, afxdump, growl heavy bass distortion",
   promptB: "daft punk style, beautiful, four to the floor, angelic",
   activeKey: "G# minor",
+  activeTimeSignature: DEFAULT_TIME_SIGNATURE,
   fixture: "",
   timbreName: null,
   structName: null,
   detectedBpm: null,
   detectedKey: null,
+  detectedTimeSignature: null,
   pendingKeyOverride: null,
+  pendingTimeSignatureOverride: null,
   mode: "graph",
   kiosk: false,
   paused: false,
@@ -508,18 +540,32 @@ export const usePerformanceStore = create<PerformanceState>((set) => ({
   setPromptA: (s) => set({ promptA: s }),
   setPromptB: (s) => set({ promptB: s }),
   setKey: (k) => set({ activeKey: k }),
+  setTimeSignature: (s) => set({ activeTimeSignature: s }),
   setFixture: (name) => set({ fixture: name }),
   setTimbreName: (name) => set({ timbreName: name }),
   setStructName: (name) => set({ structName: name }),
-  setDetected: (bpm, key) =>
+  setDetected: (bpm, key, timeSignature) =>
     set((s) => ({
       detectedBpm: bpm,
       detectedKey: key,
       // If user hasn't manually overridden the key (still on default),
       // adopt the detection. Caller can re-set if needed.
       activeKey: key ?? s.activeKey,
+      // Same adopt-on-detection rule for time signature. ``undefined``
+      // (the call site doesn't carry the field) leaves both detected
+      // and active values untouched; an explicit ``null`` clears the
+      // detected readout but still preserves activeTimeSignature so a
+      // failed re-detect doesn't silently revert the operator's pick.
+      ...(timeSignature !== undefined
+        ? {
+            detectedTimeSignature: timeSignature,
+            activeTimeSignature: timeSignature ?? s.activeTimeSignature,
+          }
+        : {}),
     })),
   setPendingKeyOverride: (k) => set({ pendingKeyOverride: k }),
+  setPendingTimeSignatureOverride: (s) =>
+    set({ pendingTimeSignatureOverride: s }),
   setMode: (m) => set({ mode: m }),
   toggleMode: () => set((s) => ({ mode: s.mode === "graph" ? "video" : "graph" })),
   setKiosk: (k) => set({ kiosk: k }),

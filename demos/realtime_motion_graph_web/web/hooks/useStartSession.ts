@@ -12,6 +12,7 @@ import { getConfig } from "@/lib/config";
 import { useLoraStore } from "@/store/useLoraStore";
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
+import { isTimeSignature } from "@/types/engine";
 import type { AudioSlice, SessionConfig } from "@/types/protocol";
 
 /**
@@ -200,11 +201,13 @@ export function useStartSession() {
       return;
     }
 
-    // Server-detected metadata flows into the perf store so the key select
-    // and HUD reflect it without manual sync.
+    // Server-detected metadata flows into the perf store so the key /
+    // time-signature selects + HUD reflect it without manual sync.
+    const rawTs = remote.detectedTimeSignature;
+    const detectedTs = rawTs != null && isTimeSignature(rawTs) ? rawTs : null;
     usePerformanceStore
       .getState()
-      .setDetected(remote.detectedBpm, remote.detectedKey);
+      .setDetected(remote.detectedBpm, remote.detectedKey, detectedTs);
     if (remote.loraCatalog.length > 0) {
       useLoraStore.getState().setCatalog(remote.loraCatalog);
     }

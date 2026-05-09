@@ -15,7 +15,7 @@ by the realtime demo to skip the prompt-independent half of per-connect
 preprocessing:
 
   ``<name>.sidecar.json``
-      bpm, key, duration metadata.
+      bpm, key, time_signature, duration metadata.
   ``<name>.sidecar.safetensors``
       pre-encoded source latent + semantic context_latent.
 
@@ -175,6 +175,12 @@ class FixtureSidecar:
     name: str
     bpm: int
     key: str
+    # Stringified meter numerator (matches the encoder boundary in
+    # ``Session.encode_text``, which prepends ``- timesignature: <s>``
+    # to the prompt). One of ``VALID_TIME_SIGNATURES`` (``"2"``, ``"3"``,
+    # ``"4"``, ``"6"``); defaults to ``"4"`` when older sidecars don't
+    # carry the field (loader uses ``meta.get(..., "4")``).
+    time_signature: str
     duration_s: float
     samples: int
     sample_rate: int
@@ -245,10 +251,15 @@ def fixture_sidecar(name: str, *, checkpoint: str) -> Optional[FixtureSidecar]:
     except Exception:
         return None
 
+    # ``time_signature`` was added after the original sidecar format;
+    # default to the model's standard ``"4"`` when older JSONs don't
+    # carry it so existing dataset entries keep loading without a
+    # format_version bump or a forced re-precompute.
     return FixtureSidecar(
         name=name,
         bpm=int(meta["bpm"]),
         key=str(meta["key"]),
+        time_signature=str(meta.get("time_signature", "4")),
         duration_s=float(meta["duration_s"]),
         samples=int(meta["samples"]),
         sample_rate=int(meta["sample_rate"]),

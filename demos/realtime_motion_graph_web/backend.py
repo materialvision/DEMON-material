@@ -29,7 +29,7 @@ torch._dynamo.config.disable = True
 from websockets.exceptions import ConnectionClosed
 
 from acestep.audio.key_detection import detect_key
-from acestep.constants import TASK_INSTRUCTIONS
+from acestep.constants import TASK_INSTRUCTIONS, VALID_TIME_SIGNATURES
 from acestep.engine.session import PreparedSource, Session
 from acestep.engine.trt.profile_manager import TRTProfileManager
 from acestep.fixtures import (
@@ -107,6 +107,27 @@ def _decode_audio_msg(audio_msg: bytes) -> torch.Tensor:
     return torch.from_numpy(arr.T.copy())[:2]
 
 
+_VALID_TIME_SIG_STRS = frozenset(str(s) for s in VALID_TIME_SIGNATURES)
+
+
+def _normalize_time_signature(value: object) -> str | None:
+    """Coerce a wire-side time-signature value to one of
+    ``VALID_TIME_SIGNATURES`` as a string. Returns ``None`` for
+    unrecognized input (caller falls back to the sidecar / default
+    instead of poisoning the encoder with junk)."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        s = str(int(value))
+        return s if s in _VALID_TIME_SIG_STRS else None
+    if isinstance(value, str):
+        s = value.strip()
+        return s if s in _VALID_TIME_SIG_STRS else None
+    return None
+
+
 def _resolve_bpm_key_source(
     session: Session,
     *,
@@ -115,15 +136,16 @@ def _resolve_bpm_key_source(
     samples: int,
     checkpoint: str,
     key_override: str | None = None,
-) -> tuple[PreparedSource, int, str]:
-    """Resolve (source, bpm, key) for a (fixture, audio) pair.
+    time_signature_override: str | None = None,
+) -> tuple[PreparedSource, int, str, str]:
+    """Resolve (source, bpm, key, time_signature) for a (fixture, audio) pair.
 
     For known fixtures with a sidecar present (JSON+safetensors in the
     dataset or local staging dir, matching checkpoint and audio length),
-    returns the cached source latent + context_latent and reads BPM /
-    key from the sidecar JSON. Skips librosa beat tracking, CNN key
-    detection, and ``Session.prepare_source`` — the prompt-independent
-    half of the per-connect work.
+    returns the cached source latent + context_latent and reads BPM,
+    key, and time_signature from the sidecar JSON. Skips librosa beat
+    tracking, CNN key detection, and ``Session.prepare_source`` — the
+    prompt-independent half of the per-connect work.
 
     Conditioning is *not* cached (see fixtures.py). Callers run
     ``Session.encode_text`` against ``source.latent`` themselves; with
@@ -136,14 +158,14 @@ def _resolve_bpm_key_source(
       - audio-length truncation mismatch (e.g. operator's TRT profile
         cap is smaller than the natural fixture length)
 
-    ``key_override`` is the operator's manual key override coming from
-    the swap_source path. It is **only** consulted on the live path —
-    when a sidecar hits, the sidecar's BPM and key are authoritative
-    for the test fixture (a previous fixture's dropdown value or any
-    other client-side staleness must not be allowed to mask the
-    fixture's recorded ground truth). After the swap, post-hoc dropdown
-    edits flow through ``mtype == "prompt"`` instead, where key
-    overrides do apply.
+    ``key_override`` and ``time_signature_override`` are the operator's
+    manual choices coming from the swap_source path. They are **only**
+    consulted on the live path: when a sidecar hits, the sidecar's
+    recorded values are authoritative for the test fixture (a previous
+    fixture's dropdown value or any other client-side staleness must
+    not be allowed to mask the fixture's recorded ground truth). After
+    the swap, post-hoc dropdown edits flow through ``mtype == "prompt"``
+    instead, where overrides do apply.
     """
     sc = _try_load_sidecar(fixture_name, checkpoint=checkpoint, samples=samples)
 
@@ -168,21 +190,40 @@ def _resolve_bpm_key_source(
                 f"[Server] sidecar hit ({fixture_name}): ignoring "
                 f"key_override={key_override!r}; sidecar wins (key={sc.key!r})"
             )
-        print(f"[Server] sidecar hit ({fixture_name}): bpm={bpm} key={key!r}")
-        return source, bpm, key
+        # Same precedence rule for time signature: sidecar.time_signature
+        # beats any client-supplied override on a hit.
+        time_signature = sc.time_signature
+        if (
+            time_signature_override
+            and time_signature_override != sc.time_signature
+        ):
+            print(
+                f"[Server] sidecar hit ({fixture_name}): ignoring "
+                f"time_signature_override={time_signature_override!r}; "
+                f"sidecar wins (time_signature={sc.time_signature!r})"
+            )
+        print(
+            f"[Server] sidecar hit ({fixture_name}): bpm={bpm} "
+            f"key={key!r} time_signature={time_signature!r}"
+        )
+        return source, bpm, key, time_signature
 
     # Live path: librosa BPM, CNN key detection, full prepare_source.
+    # No automated time-signature detector today; the operator override
+    # wins, otherwise we default to "4" (matches the model's most-
+    # supported meter).
     import librosa
     print("[Server] Detecting BPM + key...")
     mono_np = audio_in.waveform.mean(dim=0).numpy()
     bpm_raw, _ = librosa.beat.beat_track(y=mono_np, sr=SAMPLE_RATE)
     bpm = int(round(float(np.asarray(bpm_raw).flat[0])))
     key = key_override or detect_key(mono_np, SAMPLE_RATE)
-    print(f"  BPM: {bpm}  Key: {key}")
+    time_signature = time_signature_override or "4"
+    print(f"  BPM: {bpm}  Key: {key}  TimeSig: {time_signature}")
 
     print("[Server] Preparing source...")
     source = session.prepare_source(audio_in)
-    return source, bpm, key
+    return source, bpm, key, time_signature
 
 
 # ---------------------------------------------------------------------------
@@ -469,12 +510,14 @@ def handle_client(
 
     audio_in = Audio(waveform=waveform, sample_rate=SAMPLE_RATE)
 
-    source, detected_bpm, detected_key = _resolve_bpm_key_source(
-        session,
-        audio_in=audio_in,
-        fixture_name=fixture_name,
-        samples=int(waveform.shape[1]),
-        checkpoint=checkpoint,
+    source, detected_bpm, detected_key, detected_time_signature = (
+        _resolve_bpm_key_source(
+            session,
+            audio_in=audio_in,
+            fixture_name=fixture_name,
+            samples=int(waveform.shape[1]),
+            checkpoint=checkpoint,
+        )
     )
 
     # Two-conditioning cache for the live timbre-strength slider.
@@ -487,18 +530,20 @@ def handle_client(
     # forward pass per slider tick. Same approximation already used for
     # prompt crossfades. Recomputed on prompt change, on swap_source,
     # and on set_timbre_source / clear_timbre_source.
-    def _encode_cond_pair(tags, refer_latent, bpm, duration, key):
+    def _encode_cond_pair(tags, refer_latent, bpm, duration, key, time_signature):
         cs = session.encode_text(
             tags=tags,
             instruction=TASK_INSTRUCTIONS["cover"],
             refer_latent=None,
             bpm=bpm, duration=duration, key=key,
+            time_signature=time_signature,
         )
         cf = session.encode_text(
             tags=tags,
             instruction=TASK_INSTRUCTIONS["cover"],
             refer_latent=refer_latent,
             bpm=bpm, duration=duration, key=key,
+            time_signature=time_signature,
         )
         return cs, cf
 
@@ -516,7 +561,8 @@ def handle_client(
 
     print("[Server] Text encode (silence + self)...")
     cond_silence, cond_full = _encode_cond_pair(
-        prompt, source.latent, detected_bpm, audio_duration_s, detected_key,
+        prompt, source.latent, detected_bpm, audio_duration_s,
+        detected_key, detected_time_signature,
     )
     conditioning = cond_full  # default strength=1.0 == cond_full
 
@@ -574,6 +620,11 @@ def handle_client(
         "lora_pending_enable": list(initial_enable_ids),
         "bpm": detected_bpm,
         "key": detected_key,
+        # Echoed back so the client's "Detected: …" UI for time signature
+        # mirrors the keyscale path. Sidecar-aware on a hit; defaults to
+        # ``"4"`` on the live path. Operator can change it post-init via
+        # the prompt re-encode message (carries ``time_signature``).
+        "time_signature": detected_time_signature,
     }))
     ws.send(src_np.astype(np.float16).tobytes())
     print(f"[Server] Sent initial buffer ({len(src_np) / SAMPLE_RATE:.1f}s)")
@@ -599,6 +650,12 @@ def handle_client(
     source_ref = [source]
     bpm_ref = [detected_bpm]
     key_ref = [detected_key]
+    # Tracks the time signature actively baked into the latest cond_pair.
+    # Mirrors ``key_ref`` exactly: refreshed on prompt re-encode (operator
+    # override), on swap_source (next track's sidecar / override), and
+    # consulted by every encode_text call so timbre / structure refits
+    # honour the current meter.
+    time_sig_ref = [detected_time_signature]
     duration_ref = [audio_duration_s]
     n_channels_ref = [n_channels]
     # Live timbre strength: 1.0 == cond_full (full timbre reference);
@@ -766,6 +823,7 @@ def handle_client(
             new_pair = _encode_cond_pair(
                 prompt_text[0], timbre_latent,
                 bpm_ref[0], duration_ref[0], key_ref[0],
+                time_sig_ref[0],
             )
             cond_pair_ref[0] = new_pair
             stream.conditioning = _blend_for_strength(
@@ -932,12 +990,23 @@ def handle_client(
                             # Re-encode on server. Prefer the key sent by the
                             # client (operator override); fall back to the
                             # auto-detected key from the loaded source.
+                            # Time signature: same precedence — explicit
+                            # override wins, otherwise carry the current
+                            # value forward. Unknown / invalid values are
+                            # ignored (keep the active ref) rather than
+                            # poisoning the encoder with junk.
+                            ts_override = _normalize_time_signature(
+                                data.get("time_signature")
+                            )
+                            if ts_override is not None:
+                                time_sig_ref[0] = ts_override
                             new_pair = _encode_cond_pair(
                                 data["tags"],
                                 _active_refer_latent(),
                                 bpm_ref[0],
                                 duration_ref[0],
                                 data.get("key") or key_ref[0],
+                                time_sig_ref[0],
                             )
                             cond_pair_ref[0] = new_pair
                             stream.conditioning = _blend_for_strength(
@@ -1072,6 +1141,7 @@ def handle_client(
                                 bpm_ref[0],
                                 duration_ref[0],
                                 key_ref[0],
+                                time_sig_ref[0],
                             )
                             cond_pair_ref[0] = new_pair
                             stream.conditioning = _blend_for_strength(
@@ -1194,6 +1264,11 @@ def handle_client(
                                 swap_pending["bytes"] = audio_msg
                                 swap_pending["tags"] = tags
                                 swap_pending["key"] = data.get("key")
+                                swap_pending["time_signature"] = (
+                                    _normalize_time_signature(
+                                        data.get("time_signature")
+                                    )
+                                )
                                 swap_pending["fixture_name"] = data.get("fixture_name")
             except TimeoutError:
                 pass
@@ -1241,12 +1316,14 @@ def handle_client(
             audio_msg = swap_pending.get("bytes")
             tags = swap_pending.get("tags")
             requested_key = swap_pending.get("key")
+            requested_time_sig = swap_pending.get("time_signature")
             new_fixture_name = swap_pending.get("fixture_name")
             if audio_msg is None:
                 return
             swap_pending["bytes"] = None
             swap_pending["tags"] = None
             swap_pending["key"] = None
+            swap_pending["time_signature"] = None
             swap_pending["fixture_name"] = None
         try:
             new_wf = _decode_audio_msg(audio_msg)
@@ -1281,13 +1358,16 @@ def handle_client(
                     return
 
             new_audio_in = Audio(waveform=new_wf, sample_rate=SAMPLE_RATE)
-            new_source, new_bpm, new_key = _resolve_bpm_key_source(
-                session,
-                audio_in=new_audio_in,
-                fixture_name=new_fixture_name,
-                samples=int(new_wf.shape[1]),
-                checkpoint=checkpoint,
-                key_override=requested_key,
+            new_source, new_bpm, new_key, new_time_sig = (
+                _resolve_bpm_key_source(
+                    session,
+                    audio_in=new_audio_in,
+                    fixture_name=new_fixture_name,
+                    samples=int(new_wf.shape[1]),
+                    checkpoint=checkpoint,
+                    key_override=requested_key,
+                    time_signature_override=requested_time_sig,
+                )
             )
             # Use the active timbre reference if one is uploaded; otherwise
             # the new playback source's own latent. Override persists
@@ -1299,7 +1379,7 @@ def handle_client(
             new_pair = _encode_cond_pair(
                 tags,
                 tl if tl is not None else new_source.latent,
-                new_bpm, new_audio_duration_s, new_key,
+                new_bpm, new_audio_duration_s, new_key, new_time_sig,
             )
             new_cond = _blend_for_strength(
                 new_pair[0], new_pair[1], timbre_strength_ref[0],
@@ -1330,6 +1410,7 @@ def handle_client(
                         pass
             bpm_ref[0] = new_bpm
             key_ref[0] = new_key
+            time_sig_ref[0] = new_time_sig
             duration_ref[0] = new_audio_duration_s
             prompt_text[0] = tags
             r = runner_holder[0]
@@ -1363,6 +1444,7 @@ def handle_client(
                     "channels": new_n_channels,
                     "bpm": new_bpm,
                     "key": new_key,
+                    "time_signature": new_time_sig,
                 }))
                 ws.send(new_src_np.astype(np.float16).tobytes())
             print(f"[Server] Source swap complete ({len(new_src_np) / SAMPLE_RATE:.1f}s)")

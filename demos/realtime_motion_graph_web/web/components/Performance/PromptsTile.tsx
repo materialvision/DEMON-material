@@ -8,6 +8,7 @@ export function PromptsTile() {
   const promptB = usePerformanceStore((s) => s.promptB);
   const blend = usePerformanceStore((s) => s.blend);
   const activeKey = usePerformanceStore((s) => s.activeKey);
+  const activeTimeSignature = usePerformanceStore((s) => s.activeTimeSignature);
   const setPromptA = usePerformanceStore((s) => s.setPromptA);
   const setPromptB = usePerformanceStore((s) => s.setPromptB);
   const setBlend = usePerformanceStore((s) => s.setBlend);
@@ -16,7 +17,7 @@ export function PromptsTile() {
     const remote = useSessionStore.getState().remote;
     // Server expects `tags` as the prompt string. Blend is handled via
     // params; for the prompt-text wire we just pick A (matches app.js).
-    if (remote) remote.sendPrompt(promptA, activeKey);
+    if (remote) remote.sendPrompt(promptA, activeKey, activeTimeSignature);
   }
 
   return (

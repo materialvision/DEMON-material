@@ -12,6 +12,7 @@ import { LOCAL_MODE } from "@/lib/runtime";
 import { useCustomTracksStore } from "@/store/useCustomTracksStore";
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
+import type { TimeSignature } from "@/types/engine";
 
 import { AlmostReadyDialog } from "./AlmostReadyDialog";
 
@@ -119,14 +120,21 @@ export function LiteTrackCarousel() {
     }
   }
 
-  function commitPending(keyOverride: string | null) {
+  function commitPending(
+    keyOverride: string | null,
+    timeSignatureOverride: TimeSignature | null,
+  ) {
     if (!pending) return;
     const { decoded, fileName, originalFile } = pending;
     addCustomTrack(fileName, decoded, originalFile);
+    const perf = usePerformanceStore.getState();
     if (keyOverride) {
-      const perf = usePerformanceStore.getState();
       perf.setPendingKeyOverride(keyOverride);
       perf.setKey(keyOverride);
+    }
+    if (timeSignatureOverride) {
+      perf.setPendingTimeSignatureOverride(timeSignatureOverride);
+      perf.setTimeSignature(timeSignatureOverride);
     }
     setFixture(fileName);
     setPending(null);
@@ -200,7 +208,12 @@ export function LiteTrackCarousel() {
           fileName={pending.fileName}
           wasTrimmed={pending.wasTrimmed}
           defaultKey={usePerformanceStore.getState().activeKey}
-          onContinue={({ keyOverride }) => commitPending(keyOverride)}
+          defaultTimeSignature={
+            usePerformanceStore.getState().activeTimeSignature
+          }
+          onContinue={({ keyOverride, timeSignatureOverride }) =>
+            commitPending(keyOverride, timeSignatureOverride)
+          }
           onPickAnother={() => {
             setPending(null);
             setTimeout(() => fileInputRef.current?.click(), 0);

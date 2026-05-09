@@ -83,9 +83,10 @@ export function useKeyboardShortcuts() {
     }
 
     function sendPrompt(): void {
-      const { promptA, activeKey } = usePerformanceStore.getState();
+      const { promptA, activeKey, activeTimeSignature } =
+        usePerformanceStore.getState();
       const remote = useSessionStore.getState().remote;
-      if (remote) remote.sendPrompt(promptA, activeKey);
+      if (remote) remote.sendPrompt(promptA, activeKey, activeTimeSignature);
     }
 
     function cycleDcwMode(): void {

@@ -90,6 +90,7 @@ export class RemoteBackend extends EventTarget {
   loraDir = "";
   detectedBpm: number | null = null;
   detectedKey: string | null = null;
+  detectedTimeSignature: string | null = null;
 
   private _pending: PendingPayload | null;
   private _pendingSwap: SwapReadyMessage | null = null;
@@ -211,6 +212,7 @@ export class RemoteBackend extends EventTarget {
             this.loraDir = msg.lora_dir || "";
             this.detectedBpm = msg.bpm ?? null;
             this.detectedKey = msg.key ?? null;
+            this.detectedTimeSignature = msg.time_signature ?? null;
             phase = "initial-buffer";
           } catch (e) {
             reject(e);
@@ -430,14 +432,20 @@ export class RemoteBackend extends EventTarget {
     } catch {}
   }
 
-  sendPrompt(tags: string, key?: string): void {
+  sendPrompt(tags: string, key?: string, timeSignature?: string): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     try {
-      const msg: { type: string; tags: string; key?: string } = {
+      const msg: {
+        type: string;
+        tags: string;
+        key?: string;
+        time_signature?: string;
+      } = {
         type: "prompt",
         tags,
       };
       if (key) msg.key = key;
+      if (timeSignature) msg.time_signature = timeSignature;
       this.ws.send(JSON.stringify(msg));
     } catch {}
   }
@@ -606,6 +614,7 @@ export class RemoteBackend extends EventTarget {
     tags?: string,
     key?: string,
     fixtureName?: string,
+    timeSignature?: string,
   ): boolean {
     if (this.ws?.readyState !== WebSocket.OPEN) return false;
     try {
@@ -614,12 +623,14 @@ export class RemoteBackend extends EventTarget {
         tags?: string;
         key?: string;
         fixture_name?: string;
+        time_signature?: string;
       } = {
         type: "swap_source",
       };
       if (tags) msg.tags = tags;
       if (key) msg.key = key;
       if (fixtureName) msg.fixture_name = fixtureName;
+      if (timeSignature) msg.time_signature = timeSignature;
       this.ws.send(JSON.stringify(msg));
       const samples = interleaved.length / channels;
       const hdr = new ArrayBuffer(8);

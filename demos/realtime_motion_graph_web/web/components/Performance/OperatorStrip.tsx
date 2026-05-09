@@ -15,7 +15,13 @@ import { useCustomTracksStore } from "@/store/useCustomTracksStore";
 import { useLoraStore } from "@/store/useLoraStore";
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
-import { VALID_KEYSCALES } from "@/types/engine";
+import {
+  TIME_SIGNATURE_LABELS,
+  VALID_KEYSCALES,
+  VALID_TIME_SIGNATURES,
+  isTimeSignature,
+  type TimeSignature,
+} from "@/types/engine";
 
 import { AlmostReadyDialog } from "./AlmostReadyDialog";
 import { MidiBadge } from "./MidiBadge";
@@ -25,6 +31,7 @@ export function OperatorStrip() {
   const [fixtures, setFixtures] = useState<string[]>([]);
   const fixture = usePerformanceStore((s) => s.fixture);
   const activeKey = usePerformanceStore((s) => s.activeKey);
+  const activeTimeSignature = usePerformanceStore((s) => s.activeTimeSignature);
   const kiosk = usePerformanceStore((s) => s.kiosk);
   const paused = usePerformanceStore((s) => s.paused);
   const showKbdHints = usePerformanceStore((s) => s.showKbdHints);
@@ -32,6 +39,7 @@ export function OperatorStrip() {
   const smoothMs = usePerformanceStore((s) => s.smoothMs);
   const setFixture = usePerformanceStore((s) => s.setFixture);
   const setKey = usePerformanceStore((s) => s.setKey);
+  const setTimeSignature = usePerformanceStore((s) => s.setTimeSignature);
   const toggleKiosk = usePerformanceStore((s) => s.toggleKiosk);
   const overlayOpen = useCurveStore((s) => s.overlayOpen);
   const toggleOverlay = useCurveStore((s) => s.toggleOverlay);
@@ -103,14 +111,21 @@ export function OperatorStrip() {
     }
   }
 
-  function commitPending(keyOverride: string | null) {
+  function commitPending(
+    keyOverride: string | null,
+    timeSignatureOverride: TimeSignature | null,
+  ) {
     if (!pending) return;
     const { decoded, fileName, originalFile } = pending;
     addCustomTrack(fileName, decoded, originalFile);
+    const perf = usePerformanceStore.getState();
     if (keyOverride) {
-      const perf = usePerformanceStore.getState();
       perf.setPendingKeyOverride(keyOverride);
       perf.setKey(keyOverride);
+    }
+    if (timeSignatureOverride) {
+      perf.setPendingTimeSignatureOverride(timeSignatureOverride);
+      perf.setTimeSignature(timeSignatureOverride);
     }
     setFixture(fileName);
     setPending(null);
@@ -221,6 +236,41 @@ export function OperatorStrip() {
           </option>
         ))}
       </select>
+      <select
+        id="time-sig-select"
+        className="fixture-select"
+        title="Time signature — sidecar / default; tells the model the song's meter (does not change tempo or beat grid)"
+        value={activeTimeSignature}
+        onChange={(e) => {
+          const newTs = e.target.value;
+          if (!isTimeSignature(newTs) || newTs === activeTimeSignature) return;
+          // Same confirm-on-change UX as the key dropdown: meter is a
+          // model hint, not a tempo/beat-grid edit. The wording mirrors
+          // the keyscale confirm exactly so operators read both
+          // controls the same way.
+          const ok =
+            typeof window === "undefined" ||
+            window.confirm(
+              `Change time signature to "${TIME_SIGNATURE_LABELS[newTs]}"?\n\nThis tells the model the song's meter. It does NOT change the song's tempo or beat grid.`,
+            );
+          if (!ok) {
+            e.currentTarget.value = activeTimeSignature;
+            return;
+          }
+          setTimeSignature(newTs);
+          const remote = useSessionStore.getState().remote;
+          if (remote) {
+            const { promptA, activeKey: ak } = usePerformanceStore.getState();
+            remote.sendPrompt(promptA, ak, newTs);
+          }
+        }}
+      >
+        {VALID_TIME_SIGNATURES.map((ts) => (
+          <option key={ts} value={ts}>
+            {TIME_SIGNATURE_LABELS[ts]}
+          </option>
+        ))}
+      </select>
       <button
         id="kiosk-toggle"
         className={`pause-btn${kiosk ? " active" : ""}`}
@@ -308,7 +358,10 @@ export function OperatorStrip() {
           fileName={pending.fileName}
           wasTrimmed={pending.wasTrimmed}
           defaultKey={activeKey}
-          onContinue={({ keyOverride }) => commitPending(keyOverride)}
+          defaultTimeSignature={activeTimeSignature}
+          onContinue={({ keyOverride, timeSignatureOverride }) =>
+            commitPending(keyOverride, timeSignatureOverride)
+          }
           onPickAnother={() => {
             setPending(null);
             setTimeout(() => fileInputRef.current?.click(), 0);
