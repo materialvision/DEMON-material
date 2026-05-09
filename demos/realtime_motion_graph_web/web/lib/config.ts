@@ -6,6 +6,8 @@ import { usePerformanceStore } from "@/store/usePerformanceStore";
 import {
   DCW_MODES,
   DCW_WAVELETS,
+  DEFAULT_TIME_SIGNATURE,
+  isTimeSignature,
   type DcwMode,
   type DcwWavelet,
 } from "@/types/engine";
@@ -33,6 +35,11 @@ export interface RtmgConfigEngine {
   steps: number;
   fast_vae: boolean;
   key: string;
+  /** Default meter numerator the operator dropdown starts on. Mirrors
+   * `key` in posture: the server's session-init resolver still wins on
+   * sidecar hits, so this is purely a UI seed for the manual "Override"
+   * control. Allowed values: "2" | "3" | "4" | "6". */
+  time_signature: string;
   /** Filename stems to auto-enable on first catalog load. Empty falls
    * back to the count-rule in useLoraStore (first two from the sorted
    * catalog, with name-fallback per slot). */
@@ -77,6 +84,7 @@ export const DEFAULT_CONFIG: RtmgConfig = {
     steps: 8,
     fast_vae: false,
     key: "G# minor",
+    time_signature: DEFAULT_TIME_SIGNATURE,
     enabled_loras: [],
   },
   prompts: {
@@ -211,6 +219,9 @@ export function applyConfig(c: RtmgConfig): void {
     promptB: c.prompts.b,
     blend: c.prompts.blend,
     activeKey: c.engine.key,
+    activeTimeSignature: isTimeSignature(c.engine.time_signature)
+      ? c.engine.time_signature
+      : DEFAULT_TIME_SIGNATURE,
     seed: c.seed,
     dcwEnabled:
       typeof c.controls.dcw_enabled === "boolean"

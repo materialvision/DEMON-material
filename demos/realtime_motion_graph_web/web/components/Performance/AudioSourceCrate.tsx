@@ -12,6 +12,7 @@ import { LOCAL_MODE } from "@/lib/runtime";
 import { useCustomTracksStore } from "@/store/useCustomTracksStore";
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
+import type { TimeSignature } from "@/types/engine";
 
 import { AlmostReadyDialog } from "./AlmostReadyDialog";
 
@@ -139,17 +140,29 @@ export function AudioSourceCrate() {
     }
   }
 
-  function commitPending(keyOverride: string | null) {
+  function commitPending(
+    keyOverride: string | null,
+    timeSignatureOverride: TimeSignature | null,
+  ) {
     if (!pending) return;
     const { decoded, fileName, originalFile } = pending;
     addCustomTrack(fileName, decoded, originalFile);
+    const perf = usePerformanceStore.getState();
     if (keyOverride) {
-      const perf = usePerformanceStore.getState();
       perf.setPendingKeyOverride(keyOverride);
       // Pre-set activeKey so the swap_source send carries the override
       // as the model hint — useFixtureSwap reads activeKey when calling
       // remote.sendSwapSource().
       perf.setKey(keyOverride);
+    }
+    if (timeSignatureOverride) {
+      // Mirror the keyscale override: stash a one-shot value so the
+      // swap_ready handler in useFixtureSwap can re-apply it (and tell
+      // the server) even though the server's own resolver won't have
+      // it during the in-flight swap. Pre-set activeTimeSignature so
+      // the same UI control reflects the choice immediately.
+      perf.setPendingTimeSignatureOverride(timeSignatureOverride);
+      perf.setTimeSignature(timeSignatureOverride);
     }
     setFixture(fileName);
     setPending(null);
@@ -264,7 +277,12 @@ export function AudioSourceCrate() {
           fileName={pending.fileName}
           wasTrimmed={pending.wasTrimmed}
           defaultKey={usePerformanceStore.getState().activeKey}
-          onContinue={({ keyOverride }) => commitPending(keyOverride)}
+          defaultTimeSignature={
+            usePerformanceStore.getState().activeTimeSignature
+          }
+          onContinue={({ keyOverride, timeSignatureOverride }) =>
+            commitPending(keyOverride, timeSignatureOverride)
+          }
           onPickAnother={() => {
             setPending(null);
             // Re-open the picker on the next tick so the file input

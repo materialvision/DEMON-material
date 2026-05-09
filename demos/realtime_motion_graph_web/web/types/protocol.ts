@@ -20,6 +20,11 @@ export interface SessionConfig {
   steps?: number;
   fast_vae?: boolean;
   key?: string;
+  /** One of "2" | "3" | "4" | "6" — meter numerator that the encoder
+   *  bakes into the prompt. Same intentional-omission rule as `key`:
+   *  the server resolves it from the fixture sidecar (or default "4")
+   *  and echoes the result back in `ready.time_signature`. */
+  time_signature?: string;
   enabled_loras?: string[];
   prompt?: string;
   lora_strengths?: Record<string, number>;
@@ -37,6 +42,7 @@ export interface ReadyMessage {
   lora_dir?: string;
   bpm?: number | null;
   key?: string | null;
+  time_signature?: string | null;
 }
 
 /** Structured init failure from the server. */
@@ -67,6 +73,7 @@ export interface SwapReadyMessage {
   duration: number;
   channels: number;
   key?: string;
+  time_signature?: string;
 }
 
 export interface SwapFailedMessage {

@@ -4,16 +4,16 @@ For each fixture in :data:`acestep.fixtures.KNOWN_FIXTURES` this writes
 a ``<name>.sidecar.json`` and ``<name>.sidecar.safetensors`` pair into
 ``--out`` (default ``out/fixture_sidecars``):
 
-  JSON   bpm, key, post-truncation duration / sample counts, sample
-         rate, channels, checkpoint, format_version.
+  JSON   bpm, key, time_signature, post-truncation duration / sample
+         counts, sample rate, channels, checkpoint, format_version.
 
   Safetensors
          Tensors: latent, context_latent. Conditioning is *not* cached
          (see fixtures.py for rationale).
 
-The script is idempotent: existing bpm / key values are preserved
-(so an operator override survives a re-run). Pass ``--force`` to
-overwrite from scratch.
+The script is idempotent: existing bpm / key / time_signature values
+are preserved (so an operator override survives a re-run). Pass
+``--force`` to overwrite from scratch.
 
 Pipeline per fixture:
   1. Download the WAV (cache hit if already present).
@@ -23,8 +23,10 @@ Pipeline per fixture:
      NOT applied here so the precompute is profile-agnostic; the
      runtime only uses the cache when the live truncated length
      matches the recorded ``samples`` field.
-  3. Resolve bpm / key. Existing JSON wins; otherwise compute bpm via
-     librosa and parse key from the filename suffix.
+  3. Resolve bpm / key / time_signature. Existing JSON wins;
+     otherwise compute bpm via librosa, parse key from the filename
+     suffix, and default time_signature to "4" (no automated detector
+     today; operators can edit the JSON to override).
   4. ``Session.prepare_source`` -> raw VAE latent + semantic
      context_latent.
   5. Write the JSON and safetensors.
@@ -57,6 +59,7 @@ import torch
 from safetensors.torch import save_file as safetensors_save
 
 from acestep.engine.session import Session
+from acestep.constants import VALID_TIME_SIGNATURES
 from acestep.fixtures import (
     KNOWN_FIXTURES,
     SIDECAR_FORMAT_VERSION,
@@ -144,8 +147,25 @@ def precompute_one(
         key = parsed
         key_source = "filename"
 
+    # time_signature: prefer existing; else default to "4" (no detector
+    # today; the model itself accepts "2"/"3"/"4"/"6", and most fixtures
+    # are 4/4). Operator can edit the JSON to override before re-running
+    # without --force.
+    valid_ts = {str(s) for s in VALID_TIME_SIGNATURES}
+    existing_ts = existing.get("time_signature")
+    if isinstance(existing_ts, str) and existing_ts in valid_ts:
+        time_signature = existing_ts
+        ts_source = "existing JSON"
+    elif isinstance(existing_ts, (int, float)) and str(int(existing_ts)) in valid_ts:
+        time_signature = str(int(existing_ts))
+        ts_source = "existing JSON"
+    else:
+        time_signature = "4"
+        ts_source = "default"
+
     print(
         f"  bpm={bpm} ({bpm_source})  key={key!r} ({key_source})  "
+        f"time_signature={time_signature!r} ({ts_source})  "
         f"dur={duration_s:.2f}s  samples={samples}"
     )
 
@@ -160,6 +180,7 @@ def precompute_one(
         "checkpoint": checkpoint,
         "bpm": bpm,
         "key": key,
+        "time_signature": time_signature,
         "duration_s": duration_s,
         "samples": samples,
         "sample_rate": SAMPLE_RATE,
@@ -193,7 +214,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument(
         "--force", action="store_true",
-        help="Overwrite existing JSON sidecars instead of preserving bpm/key/tags",
+        help="Overwrite existing JSON sidecars instead of preserving "
+             "bpm/key/time_signature/tags",
     )
     parser.add_argument(
         "--only", action="append", default=[], metavar="NAME",
