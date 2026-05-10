@@ -34,6 +34,12 @@ export interface RtmgConfigEngine {
   crop: number;
   steps: number;
   fast_vae: boolean;
+  /** Route long sources through the walk_window_s (60s) DiT engine by
+   * sliding a fixed-T window across the song each tick. Lets a 240s
+   * song play through the 60s engine without paying the 240s engine's
+   * parameter-update latency. Backend ignores when source ≤ window. */
+  walk_window?: boolean;
+  walk_window_s?: number;
   key: string;
   /** Default meter numerator the operator dropdown starts on. Mirrors
    * `key` in posture: the server's session-init resolver still wins on
@@ -83,6 +89,8 @@ export const DEFAULT_CONFIG: RtmgConfig = {
     crop: 0,
     steps: 8,
     fast_vae: false,
+    walk_window: false,
+    walk_window_s: 60,
     key: "G# minor",
     time_signature: DEFAULT_TIME_SIGNATURE,
     enabled_loras: [],

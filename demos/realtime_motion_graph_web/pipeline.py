@@ -59,6 +59,8 @@ class PipelineRunner:
         motion_val, motion_lock,
         on_audio_ready=None,
         before_tick=None,
+        walk_window=False,
+        walk_window_s=60.0,
     ):
         self.session = session
         self.stream = stream  # StreamHandle
@@ -93,6 +95,26 @@ class PipelineRunner:
         # The server's apply_pending() callback drains both queues each
         # iteration so they share one rendezvous point.
         self.before_tick = before_tick
+
+        # Walk-window mode: drive the DiT with a fixed-T window sliced
+        # from a longer pre-encoded source so the 60s TRT engine can
+        # serve a multi-minute song. The source is split into
+        # walk_window_s chunks (typically 60s == one engine slot worth
+        # of latent); the runner picks the chunk that contains the
+        # current playhead and feeds that SAME slice to the DiT for the
+        # duration of the chunk. The slice only advances when the
+        # playhead crosses a chunk boundary — not every tick — so the
+        # ring buffer gets a steady source to denoise against and the
+        # engine's parameter-update latency stays at the 60s engine's
+        # smaller value.
+        #
+        # Requires ``stream.source.latent`` and
+        # ``stream.source.context_latent`` to have been pre-encoded
+        # against the FULL source (vae_encode profile must fit the
+        # whole song even though the DiT/decoder run at walk_window_s).
+        self.walk_window = bool(walk_window)
+        self.walk_window_s = float(walk_window_s)
+        self.walk_window_T = int(round(self.walk_window_s * 25.0))
 
         # Predictive decode: rolling EMA of (tick + decode) wall time. Each
         # decode targets ``playhead + _predicted_advance_s`` so that by the
@@ -135,10 +157,16 @@ class PipelineRunner:
     def _rebuild_silence_latent(self) -> None:
         """(Re)build the silence latent used by hint-strength blending.
 
-        Tracks the current ``stream.source`` length, so call this after a
-        source swap if the new source has a different latent length.
+        Picks the right T for the *current* hint-blend target: in walk
+        mode that's the per-tick window slice (``walk_window_T``); in
+        non-walk mode it's the full source latent. ``walk_window=True``
+        with a source shorter than the window degrades to non-walk
+        per-tick (``walk_active`` is computed in ``run()``) and the
+        per-tick guard there will rebuild this if the size disagrees.
         """
-        T_frames = self.stream.source.latent.tensor.shape[1]
+        full_src_T = self.stream.source.latent.tensor.shape[1]
+        walk_active = self.walk_window and full_src_T > self.walk_window_T
+        T_frames = self.walk_window_T if walk_active else full_src_T
         self._silence_latent = EmptyLatent().execute(
             model=self.stream.model, duration=T_frames / 25.0,
         )["latent"]
@@ -196,6 +224,17 @@ class PipelineRunner:
         last_channel_gains = [1.0] * (len(CHANNEL_GROUPS) + len(KEYSTONE_CHANNELS))
         current_shift = self.stream.base_kwargs["shift"]
         prev_src_T = self.stream.source.latent.tensor.shape[1]
+        # Source-tensor identity tracking. Lets walk mode detect a source
+        # swap when the new song happens to have the same latent length as
+        # the old one (T-only check would miss it).
+        prev_src_id = id(self.stream.source.latent.tensor)
+        # Walk-mode chunk anchor (in latent frames). -1 forces the first
+        # walk-active tick to "transition" into chunk 0 and reset caches.
+        prev_walk_w0 = -1
+        # Cached slice tensors for the active chunk. Invalidated whenever
+        # ``prev_walk_w0`` is reset (source swap or chunk transition).
+        cached_live_src_lat = None
+        cached_live_ctx_raw_t = None
 
         while self.running[0]:
             if self.before_tick is not None:
@@ -205,18 +244,71 @@ class PipelineRunner:
                 # the tick body.
                 self.before_tick()
 
-            # If a swap changed the source latent length, the cached
-            # last_latent / last_wav / last_decode_pos are dimensioned
-            # against the old source and would crash both the feedback
-            # blend (source_lat = ... + feedback * last_latent) and the
-            # skip-decode MSE check below. Reset them so the next tick
-            # re-initializes against the new source cleanly.
-            cur_src_T = self.stream.source.latent.tensor.shape[1]
-            if cur_src_T != prev_src_T:
+            # Walk-window mode selection. Only active when the source
+            # actually has more frames than the window — short sources
+            # fall back to whole-source submission so walk_window=True is
+            # safe to leave on regardless of song length.
+            full_src_T = self.stream.source.latent.tensor.shape[1]
+            walk_active = self.walk_window and full_src_T > self.walk_window_T
+
+            # Pick the static chunk that covers the current playhead.
+            # The slice stays the same for the entire walk_window_s of
+            # playback that sits inside this chunk — only when the
+            # playhead crosses into the next chunk does ``w0`` advance.
+            # Use ``playhead + predicted_advance`` so the swap happens a
+            # tick or two before the boundary, giving the new chunk's
+            # ring-buffer warmup head room to land before the listener
+            # actually crosses.
+            walk_w0 = -1
+            walk_w1 = -1
+            walk_chunk_start_s = 0.0
+            if walk_active:
+                playhead_now_s = self.audio_eng.position / SAMPLE_RATE
+                advance_s_for_chunk = min(
+                    self._predicted_advance_s, self.walk_window_s * 0.5,
+                )
+                # Wrap target through the playable buffer length so the
+                # song-end → song-start loop transitions cleanly back to
+                # chunk 0 instead of jumping past the last chunk.
+                buf_dur_s = max(
+                    1e-6, len(self.audio_eng.current) / SAMPLE_RATE,
+                )
+                target_song_s = (
+                    (playhead_now_s + advance_s_for_chunk) % buf_dur_s
+                )
+                chunk_idx = int(target_song_s // self.walk_window_s)
+                walk_chunk_start_s = chunk_idx * self.walk_window_s
+                walk_w0 = int(round(walk_chunk_start_s * 25.0))
+                # Anchor the final chunk to the song end when the song
+                # length isn't an exact multiple of walk_window_s — keeps
+                # T == walk_window_T without padding tricks.
+                walk_w0 = max(0, min(walk_w0, full_src_T - self.walk_window_T))
+                walk_w1 = walk_w0 + self.walk_window_T
+                walk_chunk_start_s = walk_w0 / 25.0
+
+            # Reset cached per-tick state on either:
+            #   - a source identity / length change (swap_source path), or
+            #   - a walk-mode chunk transition (new slice = new init noise
+            #     story for the ring buffer; the previous chunk's cached
+            #     last_latent is in the wrong song-time region).
+            cur_src_id = id(self.stream.source.latent.tensor)
+            cur_src_T = self.walk_window_T if walk_active else full_src_T
+            chunk_changed = walk_active and walk_w0 != prev_walk_w0
+            if (
+                cur_src_id != prev_src_id
+                or cur_src_T != prev_src_T
+                or chunk_changed
+            ):
                 last_latent = None
                 last_wav = None
                 last_decode_pos = None
+                prev_src_id = cur_src_id
                 prev_src_T = cur_src_T
+                cached_live_src_lat = None
+                cached_live_ctx_raw_t = None
+                if walk_active:
+                    prev_walk_w0 = walk_w0
+
             if self.use_midi:
                 raw = self.midi_knobs.get_all_values()
             else:
@@ -226,10 +318,33 @@ class PipelineRunner:
                 if self.use_sde:
                     raw["periodicity"] = 0.0
 
-            # Actual source latent length. Hardcoded T=1500 is a 60s default
-            # but sources can be shorter (e.g. 25s → 645 frames). Curves must
-            # match this T or broadcasting fails in _init_slot / _step_sde.
-            src_T = self.stream.source.latent.tensor.shape[1]
+            # Materialize the live source / context for this tick. In
+            # walk mode this is the static chunk slice and is built once
+            # per chunk transition (cached_live_* are reset above). In
+            # non-walk mode the StreamHandle's source latent is used as-
+            # is.
+            if walk_active:
+                if cached_live_src_lat is None:
+                    full_src_t = self.stream.source.latent.tensor
+                    full_ctx_t = self.stream.source.context_latent.tensor
+                    cached_live_src_lat = Latent(
+                        tensor=full_src_t[:, walk_w0:walk_w1, :].contiguous(),
+                    )
+                    cached_live_ctx_raw_t = (
+                        full_ctx_t[:, walk_w0:walk_w1, :].contiguous()
+                    )
+                live_src_lat = cached_live_src_lat
+                live_ctx_raw_t = cached_live_ctx_raw_t
+                win_start_s = walk_chunk_start_s
+            else:
+                live_src_lat = self.stream.source.latent
+                live_ctx_raw_t = None
+                win_start_s = 0.0
+
+            # Active source latent length seen by the DiT this tick. Curves
+            # built below must match this T or broadcasting fails in
+            # _init_slot / _step_sde. Walk mode pins this to the window.
+            src_T = self.walk_window_T if walk_active else full_src_T
 
             k1 = raw[self.k1_name]
             seed = int(raw["seed"] * 1000) if self.use_midi else self.SEED
@@ -256,16 +371,44 @@ class PipelineRunner:
                         self.engine_obj.set_lora_strength(desc.id, lora_str)
 
             hint_str = self.midi_knobs.get_param("hint_strength") if self.use_midi else 1.0
-            if self._hint_dirty or abs(hint_str - last_hint_str) > 0.02:
-                self._hint_dirty = False
+            # Silence latent must match the T of the latent it's blended
+            # against. walk_active can flip mid-session if a swap drops
+            # the source below the window — rebuild on demand here so
+            # the blend below sees consistent shapes either way. Cheap
+            # (allocates one bf16 tensor) and only fires on the actual
+            # transitions, not every tick.
+            needed_silence_T = src_T
+            if self._silence_latent.tensor.shape[1] != needed_silence_T:
+                self._rebuild_silence_latent()
+            if walk_active:
+                # Walk mode does the silence/context blend per-tick on
+                # the sliced context, since the slice changes every tick
+                # and the cached stream.context_latent (full-song) is
+                # the wrong T to feed the DiT. The result is passed via
+                # tick kwargs below; stream.context_latent stays
+                # untouched.
+                if hint_str >= 1.0:
+                    live_ctx_lat = Latent(tensor=live_ctx_raw_t)
+                else:
+                    live_ctx_lat = LatentBlend().execute(
+                        latent_a=self._silence_latent,
+                        latent_b=Latent(tensor=live_ctx_raw_t),
+                        alpha=hint_str,
+                    )["latent"]
                 last_hint_str = hint_str
-                self._update_hint_strength(hint_str)
+                self._hint_dirty = False
+            else:
+                live_ctx_lat = None
+                if self._hint_dirty or abs(hint_str - last_hint_str) > 0.02:
+                    self._hint_dirty = False
+                    last_hint_str = hint_str
+                    self._update_hint_strength(hint_str)
 
             noise_sharing = self.midi_knobs.get_param("noise_share") if self.use_midi else 0.0
 
             source_lat = None
             if feedback > 0.0 and last_latent is not None:
-                src_tensor = self.stream.source.latent.tensor
+                src_tensor = live_src_lat.tensor
                 source_lat = (1.0 - feedback) * src_tensor + feedback * last_latent
 
             sde_curve = None
@@ -305,7 +448,10 @@ class PipelineRunner:
                 x0_str = 0.0
             else:
                 x0_str = self.midi_knobs.get_param("x0_target") if self.use_midi else 0.0
-            x0_tgt = Latent(tensor=self.stream.source.latent.tensor)
+            # Use the live (possibly sliced) source as the x0_target so
+            # the per-frame curve / strength scalar lines up with the
+            # latent the DiT actually denoises against.
+            x0_tgt = live_src_lat
 
             velocity_curve = _curve_from_spec(raw.get("velocity_scale_curve"), src_T)
             initial_noise_curve = _curve_from_spec(raw.get("initial_noise_curve"), src_T)
@@ -334,18 +480,26 @@ class PipelineRunner:
 
             torch.cuda.synchronize()
             t0 = time.perf_counter()
+            tick_kwargs = {}
+            if walk_active:
+                # In walk mode the StreamHandle's cached source/context
+                # are the FULL song; the DiT must see the sliced versions
+                # we computed above. Pass them as per-tick overrides so
+                # StreamHandle.tick() merges them into the slot request.
+                tick_kwargs["context_latent"] = live_ctx_lat
             result_latent = self.stream.tick(
                 denoise=denoise,
                 seed=effective_seed,
                 source_latent=(
                     Latent(tensor=source_lat) if source_lat is not None
-                    else self.stream.source.latent
+                    else live_src_lat
                 ),
                 x0_target=x0_tgt,
                 x0_target_curve=x0_target_curve,
                 shift=current_shift,
                 noise_sharing=noise_sharing,
                 initial_noise_curve=initial_noise_curve,
+                **tick_kwargs,
                 # DCW (wavelet-domain post-step correction). Forwarded
                 # every tick so toggle / mode / wavelet changes from the
                 # client take effect on the next slot via pipe.set_dcw().
@@ -384,15 +538,18 @@ class PipelineRunner:
                 if not skipped:
                     t1 = time.perf_counter()
                     # eff_dur clamps the windowed-decode playhead so the
-                    # window stays inside the latent. Falling back to a
-                    # hardcoded 60 s would re-introduce the truncation
-                    # bug we're fixing — read it from the live source
-                    # latent (25 fps) so it tracks source swaps and any
-                    # duration the engine matrix actually supports.
-                    eff_dur = (
-                        self.crop_seconds if self.crop_seconds > 0
-                        else self.stream.source.latent.tensor.shape[1] / 25.0
-                    )
+                    # window stays inside the latent. In walk mode the
+                    # playable buffer length is the song length, not the
+                    # 60s slice — the slice is just the DiT's view onto
+                    # it. Read from the audio buffer to track crop and
+                    # source swaps in both modes.
+                    if walk_active:
+                        eff_dur = len(self.audio_eng.current) / SAMPLE_RATE
+                    else:
+                        eff_dur = (
+                            self.crop_seconds if self.crop_seconds > 0
+                            else self.stream.source.latent.tensor.shape[1] / 25.0
+                        )
                     if self.vae_window > 0:
                         playhead_now = self.audio_eng.position / SAMPLE_RATE
                         # Predictive decode start: target where the playhead
@@ -411,12 +568,38 @@ class PipelineRunner:
                         # window we actually decoded, not from the playhead
                         # at decode-time.
                         last_decode_pos = decode_start
-                        audio_out = self.session.decode(result_latent, t_start=decode_start, cyclic=True)
+                        if walk_active:
+                            # The DiT output spans [win_start_s,
+                            # win_start_s + walk_window_s] of the song.
+                            # Decode at the offset *inside* the window
+                            # corresponding to the song-time we want, then
+                            # remap the decoder's start_sample (which is
+                            # window-relative) to absolute song samples by
+                            # adding the window's start sample. cyclic=
+                            # False because the slice itself doesn't wrap.
+                            local_t_start = decode_start - win_start_s
+                            # Clamp inside the window. The window is
+                            # centered around target_song_s (which equals
+                            # decode_start under steady state), so the
+                            # nominal local offset is walk_window_s/2,
+                            # but a stale window from earlier in the loop
+                            # can drift; clamp to keep VAE inside bounds.
+                            local_t_start = max(
+                                0.0,
+                                min(local_t_start, self.walk_window_s - self.vae_window),
+                            )
+                            audio_out = self.session.decode(
+                                result_latent, t_start=local_t_start, cyclic=False,
+                            )
+                            win_offset_samples = int(round(win_start_s * SAMPLE_RATE))
+                        else:
+                            audio_out = self.session.decode(result_latent, t_start=decode_start, cyclic=True)
+                            win_offset_samples = 0
                         torch.cuda.synchronize()
                         dec_ms = (time.perf_counter() - t1) * 1000
                         win_wav = audio_out.waveform.detach().cpu().float().squeeze(0)
                         win_np = win_wav.numpy().T
-                        win_start = audio_out.start_sample
+                        win_start = audio_out.start_sample + win_offset_samples
                         win_end = win_start + win_np.shape[0]
                         buf = self.audio_eng.current.copy()
                         # 25 ms at 48 kHz — matches CROSSFADE_SECONDS.
