@@ -79,12 +79,12 @@ def _verify_engines(engine_paths: list[tuple[str, str]]):
     rt = trt.Runtime(trt.Logger(trt.Logger.WARNING))
     for name, path in engine_paths:
         if not os.path.exists(path):
-            logger.error("  %s: MISSING (%s)", name, path)
+            logger.error("  {}: MISSING ({})", name, path)
             continue
         with open(path, "rb") as f:
             engine = rt.deserialize_cuda_engine(f.read())
         if engine is None:
-            logger.error("  %s: FAILED to load", name)
+            logger.error("  {}: FAILED to load", name)
             continue
 
         io_info = []
@@ -103,11 +103,11 @@ def _verify_engines(engine_paths: list[tuple[str, str]]):
                 profiles.append(f"{tname}: min={shapes[0]} opt={shapes[1]} max={shapes[2]}")
 
         size_mb = os.path.getsize(path) / 1e6
-        logger.info("  %s: OK (%.1f MB)", name, size_mb)
+        logger.info("  {}: OK ({:.1f} MB)", name, size_mb)
         for s in io_info:
-            logger.info("    %s", s)
+            logger.info("    {}", s)
         for s in profiles:
-            logger.info("    Profile: %s", s)
+            logger.info("    Profile: {}", s)
 
 
 def _engine_path(output_dir: str, engine_filename: str) -> str:
@@ -171,7 +171,7 @@ def _ensure_onnx(
         if not os.path.exists(paths[key]):
             old_path = os.path.join(old_onnx_dir, key, f"{key}.onnx")
             if os.path.exists(old_path):
-                logger.info("Found VAE ONNX at old location: %s", old_path)
+                logger.info("Found VAE ONNX at old location: {}", old_path)
                 paths[key] = old_path
 
     # Build the list of (component, fetch_kwargs) pairs that the caller
@@ -181,25 +181,25 @@ def _ensure_onnx(
         if not os.path.exists(paths["vae_encode"]):
             requested.append(("vae_encode", {}))
         else:
-            logger.info("Reusing existing VAE encoder ONNX: %s", paths["vae_encode"])
+            logger.info("Reusing existing VAE encoder ONNX: {}", paths["vae_encode"])
         if not os.path.exists(paths["vae_decode"]):
             requested.append(("vae_decode", {}))
         else:
-            logger.info("Reusing existing VAE decoder ONNX: %s", paths["vae_decode"])
+            logger.info("Reusing existing VAE decoder ONNX: {}", paths["vae_decode"])
     if need_decoder_std and not os.path.exists(paths["decoder"]):
         requested.append(("decoder", {"checkpoint": checkpoint}))
     elif need_decoder_std:
-        logger.info("Reusing existing decoder ONNX: %s", paths["decoder"])
+        logger.info("Reusing existing decoder ONNX: {}", paths["decoder"])
     if need_decoder_refit and not os.path.exists(paths["decoder_refit"]):
         requested.append(("decoder_refit", {"checkpoint": checkpoint}))
     elif need_decoder_refit:
-        logger.info("Reusing existing decoder ONNX (refit): %s", paths["decoder_refit"])
+        logger.info("Reusing existing decoder ONNX (refit): {}", paths["decoder_refit"])
 
     # --skip-onnx: no resolution path. Error if anything's missing.
     if skip_onnx:
         if requested:
             for comp, _ in requested:
-                logger.error("Missing ONNX file (refusing to fetch/export with --skip-onnx): %s", paths[comp])
+                logger.error("Missing ONNX file (refusing to fetch/export with --skip-onnx): {}", paths[comp])
             sys.exit(1)
         logger.info("All ONNX exports found, --skip-onnx satisfied.")
         return paths
@@ -224,7 +224,7 @@ def _ensure_onnx(
             return paths
         except Exception as exc:
             logger.error(
-                "ONNX fetch from HuggingFace failed: %s. "
+                "ONNX fetch from HuggingFace failed: {}. "
                 "Re-run with --export-locally to export from the model "
                 "checkpoint instead, or with --skip-onnx if you have the "
                 "files in a non-standard location.",
@@ -237,7 +237,7 @@ def _ensure_onnx(
     export_decoder_refit = any(c == "decoder_refit" for c, _ in requested)
     export_decoder_std = any(c == "decoder" for c, _ in requested)
 
-    logger.info("Loading model from checkpoints/%s (--export-locally)...", checkpoint)
+    logger.info("Loading model from checkpoints/{} (--export-locally)...", checkpoint)
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
     from acestep.engine.model_context import ModelContext
@@ -265,14 +265,14 @@ def _ensure_onnx(
                 handler.vae, paths["vae_encode"], device=device,
                 config=VAEExportConfig(trace_audio_samples=48000 * 30),
             )
-            logger.info("VAE encoder exported in %.1fs", time.time() - t0)
+            logger.info("VAE encoder exported in {:.1f}s", time.time() - t0)
 
             t0 = time.time()
             export_vae_decoder_onnx(
                 handler.vae, paths["vae_decode"], device=device,
                 config=VAEExportConfig(trace_latent_frames=750),
             )
-            logger.info("VAE decoder exported in %.1fs", time.time() - t0)
+            logger.info("VAE decoder exported in {:.1f}s", time.time() - t0)
 
     if export_decoder_refit or export_decoder_std:
         from .export import OnnxExportConfig, export_decoder_onnx
@@ -346,18 +346,18 @@ def _build_vae_engines(
 
         if not force_rebuild and os.path.exists(engine_path):
             size_mb = os.path.getsize(engine_path) / 1e6
-            logger.info("SKIP %s (%.0f MB)", name, size_mb)
+            logger.info("SKIP {} ({:.0f} MB)", name, size_mb)
             results.append((label, engine_path, 0.0, "SKIPPED"))
             continue
 
         logger.info("=" * 60)
-        logger.info("VAE TRT BUILD: %s (max_duration=%ds)", name, duration)
+        logger.info("VAE TRT BUILD: {} (max_duration={}s)", name, duration)
         logger.info("=" * 60)
 
         t0 = time.time()
         builder(onnx_paths[component], engine_path, config=config)
         elapsed = time.time() - t0
-        logger.info("Built in %.0fs", elapsed)
+        logger.info("Built in {:.0f}s", elapsed)
         results.append((label, engine_path, elapsed, "OK"))
 
     return results
@@ -392,7 +392,7 @@ def _build_windowed_vae_decode_engine(
 
     if not force_rebuild and os.path.exists(engine_path):
         size_mb = os.path.getsize(engine_path) / 1e6
-        logger.info("SKIP %s (%.0f MB)", name, size_mb)
+        logger.info("SKIP {} ({:.0f} MB)", name, size_mb)
         return (label, engine_path, 0.0, "SKIPPED")
 
     min_f, opt_f, max_f = WINDOWED_VAE_PROFILE_FRAMES
@@ -404,14 +404,14 @@ def _build_windowed_vae_decode_engine(
     )
 
     logger.info("=" * 60)
-    logger.info("VAE TRT BUILD (windowed): %s (min=%d opt=%d max=%d)",
+    logger.info("VAE TRT BUILD (windowed): {} (min={} opt={} max={})",
                 name, min_f, opt_f, max_f)
     logger.info("=" * 60)
 
     t0 = time.time()
     build_vae_decode_engine(onnx_paths["vae_decode"], engine_path, config=config)
     elapsed = time.time() - t0
-    logger.info("Built in %.0fs", elapsed)
+    logger.info("Built in {:.0f}s", elapsed)
     return (label, engine_path, elapsed, "OK")
 
 
@@ -470,18 +470,18 @@ def _build_decoder_engine(
 
     if not force_rebuild and os.path.exists(engine_path):
         size_mb = os.path.getsize(engine_path) / 1e6
-        logger.info("SKIP %s (%.0f MB)", name, size_mb)
+        logger.info("SKIP {} ({:.0f} MB)", name, size_mb)
         return (label, engine_path, 0.0, "SKIPPED")
 
     logger.info("=" * 60)
-    logger.info("DECODER TRT BUILD (refit=%s, mixed=%s) -> %s",
+    logger.info("DECODER TRT BUILD (refit={}, mixed={}) -> {}",
                 refit, mixed, engine_path)
     logger.info("=" * 60)
 
     t0 = time.time()
     build_trt_engine(onnx_paths[onnx_key], engine_path, config=config)
     elapsed = time.time() - t0
-    logger.info("Built in %.0fs", elapsed)
+    logger.info("Built in {:.0f}s", elapsed)
 
     return (label, engine_path, elapsed, "OK")
 
@@ -841,10 +841,10 @@ def _run_single(args, project_root, onnx_dir):
         _verify_engines(built_engines)
 
     logger.info("=" * 60)
-    logger.info("Built %d engine(s):", len(built_engines))
+    logger.info("Built {} engine(s):", len(built_engines))
     for name, path in built_engines:
-        logger.info("  %s -> %s", name, path)
-    logger.info("Output directory: %s", args.output_dir)
+        logger.info("  {} -> {}", name, path)
+    logger.info("Output directory: {}", args.output_dir)
     logger.info("=" * 60)
 
 

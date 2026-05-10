@@ -34,6 +34,12 @@ export interface RtmgConfigEngine {
   crop: number;
   steps: number;
   fast_vae: boolean;
+  /** Route long sources through the walk_window_s (60s) DiT engine by
+   * sliding a fixed-T window across the song each tick. Lets a 240s
+   * song play through the 60s engine without paying the 240s engine's
+   * parameter-update latency. Backend ignores when source ≤ window. */
+  walk_window?: boolean;
+  walk_window_s?: number;
   key: string;
   /** Default meter numerator the operator dropdown starts on. Mirrors
    * `key` in posture: the server's session-init resolver still wins on
@@ -59,6 +65,32 @@ export interface RtmgConfigEffects {
   warp_strength: number;
 }
 
+export interface RtmgConfigAudio {
+  /** Initial state of the loudness matcher at boot. Operator can still
+   *  flip it via the LUFS button — this is the seed, not a lock. */
+  lufs_enabled: boolean;
+  /** Sliding-window length in seconds for the loudness-matching meter
+   *  (BS.1770 short-term LUFS). 3 s is the standard. Lowering trades
+   *  stability for responsiveness; below ~1.5 s, transients can lock
+   *  the high-water mark hot. */
+  lufs_window_sec: number;
+  /** Loudness metric the matcher uses. "lufs" = ITU-R BS.1770 K-weighted
+   *  (broadcast standard, slightly over-reads bright/distorted material).
+   *  "dba" = IEC 61672 A-weighted RMS (closer to perceived loudness on
+   *  spectrally imbalanced content; tighter step-test gaps in offline
+   *  validation). Defaults to "lufs" for backward compatibility. */
+  lufs_metric: "lufs" | "dba";
+  /** Multiplier applied to the source's true peak when adapting the
+   *  matcher's peak ceiling. The default -1 dBTP ceiling (0.891) is
+   *  raised to max(0.891, source_peak * lufs_peak_headroom). 4 = +12 dB
+   *  of boost-headroom above source peak. Lower values cap how much
+   *  the matcher can boost a quieter denoised signal (1.0 = match
+   *  source peak; below ~2 the gap to a much quieter denoised stream
+   *  cannot be fully closed). Higher values allow more boost at the
+   *  cost of harder DAC clipping. */
+  lufs_peak_headroom: number;
+}
+
 /** controls.* — initial slider values plus the DCW companion controls
  * (enabled / mode / wavelet) and lora_default_strength. Numeric entries
  * seed sliderValues + sliderTargets; the named DCW entries drive the
@@ -71,6 +103,7 @@ export interface RtmgConfig {
   controls: RtmgConfigControls;
   seed: number;
   effects: RtmgConfigEffects;
+  audio: RtmgConfigAudio;
   reset_seconds: number;
 }
 
@@ -83,6 +116,8 @@ export const DEFAULT_CONFIG: RtmgConfig = {
     crop: 0,
     steps: 8,
     fast_vae: false,
+    walk_window: false,
+    walk_window_s: 60,
     key: "G# minor",
     time_signature: DEFAULT_TIME_SIGNATURE,
     enabled_loras: [],
@@ -127,6 +162,12 @@ export const DEFAULT_CONFIG: RtmgConfig = {
     bloom_threshold: 0.15,
     warp_strength: 0.4,
   },
+  audio: {
+    lufs_enabled: false,
+    lufs_window_sec: 3.0,
+    lufs_metric: "lufs",
+    lufs_peak_headroom: 4.0,
+  },
   reset_seconds: 0,
 };
 
@@ -169,6 +210,7 @@ function mergeConfig(
     controls: { ...base.controls, ...(override.controls ?? {}) },
     seed: typeof override.seed === "number" ? override.seed : base.seed,
     effects: { ...base.effects, ...(override.effects ?? {}) },
+    audio: { ...base.audio, ...(override.audio ?? {}) },
     reset_seconds:
       typeof override.reset_seconds === "number"
         ? override.reset_seconds
@@ -231,6 +273,7 @@ export function applyConfig(c: RtmgConfig): void {
     dcwWavelet: isDcwWavelet(c.controls.dcw_wavelet)
       ? c.controls.dcw_wavelet
       : s.dcwWavelet,
+    lufsOn: c.audio.lufs_enabled,
   }));
 
   for (const fn of listeners) fn(c);

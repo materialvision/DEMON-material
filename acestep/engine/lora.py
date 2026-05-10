@@ -162,7 +162,7 @@ class LoRAManagerBase(abc.ABC):
             existing = self._loras[lora_id]
             if existing.path != str(path):
                 logger.warning(
-                    "LoRA id %r already registered to %s; ignoring re-register from %s",
+                    "LoRA id {!r} already registered to {}; ignoring re-register from {}",
                     lora_id, existing.path, path,
                 )
             return lora_id
@@ -170,7 +170,7 @@ class LoRAManagerBase(abc.ABC):
             lora_id=lora_id, path=str(path),
             name=name if name is not None else lora_id,
         )
-        logger.info("Registered LoRA: %s (path=%s)", lora_id, path)
+        logger.info("Registered LoRA: {} (path={})", lora_id, path)
         return lora_id
 
     def register_library(
@@ -190,10 +190,10 @@ class LoRAManagerBase(abc.ABC):
             try:
                 ids.append(self.register_lora(str(p)))
             except Exception as e:
-                logger.warning("Failed to register %s: %s", p, e)
+                logger.warning("Failed to register {}: {}", p, e)
         if files:
             logger.info(
-                "Registered library: %d LoRAs from %s", len(ids), d,
+                "Registered library: {} LoRAs from {}", len(ids), d,
             )
         return ids
 
@@ -232,7 +232,7 @@ class LoRAManagerBase(abc.ABC):
         entry.future = self._get_executor().submit(
             self._materialize_worker, entry,
         )
-        logger.info("Prewarming LoRA: %s", lora_id)
+        logger.info("Prewarming LoRA: {}", lora_id)
         return entry.future
 
     def _materialize_worker(self, entry: _LoRAEntry) -> None:
@@ -257,7 +257,7 @@ class LoRAManagerBase(abc.ABC):
             entry.state = LoRAState.MATERIALIZED
             elapsed = (time.perf_counter() - t0) * 1000
             logger.info(
-                "Materialized LoRA %s (%d params, %.1f MB) in %.1fms",
+                "Materialized LoRA {} ({} params, {:.1f} MB) in {:.1f}ms",
                 entry.lora_id, len(deltas), bytes_ / 1e6, elapsed,
             )
 
@@ -302,7 +302,7 @@ class LoRAManagerBase(abc.ABC):
             total_bytes += d.numel() * d.element_size()
         if skipped:
             logger.debug(
-                "_compute_deltas(%s): %d params skipped (not in engine)",
+                "_compute_deltas({}): {} params skipped (not in engine)",
                 Path(lora_path).name, skipped,
             )
         return deltas, total_bytes
@@ -355,7 +355,7 @@ class LoRAManagerBase(abc.ABC):
             entry.state = LoRAState.MATERIALIZED
             elapsed = (time.perf_counter() - t0) * 1000
             logger.info(
-                "Materialized LoRA %s inline (%d params, %.1f MB) in %.1fms",
+                "Materialized LoRA {} inline ({} params, {:.1f} MB) in {:.1f}ms",
                 lora_id, len(deltas), bytes_ / 1e6, elapsed,
             )
         entry.state = LoRAState.ENABLED
@@ -367,7 +367,7 @@ class LoRAManagerBase(abc.ABC):
         if entry.strength != 0.0 and entry.deltas:
             self._refit_weights(set(entry.deltas.keys()))
         logger.info(
-            "Enabled LoRA %s (%d params, %.1f MB, strength=%.2f)",
+            "Enabled LoRA {} ({} params, {:.1f} MB, strength={:.2f})",
             lora_id, len(entry.deltas or {}),
             entry.materialized_bytes / 1e6, entry.strength,
         )
@@ -408,7 +408,7 @@ class LoRAManagerBase(abc.ABC):
         if was_contributing:
             self._refit_weights(affected_params)
         logger.info(
-            "Disabled LoRA %s (was_contributing=%s)",
+            "Disabled LoRA {} (was_contributing={})",
             lora_id, was_contributing,
         )
 
@@ -433,7 +433,7 @@ class LoRAManagerBase(abc.ABC):
         if entry.deltas:
             self._refit_weights(set(entry.deltas.keys()))
         logger.info(
-            "LoRA %s strength: %.3f -> %.3f (%d params)",
+            "LoRA {} strength: {:.3f} -> {:.3f} ({} params)",
             lora_id, old, strength, len(entry.deltas or {}),
         )
 
@@ -451,7 +451,7 @@ class LoRAManagerBase(abc.ABC):
             return False
         self.disable_lora(lora_id)
         del self._loras[lora_id]
-        logger.info("Removed LoRA %s from catalog", lora_id)
+        logger.info("Removed LoRA {} from catalog", lora_id)
         return True
 
     def remove_all(self) -> None:
@@ -485,7 +485,7 @@ class LoRAManagerBase(abc.ABC):
                     self._on_disabled(entry)
                 except Exception as e:
                     logger.warning(
-                        "_on_disabled raised for %s during close: %s",
+                        "_on_disabled raised for {} during close: {}",
                         entry.lora_id, e,
                     )
             else:
@@ -599,7 +599,7 @@ class LoRAManagerBase(abc.ABC):
             self._ever_dirty.add(name)
         elapsed = (time.perf_counter() - t0) * 1000
         logger.info(
-            "Refitted %d weights in %.1fms", len(param_names), elapsed,
+            "Refitted {} weights in {:.1f}ms", len(param_names), elapsed,
         )
 
 
@@ -667,7 +667,7 @@ class EagerLoRAManager(LoRAManagerBase):
             self._param_dtype[name] = param.dtype
 
         logger.info(
-            "Eager LoRA manager ready: %d decoder params indexed on %s "
+            "Eager LoRA manager ready: {} decoder params indexed on {} "
             "(base snapshot deferred until first enable)",
             len(self._param_dtype), self._device,
         )

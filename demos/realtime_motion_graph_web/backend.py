@@ -350,6 +350,13 @@ def handle_client(
     steps = config.get("steps", 8)
     prompt = config.get("prompt", "instrumental music")
     fast_vae = config.get("fast_vae", False)
+    # Walk-window mode: route long sources through the 60s DiT engine by
+    # sliding a fixed-T window across the song each tick (avoids the
+    # 240s engine's parameter-update latency). vae_encode still has to
+    # fit the full song so the source can be pre-encoded once at load
+    # time; only the decoder profile is pinned to walk_window_s.
+    walk_window = bool(config.get("walk_window", False))
+    walk_window_s = float(config.get("walk_window_s", 60.0))
     # Optional fixture-name hint enables sidecar lookup (precomputed BPM,
     # key, source latent, conditioning). Absent / unknown name -> fully
     # live path; same behavior as before sidecars existed.
@@ -405,6 +412,43 @@ def handle_client(
                 pass
             ws.close(1011, "TRT engine not built")
             return
+        # Walk-window override: pin the decoder to the walk_window_s
+        # profile (typically 60s) regardless of source duration, while
+        # keeping vae_encode at a profile that fits the full song so the
+        # source can be encoded once at load. The runner slides a
+        # walk_window_s slice across the source each tick. We
+        # intentionally bind the profile manager to the WALK duration
+        # below; mid-session swap_source within walk mode keeps using
+        # the 60s decoder, which is the desired invariant.
+        if walk_window and use_trt and audio_duration_s > walk_window_s + 0.1:
+            try:
+                walk_engines, walk_dur = profile_mgr.resolve(walk_window_s)
+            except EngineNotBuiltError as exc:
+                print(f"[Server] walk_window: 60s engine not built: {exc}")
+                try:
+                    ws.send(json.dumps({
+                        "type": "error",
+                        "code": "engine_not_built",
+                        "message": str(exc),
+                        "build_command": exc.build_command,
+                        "duration_s": float(walk_window_s),
+                    }))
+                except Exception:
+                    pass
+                ws.close(1011, "walk_window TRT engine not built")
+                return
+            print(
+                f"[Server] walk_window={walk_window_s:.0f}s active: "
+                f"decoder={Path(walk_engines['decoder']).stem}, "
+                f"vae_encode={Path(trt_engines['vae_encode']).stem}"
+            )
+            trt_engines = {
+                "decoder": walk_engines["decoder"],
+                "vae_encode": trt_engines["vae_encode"],
+                "vae_decode": walk_engines["vae_decode"],
+            }
+            picked_dur = walk_dur
+
         # Only warn when a *smaller* registered profile would have fit
         # but wasn't built (so we genuinely fell back). For a 119.8 s
         # source the 120 s engine is the smallest fitting profile, not
@@ -1485,6 +1529,8 @@ def handle_client(
         motion_val=motion_val, motion_lock=motion_lock,
         on_audio_ready=on_audio_ready,
         before_tick=apply_pending,
+        walk_window=walk_window,
+        walk_window_s=walk_window_s,
     )
     runner_holder[0] = runner
 

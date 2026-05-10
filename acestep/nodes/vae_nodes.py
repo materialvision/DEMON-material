@@ -54,7 +54,7 @@ def _get_trt_vae(engine_path: str, device: torch.device):
 
     engine = engine_from_bytes(bytes_from_path(engine_path))
     ctx = engine.create_execution_context()
-    logger.info("Loaded TRT VAE engine: %s", engine_path)
+    logger.info("Loaded TRT VAE engine: {}", engine_path)
 
     entry = {"engine": engine, "context": ctx}
     _trt_vae_cache[engine_path] = entry
@@ -84,7 +84,7 @@ def _evict_trt_vae(engine_path: str) -> bool:
     entry["context"] = None
     entry["engine"] = None
     torch.cuda.empty_cache()
-    logger.info("Evicted TRT VAE engine: %s", engine_path)
+    logger.info("Evicted TRT VAE engine: {}", engine_path)
     return True
 
 

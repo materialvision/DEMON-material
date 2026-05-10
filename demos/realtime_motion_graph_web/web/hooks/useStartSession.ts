@@ -66,6 +66,8 @@ function buildConfig(fixtureName: string): SessionConfig {
     crop: cfg.crop,
     steps: cfg.steps,
     fast_vae: cfg.fast_vae,
+    walk_window: cfg.walk_window ?? false,
+    walk_window_s: cfg.walk_window_s ?? 60,
     enabled_loras: enabledLoras,
     prompt: perf.promptA,
     lora_strengths: loraStrengths,

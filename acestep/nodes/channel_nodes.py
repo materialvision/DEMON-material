@@ -158,7 +158,7 @@ class ChannelGuidance(BaseNode):
         handler._channel_guidance.append(entry)
 
         logger.info(
-            "Channel guidance: ch %d-%d scale=%.3f (%d total configs)",
+            "Channel guidance: ch {}-{} scale={:.3f} ({} total configs)",
             ch_start, ch_end, scale, len(handler._channel_guidance),
         )
 
@@ -192,7 +192,7 @@ class RemoveChannelGuidance(BaseNode):
         count = len(getattr(handler, '_channel_guidance', []))
         handler._channel_guidance = []
         if count:
-            logger.info("Removed %d channel guidance configs", count)
+            logger.info("Removed {} channel guidance configs", count)
         return {"model": model_handle}
 
 
