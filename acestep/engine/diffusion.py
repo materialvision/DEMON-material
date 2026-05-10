@@ -132,7 +132,7 @@ class DiffusionEngine:
         if not engine_path.exists():
             raise FileNotFoundError(f"TRT engine not found: {engine_path}")
 
-        logger.info("Loading TRT decoder engine from %s ...", engine_path)
+        logger.info("Loading TRT decoder engine from {} ...", engine_path)
         self._trt_engine = engine_from_bytes(bytes_from_path(str(engine_path)))
         self._trt_ctx = self._trt_engine.create_execution_context()
         self._trt_stream = _get_trt_stream()
@@ -147,7 +147,7 @@ class DiffusionEngine:
         }
         hs_trt_dtype = self._trt_engine.get_tensor_dtype("hidden_states")
         self._trt_io_dtype = _trt_dtype_map.get(hs_trt_dtype, torch.float32)
-        logger.info("TRT decoder engine ready (io_dtype=%s)", self._trt_io_dtype)
+        logger.info("TRT decoder engine ready (io_dtype={})", self._trt_io_dtype)
 
         # Try to initialize LoRA refit manager (requires REFIT-enabled engine)
         self._lora_manager = None
@@ -180,12 +180,12 @@ class DiffusionEngine:
             try:
                 self._lora_manager.register_library()
             except Exception as e:
-                logger.warning("Failed to scan LoRA library: %s", e)
+                logger.warning("Failed to scan LoRA library: {}", e)
         except RuntimeError as e:
             # Engine not built with REFIT, or TRT version too old
-            logger.info("TRT LoRA refit not available: %s", e)
+            logger.info("TRT LoRA refit not available: {}", e)
         except Exception as e:
-            logger.warning("Failed to init TRT LoRA manager: %s", e)
+            logger.warning("Failed to init TRT LoRA manager: {}", e)
 
         # Notify subscribers AFTER LoRA wiring is up so a listener that
         # eagerly probes the new engine sees a fully-initialized state.
@@ -221,7 +221,7 @@ class DiffusionEngine:
             try:
                 cb()
             except Exception as e:
-                logger.warning("Engine swap listener raised: %s", e)
+                logger.warning("Engine swap listener raised: {}", e)
 
     def unload_trt_engine(self) -> None:
         """Drop the active TRT decoder engine and free its GPU workspace.
@@ -270,14 +270,14 @@ class DiffusionEngine:
         try:
             self._lora_manager = EagerLoRAManager(decoder=self.decoder)
         except (RuntimeError, ValueError) as e:
-            logger.info("Eager LoRA manager not available: %s", e)
+            logger.info("Eager LoRA manager not available: {}", e)
             self._lora_manager = None
             return
 
         try:
             self._lora_manager.register_library()
         except Exception as e:
-            logger.warning("Failed to scan LoRA library: %s", e)
+            logger.warning("Failed to scan LoRA library: {}", e)
 
     def apply_lora(self, lora_path: str, strength: float = 1.0) -> str:
         """Register + enable a LoRA in one call. Returns the LoRA id.
@@ -387,7 +387,7 @@ class DiffusionEngine:
             try:
                 self._lora_manager.close()
             except Exception as e:
-                logger.warning("LoRAManagerBase.close raised: %s", e)
+                logger.warning("LoRAManagerBase.close raised: {}", e)
             self._lora_manager = None
         # Now the TRT context + engine. ``del`` on the instance attribute
         # is what triggers the polygraphy/pycuda finalizer that frees the
@@ -454,7 +454,7 @@ class DiffusionEngine:
 
             self._trt_buf_cache[key] = {"bufs": bufs, "output": out_buf}
             logger.info(
-                "Allocated TRT buffers for shapes: hs=%s enc=%s",
+                "Allocated TRT buffers for shapes: hs={} enc={}",
                 list(hs_shape), list(enc_shape),
             )
 

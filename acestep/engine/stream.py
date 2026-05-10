@@ -474,7 +474,7 @@ class StreamPipeline:
                 compiled = torch.compile(fn, backend="inductor", dynamic=True)
             except Exception as e:  # pragma: no cover - fallback path
                 logger.warning(
-                    "torch.compile(%s) failed (%s); falling back to eager",
+                    "torch.compile({}) failed ({}); falling back to eager",
                     fn.__name__, e,
                 )
         cache[fn] = compiled
@@ -701,7 +701,7 @@ class StreamPipeline:
         self._trt_out_buf = out_buf
 
         logger.info(
-            "Stream TRT bufs allocated: B=%d eff_T=%d L=%d", B, eff_T, max_L
+            "Stream TRT bufs allocated: B={} eff_T={} L={}", B, eff_T, max_L
         )
 
     # ------------------------------------------------------------------
@@ -1126,7 +1126,7 @@ class StreamPipeline:
             self._slots = old + [None] * (depth - self._depth)
 
         self._depth = depth
-        logger.info("Pipeline depth changed to %d", depth)
+        logger.info("Pipeline depth changed to {}", depth)
 
     def flush(self) -> List[torch.Tensor]:
         """Drain the pipeline: keep ticking until all slots complete."""

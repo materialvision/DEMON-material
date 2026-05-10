@@ -645,7 +645,7 @@ class Session:
             try:
                 ctx.close()
             except Exception as e:
-                logger.warning("ModelContext.close raised: %s", e)
+                logger.warning("ModelContext.close raised: {}", e)
         # Drop the handle wrappers so nothing else can dereference the
         # now-closed context through them.
         self.model = None  # type: ignore[assignment]
@@ -747,7 +747,7 @@ class StreamHandle:
                 try:
                     pipeline.close()
                 except Exception as e:
-                    logger.warning("StreamPipeline.close raised: %s", e)
+                    logger.warning("StreamPipeline.close raised: {}", e)
                 node._pipeline = None
             node._engine = None
         # Detach top-level refs so the session-level close is the
