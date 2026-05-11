@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { useOneShotTooltip } from "@/hooks/useOneShotTooltip";
 import { isRecordingSupported } from "@/hooks/useRecording";
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import {
@@ -74,6 +75,12 @@ export function RecordButton() {
             ? "Saving…"
             : "Record (R)";
 
+  // One-shot tooltip — shows the first time, never again. The
+  // permanent "REC" caption beneath the disc carries the affordance
+  // once the user has seen the tooltip; repeated tooltips become
+  // noise during active performance.
+  const tipProps = useOneShotTooltip("record", label);
+
   return (
     <div className="turntable-wrap">
       {warning && (
@@ -88,9 +95,9 @@ export function RecordButton() {
       disabled={busy}
       aria-label={label}
       // Custom tooltip pattern — see [data-dd-tooltip] in globals.css.
-      // Default position is ABOVE, which is what the turntable wants
-      // (bottom-right of viewport).
-      data-dd-tooltip={label}
+      // One-shot via useOneShotTooltip: tipProps supplies the tooltip
+      // attr only the first time.
+      {...tipProps}
     >
       {/* Disc — platter, audio-reactive grooves, label, spindle. The whole
           disc rotates while recording (CSS animation on .turntable-disc). */}

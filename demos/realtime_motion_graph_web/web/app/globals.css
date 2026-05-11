@@ -4415,6 +4415,18 @@ body[data-mode="graph"] #install-video-area .focal-side-blur { display: none; }
   top: calc(100% + 8px);
   transform: translateX(-50%) translateY(-4px);
 }
+/* Wide variant for descriptive tooltips (param explanations etc.).
+   Allows wrapping and caps the width so long sentences don't bleed
+   across the viewport like the default nowrap labels would. */
+[data-dd-tooltip][data-dd-tooltip-wide]::after {
+  white-space: normal;
+  max-width: 280px;
+  line-height: 1.45;
+  padding: 7px 11px 6px;
+  text-transform: none;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
 [data-dd-tooltip]:hover::after,
 [data-dd-tooltip]:focus-visible::after {
   opacity: 1;
