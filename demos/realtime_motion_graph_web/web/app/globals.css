@@ -3726,6 +3726,9 @@ body[data-mode="graph"] #install-video-area .focal-side-blur { display: none; }
      the seam reads as one 1px frame-line (the upload button drops its
      left border to avoid doubling). */
   border-radius: var(--radius-md) 0 0 var(--radius-md);
+  /* Clip the gradient ::before strip to the rounded corners. Without
+     this the 1px-tall strip overshoots the top-left curve. */
+  overflow: hidden;
   font-family: var(--font-mono);
   display: flex;
   flex-direction: row;
@@ -3771,6 +3774,8 @@ body[data-mode="graph"] #install-video-area .focal-side-blur { display: none; }
   border-left: none; /* the placard's right border is the seam */
   border-top: none;  /* gradient strip ::before owns the top edge */
   border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  /* Clip the gradient ::before strip to the rounded top-right corner. */
+  overflow: hidden;
   color: var(--text-dim);
   cursor: pointer;
   /* Drop-shadow lives on the .audio-source-dock parent so it traces
