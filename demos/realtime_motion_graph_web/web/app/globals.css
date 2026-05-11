@@ -3660,9 +3660,10 @@ body[data-mode="graph"] #install-video-area .focal-side-blur { display: none; }
    ============================================================================ */
 
 /* Bottom-left dock holding the now-playing placard + always-visible
-   upload icon button. The dock owns the fixed position; placard and
-   upload button are flex children so they share a baseline and
-   resize cleanly with the placard's variable width. */
+   upload icon button. The dock owns the fixed position AND the
+   collective hover-lift; the placard and upload button merge into a
+   single visual frame (no gap, no border between them, only the
+   placard carries the brand gradient strip + radii). */
 .audio-source-dock {
   position: fixed;
   /* Float above the bottom HUD bar, mirroring the turntable's right-side
@@ -3673,7 +3674,19 @@ body[data-mode="graph"] #install-video-area .focal-side-blur { display: none; }
   display: flex;
   flex-direction: row;
   align-items: stretch;
-  gap: 6px;
+  gap: 0;
+  transition: transform 140ms cubic-bezier(.2, .8, .2, 1);
+}
+/* Hover anywhere on the pair lifts the whole widget together so the
+   placard + upload read as one unit, not two. :has() supported in
+   all modern evergreen browsers we target. */
+.audio-source-dock:has(.audio-source-crate:hover),
+.audio-source-dock:has(.audio-source-upload-btn:hover) {
+  transform: translateY(-1px);
+}
+.audio-source-dock:has(.audio-source-crate:active),
+.audio-source-dock:has(.audio-source-upload-btn:active) {
+  transform: translateY(0);
 }
 .audio-source-crate {
   min-width: 140px;
@@ -3683,7 +3696,11 @@ body[data-mode="graph"] #install-video-area .focal-side-blur { display: none; }
   -webkit-backdrop-filter: blur(6px);
           backdrop-filter: blur(6px);
   border: 1px solid var(--frame-line);
-  border-radius: var(--radius-md);
+  /* Right edge is the shared seam with the upload button — flatten that
+     corner so the two pieces sit flush, and keep the right border so
+     the seam reads as one 1px frame-line (the upload button drops its
+     left border to avoid doubling). */
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
   font-family: var(--font-mono);
   display: flex;
   flex-direction: row;
@@ -3695,14 +3712,15 @@ body[data-mode="graph"] #install-video-area .focal-side-blur { display: none; }
      pulses subtly with the audio kick — no canvas needed. */
   filter: drop-shadow(0 0 calc(1px + var(--bloom-amount, 0) * 6px) var(--accent-glow));
   transition:
-    transform 140ms cubic-bezier(.2, .8, .2, 1),
     background 160ms,
     border-color 160ms,
     filter 200ms;
 }
-/* Always-visible upload icon button. Visually attached to the placard
-   (matching height, gradient top-edge, blur/border treatment) so the
-   pair reads as one widget — two ways to pick audio. */
+/* Always-visible upload icon button. Sits flush against the placard's
+   right edge — same height, same blur background, same bloom-coupled
+   drop-shadow, no separate gradient strip — so the pair reads as one
+   frame with an internal seam. The placard owns the brand gradient and
+   the left radii; the upload owns the right radii. */
 .audio-source-upload-btn {
   position: relative;
   flex: 0 0 auto;
@@ -3714,39 +3732,25 @@ body[data-mode="graph"] #install-video-area .focal-side-blur { display: none; }
   -webkit-backdrop-filter: blur(6px);
           backdrop-filter: blur(6px);
   border: 1px solid var(--frame-line);
-  border-radius: var(--radius-md);
+  border-left: none; /* the placard's right border is the seam */
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
   color: var(--text-dim);
   cursor: pointer;
   filter: drop-shadow(0 0 calc(1px + var(--bloom-amount, 0) * 6px) var(--accent-glow));
   transition:
-    transform 140ms cubic-bezier(.2, .8, .2, 1),
     background 160ms,
     border-color 160ms,
     color 160ms,
     filter 200ms;
 }
-.audio-source-upload-btn::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: var(--dd-gradient);
-  pointer-events: none;
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
-}
 .audio-source-upload-btn:hover {
-  transform: translateY(-1px);
   background: rgba(6, 6, 12, 0.85);
   border-color: var(--accent-line);
   color: var(--accent-hover);
 }
-.audio-source-upload-btn:active { transform: translateY(0); }
 .audio-source-upload-btn:disabled {
   opacity: 0.5;
   cursor: progress;
-  transform: none;
 }
 .audio-source-marquee-rows {
   display: flex;
@@ -3782,11 +3786,9 @@ body[data-mode="graph"] #install-video-area .focal-side-blur { display: none; }
   border-radius: var(--radius-md) var(--radius-md) 0 0;
 }
 .audio-source-crate:hover {
-  transform: translateY(-1px);
   background: rgba(6, 6, 12, 0.85);
   border-color: var(--accent-line);
 }
-.audio-source-crate:active { transform: translateY(0); }
 .audio-source-crate--open {
   border-color: var(--accent-line);
   background: rgba(6, 6, 12, 0.88);
