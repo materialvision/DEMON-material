@@ -1,8 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-
-import { computePromptTags, usePerformanceStore } from "@/store/usePerformanceStore";
+import { usePerformanceStore } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
 
 export function PromptsTile() {
@@ -15,40 +13,18 @@ export function PromptsTile() {
   const setPromptB = usePerformanceStore((s) => s.setPromptB);
   const setBlend = usePerformanceStore((s) => s.setBlend);
 
+  // Send Tags is the only path that pays the server-side text encoder:
+  // it ships both A and B so the backend caches a cond pair for each,
+  // and the blend slider then lerps between them per tick via the cheap
+  // set_prompt_blend channel (usePromptBlendSync). Editing the
+  // textareas does NOT auto-submit — the operator decides when to
+  // commit new tags.
   function sendPrompt() {
     const remote = useSessionStore.getState().remote;
-    // Server expects `tags` as the prompt string. Use computePromptTags so
-    // we pick the right side as the operator drags the A↔B blend slider.
     if (remote) {
-      remote.sendPrompt(
-        computePromptTags({ promptA, promptB, blend }),
-        activeKey,
-        activeTimeSignature,
-      );
+      remote.sendPrompt(promptA, activeKey, activeTimeSignature, promptB);
     }
   }
-
-  // Auto-submit on blend change. Debounced so dragging the slider doesn't
-  // spam the server (one prompt message per ~180ms of stillness is plenty
-  // for the operator's gesture to land). Initial mount skips so we don't
-  // re-emit the server's own initial prompt back at it.
-  const firstBlendEffect = useRef(true);
-  useEffect(() => {
-    if (firstBlendEffect.current) {
-      firstBlendEffect.current = false;
-      return;
-    }
-    const handle = window.setTimeout(() => {
-      const remote = useSessionStore.getState().remote;
-      if (!remote) return;
-      remote.sendPrompt(
-        computePromptTags({ promptA, promptB, blend }),
-        activeKey,
-        activeTimeSignature,
-      );
-    }, 180);
-    return () => window.clearTimeout(handle);
-  }, [blend, promptA, promptB, activeKey, activeTimeSignature]);
 
   return (
     <div className="mixer-tile mixer-tile-prompts" data-tile="prompts">
