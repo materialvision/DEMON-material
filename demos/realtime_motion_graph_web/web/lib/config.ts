@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import { useCurveStore } from "@/store/useCurveStore";
+import { useLoraStore } from "@/store/useLoraStore";
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import {
   DCW_MODES,
@@ -143,6 +145,35 @@ export interface RtmgConfigDenoiseSessionGate {
   glide_ms: number;
 }
 
+/** One control point on a schedule curve. Mirrors the runtime
+ *  CurvePoint in store/useCurveStore — duplicated on the wire shape
+ *  so the config can be authored and parsed without reaching across
+ *  module boundaries. */
+export interface RtmgConfigCurvePoint {
+  /** 0..1 along the track timeline. Endpoints pinned at 0 and 1. */
+  x: number;
+  /** 0..1 normalised. Mapped to the param's min/max at apply time. */
+  y: number;
+  mode: "smooth" | "linear" | "step";
+}
+
+export interface RtmgConfigCurve {
+  enabled: boolean;
+  /** Always ≥ 2 points; first.x === 0 and last.x === 1. */
+  points: RtmgConfigCurvePoint[];
+}
+
+/** Per-param schedule curves the user (or an operator-supplied config)
+ *  draws against the track timeline. Keyed by param name — the fixed
+ *  six (denoise, hint_strength, feedback, shift, noise_share, ode_noise)
+ *  plus dynamic LoRA strength curves (lora_str_<id>). */
+export interface RtmgConfigCurves {
+  /** Master enable. When false, no curve drives any param regardless
+   *  of per-curve enabled flags. */
+  scheduleEnabled: boolean;
+  curves: Record<string, RtmgConfigCurve>;
+}
+
 export interface RtmgConfig {
   engine: RtmgConfigEngine;
   prompts: RtmgConfigPrompts;
@@ -159,6 +190,12 @@ export interface RtmgConfig {
    * ScriptProcessor fallback already restarts on swap; this aligns the
    * worklet path with that behavior and makes it operator-tunable. */
   restart_song_on_swap: boolean;
+  /** Per-param schedule curves. Same shape useCurveStore persists to
+   *  localStorage today, lifted into the operator-editable config so a
+   *  pod's deployed sound can ship its automation alongside its
+   *  sliders + prompts. Optional — absent = stock pods fall back to
+   *  the store's localStorage hydration / defaultCurveState. */
+  curves?: RtmgConfigCurves;
 }
 
 export const DEFAULT_CONFIG: RtmgConfig = {
@@ -276,7 +313,7 @@ export function useConfig(): RtmgConfig {
   return c;
 }
 
-function mergeConfig(
+export function mergeConfig(
   base: RtmgConfig,
   override: Partial<RtmgConfig> | null | undefined,
 ): RtmgConfig {
@@ -308,6 +345,11 @@ function mergeConfig(
       typeof override.restart_song_on_swap === "boolean"
         ? override.restart_song_on_swap
         : base.restart_song_on_swap,
+    // Curves are operator-authored and only meaningful as a whole bag,
+    // so the override entry replaces the base entry whole when present.
+    // Absent override keeps whatever the base has (DEFAULT_CONFIG leaves
+    // this undefined; stock pods fall through to localStorage hydration).
+    ...(override.curves !== undefined ? { curves: override.curves } : (base.curves !== undefined ? { curves: base.curves } : {})),
   };
 }
 
@@ -377,5 +419,91 @@ export function applyConfig(c: RtmgConfig): void {
     lufsOn: c.audio.lufs_enabled,
   }));
 
+  // Curves: when the config carries them, push the whole bag into
+  // useCurveStore via setState (the store has no batch action). Skipped
+  // when the field is absent — stock pods fall through to the store's
+  // own hydratePersistedCurves localStorage path. Deep-clone the
+  // points so later edits in the store don't mutate the active
+  // config snapshot.
+  if (c.curves) {
+    useCurveStore.setState({
+      scheduleEnabled: c.curves.scheduleEnabled,
+      curves: Object.fromEntries(
+        Object.entries(c.curves.curves).map(([param, curve]) => [
+          param,
+          {
+            enabled: curve.enabled,
+            points: curve.points.map((p) => ({ x: p.x, y: p.y, mode: p.mode })),
+          },
+        ]),
+      ),
+    });
+  }
+
   for (const fn of listeners) fn(c);
+}
+
+/**
+ * Snapshot the live stores into an `RtmgConfig` — the inverse of
+ * `applyConfig`. Used by the OperatorStrip's Export button and by any
+ * caller (demon-public-demo's `captureSessionState`) that wants the
+ * DEMON-shaped base of a session without rebuilding the field-mapping
+ * logic.
+ *
+ * Fields the stores don't own (channel_ranges, effects, audio
+ * defaults, denoise_session_gate, restart_song_on_swap, the
+ * non-numeric engine.* config) are pulled from the active config so
+ * exports round-trip cleanly through Import.
+ */
+export function captureRtmgConfig(): RtmgConfig {
+  const perf = usePerformanceStore.getState();
+  const lora = useLoraStore.getState();
+  const curveStore = useCurveStore.getState();
+  const active = _activeConfig;
+
+  // Numeric controls land on sliderTargets in the perf store. The DCW
+  // non-numeric controls live on dedicated store fields.
+  const controls: RtmgConfigControls = { ...perf.sliderTargets };
+  controls.dcw_enabled = perf.dcwEnabled;
+  controls.dcw_mode = perf.dcwMode;
+  controls.dcw_wavelet = perf.dcwWavelet;
+  // lora_default_strength isn't tracked live in the perf store; pull
+  // from active config so the export reflects the seed value.
+  if (typeof active.controls.lora_default_strength !== "undefined") {
+    controls.lora_default_strength = active.controls.lora_default_strength;
+  }
+
+  return {
+    engine: {
+      ...active.engine,
+      key: perf.activeKey,
+      time_signature: perf.activeTimeSignature ?? active.engine.time_signature,
+      enabled_loras: Array.from(lora.enabled),
+    },
+    prompts: {
+      a: perf.promptA,
+      b: perf.promptB,
+      blend: perf.blend,
+    },
+    controls,
+    channel_ranges: active.channel_ranges,
+    seed: perf.seed,
+    effects: active.effects,
+    audio: { ...active.audio, lufs_enabled: perf.lufsOn },
+    reset_seconds: active.reset_seconds,
+    denoise_session_gate: active.denoise_session_gate,
+    restart_song_on_swap: active.restart_song_on_swap,
+    curves: {
+      scheduleEnabled: curveStore.scheduleEnabled,
+      curves: Object.fromEntries(
+        Object.entries(curveStore.curves).map(([param, curve]) => [
+          param,
+          {
+            enabled: curve.enabled,
+            points: curve.points.map((p) => ({ x: p.x, y: p.y, mode: p.mode })),
+          },
+        ]),
+      ),
+    },
+  };
 }
