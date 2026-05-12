@@ -245,6 +245,9 @@ const DEFAULT_SLIDER_VALUES: Record<string, number> = {
   ch56: 1.0,
   dcw_scaler: 0.05,
   dcw_high_scaler: 0.02,
+  dcw_mult_blend: 0.0,
+  dcw_mag_phase: 0.0,
+  dcw_soft_thresh: 0.0,
 };
 
 interface PerformanceState {
@@ -324,8 +327,9 @@ interface PerformanceState {
    *  the side-rail tutorial hints. */
   remixStarted: boolean;
 
-  /** DCW (wavelet-domain post-step correction) non-numeric state. The two
-   * numeric knobs (dcw_scaler, dcw_high_scaler) live in sliderValues. */
+  /** DCW (wavelet-domain post-step correction) non-numeric state. The
+   * numeric knobs (dcw_scaler, dcw_high_scaler, dcw_mult_blend,
+   * dcw_mag_phase, dcw_soft_thresh) all live in sliderValues. */
   dcwEnabled: boolean;
   dcwMode: DcwMode;
   dcwWavelet: DcwWavelet;

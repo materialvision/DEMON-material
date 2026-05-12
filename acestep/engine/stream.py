@@ -21,7 +21,7 @@ import torch
 
 from .diffusion import DiffusionConfig, DiffusionEngine
 from . import ode_steps
-from .dcw import DCWCorrector
+from .dcw import DCWAdvanced, DCWCorrector
 
 if TYPE_CHECKING:
     from .masking import LatentNoiseMask
@@ -251,6 +251,7 @@ class StreamPipeline:
             scaler=config.dcw_scaler,
             high_scaler=config.dcw_high_scaler,
             wavelet=config.dcw_wavelet,
+            advanced=config.dcw_advanced,
         )
 
         # Stats
@@ -1190,6 +1191,7 @@ class StreamPipeline:
         scaler: "Optional[float | torch.Tensor]" = None,
         high_scaler: "Optional[float | torch.Tensor]" = None,
         wavelet: Optional[str] = None,
+        advanced: Optional[DCWAdvanced] = None,
     ) -> None:
         """Replace the DCW corrector. Takes effect on the next tick.
 
@@ -1208,6 +1210,7 @@ class StreamPipeline:
             scaler=scaler if scaler is not None else cur.scaler,
             high_scaler=high_scaler if high_scaler is not None else cur.high_scaler,
             wavelet=wavelet if wavelet is not None else cur.wavelet,
+            advanced=advanced if advanced is not None else cur.advanced,
         )
 
     def _maybe_dcw(
