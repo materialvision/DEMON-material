@@ -19,11 +19,12 @@ interface Props {
 }
 
 const DISPLAY_NAMES: Record<string, string> = {
-  noise_share: "nshare",
   ode_noise: "ode",
   hint_strength: "structure strength",
   dcw_scaler: "DCW low",
   dcw_high_scaler: "DCW high",
+  guidance_scale: "CFG",
+  cfg_rescale: "CFG rescale",
 };
 
 // Tooltip copy for each tweakable param, surfaced via the slider label's
@@ -45,10 +46,12 @@ const PARAM_TOOLTIPS: Record<string, string> = {
     "How similar each new generation is to the previous one. Low values give you variety on every refresh; higher values give you a continuous evolution where each generation flows into the next. 0.3–0.5 is the sweet spot for smooth continuity without everything sounding the same.",
   shift:
     "Advanced: changes where the model concentrates its work across denoising. The default is tuned for the turbo engine and works well in most cases — leave it alone unless you're chasing a specific feel.",
-  noise_share:
-    "Fine-grained sibling of FEEDBACK. Where FEEDBACK is one number for the whole generation, this lets the noise-sharing vary across the timeline. Leave at 0 unless you want detailed control over how successive generations evolve.",
   ode_noise:
     "Adds a touch of randomness during generation. Bump it up if the model feels too deterministic — small values add subtle variation, higher values produce surprising bursts of creativity. Zero keeps generation fully predictable.",
+  guidance_scale:
+    "CFG strength. Only takes effect when the RCFG mode dropdown below is NOT 'off'. Higher values push the output further toward the prompt at the cost of more artifacts. Turbo is CFG-distilled, so the useful range is narrower than a base SD model — try 3–8.",
+  cfg_rescale:
+    "After CFG, mix the guided velocity's magnitude back toward what the positive forward produced. 0 keeps raw CFG; 1 fully snaps the magnitude. Pair with high guidance_scale to keep the prompt-push without the harshness that high CFG causes on its own.",
 
   // ── DCW ──
   dcw_scaler:
@@ -96,7 +99,6 @@ const KBD_FOR_PARAM: Record<string, string> = {
   timbre_strength: "C + ▲▼",
   feedback: "E + ▲▼",
   shift: "H + ▲▼",
-  noise_share: "N + ▲▼",
   ode_noise: "D + ▲▼",
   ch_g0: "0 + ▲▼",
   ch_g1: "1 + ▲▼",

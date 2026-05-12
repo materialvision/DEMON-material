@@ -9,6 +9,7 @@ import {
   DCW_MODES,
   DCW_WAVELETS,
   DEFAULT_TIME_SIGNATURE,
+  isRcfgMode,
   isTimeSignature,
   type DcwMode,
   type DcwWavelet,
@@ -223,7 +224,6 @@ export const DEFAULT_CONFIG: RtmgConfig = {
     hint_strength: 1.4,
     feedback: 0.0,
     shift: 0.5,
-    noise_share: 0.0,
     ode_noise: 0.0,
     ch_g0: 1.0,
     ch_g1: 1.0,
@@ -245,6 +245,9 @@ export const DEFAULT_CONFIG: RtmgConfig = {
     dcw_mode: "double",
     dcw_wavelet: "haar",
     lora_default_strength: 1.4,
+    guidance_scale: 7.0,
+    cfg_rescale: 0.0,
+    rcfg_mode: "off",
   },
   channel_ranges: {
     ch_g0: { min: 0, max: 2.2, reverse: false },
@@ -416,6 +419,7 @@ export function applyConfig(c: RtmgConfig): void {
     dcwWavelet: isDcwWavelet(c.controls.dcw_wavelet)
       ? c.controls.dcw_wavelet
       : s.dcwWavelet,
+    rcfgMode: isRcfgMode(c.controls.rcfg_mode) ? c.controls.rcfg_mode : s.rcfgMode,
     lufsOn: c.audio.lufs_enabled,
   }));
 
