@@ -587,6 +587,14 @@ class StreamDenoise(BaseNode):
                     description="DCW wavelet basis (haar / db4 / sym8 / ...)",
                     hidden=True,
                 ),
+                NodeParam(
+                    name="dcw_advanced", type="any", default=None,
+                    description=(
+                        "DCW advanced research-surface config "
+                        "(DCWAdvanced instance). None = upstream defaults."
+                    ),
+                    hidden=True,
+                ),
             ),
         )
 
@@ -712,6 +720,7 @@ class StreamDenoise(BaseNode):
                 scaler=dcw_bundle.scaler,
                 high_scaler=dcw_bundle.high_scaler,
                 wavelet=dcw_bundle.wavelet,
+                advanced=dcw_bundle.advanced,
             )
         else:
             pipe.set_dcw(
@@ -720,6 +729,7 @@ class StreamDenoise(BaseNode):
                 scaler=float(kwargs.get("dcw_scaler", 0.05)),
                 high_scaler=float(kwargs.get("dcw_high_scaler", 0.02)),
                 wavelet=str(kwargs.get("dcw_wavelet", "haar")),
+                advanced=kwargs.get("dcw_advanced"),
             )
 
         context_latents = _build_context_latents(

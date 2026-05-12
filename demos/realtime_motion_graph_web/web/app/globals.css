@@ -1689,8 +1689,10 @@ body[data-mode="graph"] #install-video-area .focal-side-blur { display: none; }
 .mixer-rack .mixer-channels {
   gap: clamp(3px, calc(3px + (100vw - 1500px) * 1 / 900), 4px);
 }
-.mixer-rack .dcw-panel {
-  width: clamp(110px, calc(110px + (100vw - 1500px) * 20 / 900), 130px);
+.mixer-rack .dcw-panel.dcw-panel--bottom {
+  /* Bottom-strip variant lays out horizontally below the fader row, so
+     drop the fixed-width clamp that was sizing it as a right-side column. */
+  width: auto;
 }
 
 /* Keyboard-shortcut hints — toggled independently of density. The
@@ -1863,8 +1865,10 @@ body[data-mode="graph"] #install-video-area .focal-side-blur { display: none; }
 /* Blend control already lays out left-to-right; spacing handled by gap. */
 #blend-control .blend-kbd { margin-left: 6px; }
 
-/* DCW (wavelet correction) toggle + mode/wavelet selectors. Lives inside
-   the DCW tile alongside the two DCW faders. */
+/* DCW (wavelet correction) toggle + mode/wavelet selectors. Originally
+   a right-side column; the ``--bottom`` modifier lays it out as a
+   horizontal strip beneath the fader row instead so the tile's height
+   collapses to the fader height. */
 .dcw-panel {
   display: flex;
   flex-direction: column;
@@ -1876,6 +1880,20 @@ body[data-mode="graph"] #install-video-area .focal-side-blur { display: none; }
   padding: 0;
   border: none;
   background: transparent;
+}
+.dcw-panel.dcw-panel--bottom {
+  flex-direction: row;
+  align-items: center;
+  align-self: stretch;
+  width: auto;
+  gap: 10px;
+  padding-top: 4px;
+  border-top: 1px solid var(--frame-line);
+  flex-wrap: wrap;
+}
+.dcw-panel.dcw-panel--bottom .dcw-row {
+  flex: 0 0 auto;
+  gap: 4px;
 }
 
 /* Seed tile content — dice button stacked over the value display. */

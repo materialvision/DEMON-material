@@ -42,8 +42,20 @@ export const SLIDER_META: Record<string, SliderMeta> = {
 
   // DCW (wavelet-domain post-step correction). Numeric knobs only; the
   // boolean ON/OFF + mode + wavelet choices live in their own panel state.
-  dcw_scaler: { max: 0.2, step: 0.02, pro: true },
-  dcw_high_scaler: { max: 0.1, step: 0.01, pro: true },
+  //
+  // Caps for dcw_scaler / dcw_high_scaler are bumped past the upstream
+  // "usable" range (~0.1) so the operator can drive DCW into audible
+  // artifact territory while A/B'ing the three advanced faders. The
+  // defaults (0.05 / 0.02) still match upstream-v0.1.7.
+  dcw_scaler: { max: 0.5, step: 0.02, pro: true },
+  dcw_high_scaler: { max: 0.5, step: 0.02, pro: true },
+  // Advanced surface — composes on top of the additive update. Field
+  // names mirror DCWAdvanced in acestep/engine/dcw.py one-to-one, so
+  // sliderValues spreads straight into the server params dict with
+  // no remap layer in useParamSync.
+  dcw_mult_blend: { max: 1.0, step: 0.05, pro: true },
+  dcw_mag_phase: { max: 1.0, step: 0.05, pro: true },
+  dcw_soft_thresh: { max: 0.3, step: 0.01, pro: true },
 };
 
 export const DCW_MODES = ["low", "high", "double", "pix"] as const;

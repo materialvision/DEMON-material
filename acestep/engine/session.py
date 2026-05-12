@@ -573,6 +573,7 @@ class Session:
         dcw_scaler: float = 0.05,
         dcw_high_scaler: float = 0.02,
         dcw_wavelet: str = "haar",
+        dcw_advanced: Optional["DCWAdvanced"] = None,
     ) -> "StreamHandle":
         """Build a streaming graph handle for interactive generation.
 
@@ -622,6 +623,7 @@ class Session:
                 "dcw_scaler": dcw_scaler,
                 "dcw_high_scaler": dcw_high_scaler,
                 "dcw_wavelet": dcw_wavelet,
+                "dcw_advanced": dcw_advanced,
             },
         )
 

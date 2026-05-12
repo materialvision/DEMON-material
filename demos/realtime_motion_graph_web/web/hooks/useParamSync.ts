@@ -61,6 +61,10 @@ export function useParamSync() {
         if (typeof v === "number") raw[k] = v;
       }
       // DCW non-numeric controls — server reads raw.get("dcw_enabled") etc.
+      // The numeric fader values (dcw_scaler / dcw_high_scaler /
+      // dcw_mult_blend / dcw_mag_phase / dcw_soft_thresh) ride through
+      // the sliderValues spread above; pipeline.py's
+      // ``_build_dcw_advanced`` reads the same keys verbatim.
       raw.dcw_enabled = perf.dcwEnabled;
       raw.dcw_mode = perf.dcwMode;
       raw.dcw_wavelet = perf.dcwWavelet;

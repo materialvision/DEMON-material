@@ -10,11 +10,31 @@ import time
 import numpy as np
 import torch
 
+from acestep.engine.dcw import DCWAdvanced
 from acestep.nodes.types import ChannelGuidanceEntry, Latent
 from acestep.nodes.vae_nodes import EmptyLatent, LatentBlend
 
 from .knobs import CHANNEL_GROUPS, KEYSTONE_CHANNELS
 from .protocol import SAMPLE_RATE, T
+
+
+def _build_dcw_advanced(raw: dict) -> "DCWAdvanced | None":
+    """Translate the client's three DCW fader values into a
+    :class:`DCWAdvanced`, or return ``None`` when all three are zero.
+
+    Returning ``None`` lets the corrector take its byte-identical fast
+    path, so "all faders at the bottom" costs nothing over upstream DCW.
+    """
+    mult_blend = float(raw.get("dcw_mult_blend", 0.0))
+    mag_phase = float(raw.get("dcw_mag_phase", 0.0))
+    soft_thresh = float(raw.get("dcw_soft_thresh", 0.0))
+    if mult_blend == 0.0 and mag_phase == 0.0 and soft_thresh == 0.0:
+        return None
+    return DCWAdvanced(
+        mult_blend=mult_blend,
+        mag_phase=mag_phase,
+        soft_thresh=soft_thresh,
+    )
 
 
 
@@ -509,6 +529,7 @@ class PipelineRunner:
                 dcw_scaler=float(raw.get("dcw_scaler", 0.05)),
                 dcw_high_scaler=float(raw.get("dcw_high_scaler", 0.02)),
                 dcw_wavelet=str(raw.get("dcw_wavelet", "haar")),
+                dcw_advanced=_build_dcw_advanced(raw),
             )
             torch.cuda.synchronize()
             tick_ms = (time.perf_counter() - t0) * 1000
