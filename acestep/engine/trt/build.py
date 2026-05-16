@@ -235,12 +235,21 @@ def _resolve_decoder_precision(
 
     ``decoder_mixed`` preserves the legacy 2B behavior: when callers ask
     for the old mixed path, ``auto`` maps to the fp16 mixed export recipe.
-    XL checkpoints need bf16 range, so their ``auto`` default is bf16_mixed.
+
+    XL ``auto`` resolves to ``fp8_mixed`` (W8A8). This is the production
+    target for the XL turbo decoder: bf16 is too slow for XL to be useful
+    in real-time streaming, so the canonical engine names in
+    ``acestep.paths`` (``decoder_xl-turbo_fp8_refit_b4_*``) are FP8. To
+    actually get W8A8 (vs the silent W8A16 fallback) the build must also
+    receive ``--activation-absmax-json`` pointing at a calibration JSON
+    from ``scripts/collect_activation_absmax.py``; without it the FP8
+    patch runs weight-only, which leaves the GEMM in bf16 with a free
+    dequant and gives back the latency the FP8 build was supposed to win.
     """
     if requested != "auto":
         return requested
     if _looks_like_xl_checkpoint(checkpoint):
-        return "bf16_mixed"
+        return "fp8_mixed"
     if decoder_mixed:
         return "fp16_mixed"
     return "fp32"
@@ -316,6 +325,7 @@ def _patch_decoder_onnx_for_fp8(
     calibration_npz: str,
     activation_absmax_json: str | None,
     activation_percentile: str,
+    activation_outlier_skip_ratio: float,
     smoothquant_alpha: float,
     force: bool,
 ) -> dict[str, str]:
@@ -342,6 +352,16 @@ def _patch_decoder_onnx_for_fp8(
     if activation_absmax_json:
         amax_path = Path(activation_absmax_json)
         if not amax_path.exists():
+            # Canonical XL FP8 calibrations live on HF; if the local
+            # file is missing but the path matches the standard layout
+            # (<root>/<component>/<profile>/activation_absmax.json),
+            # fetch and continue. Falls through to FileNotFoundError
+            # for non-canonical paths.
+            from .calibration_hub import resolve_or_fetch
+            fetched = resolve_or_fetch(amax_path)
+            if fetched is not None:
+                amax_path = fetched
+        if not amax_path.exists():
             raise FileNotFoundError(f"Activation absmax JSON not found: {amax_path}")
 
     from .fp8_onnx import patch_bf16_onnx_to_fp8
@@ -359,6 +379,7 @@ def _patch_decoder_onnx_for_fp8(
                 calibration_npz_path=cal_path,
                 activation_absmax_json_path=amax_path,
                 activation_percentile=activation_percentile,
+                activation_outlier_skip_ratio=activation_outlier_skip_ratio,
                 smoothquant_alpha=smoothquant_alpha,
                 force=force,
             )
@@ -899,6 +920,20 @@ def _build_decoder_engine(
     t0 = time.time()
     build_trt_engine(onnx_paths[onnx_key], engine_path, config=config)
     _write_metadata(engine_path=engine_path, expected=expected_metadata, env=env)
+    # Copy the refit orientation manifest from the ONNX export next to the
+    # engine so TRTLoRAManager can find it at runtime. The manifest tells
+    # the runtime which renamed weights are stored in the engine slot in
+    # ``[in_dim, out_dim]`` orientation (dynamo's MatMul layout) so the
+    # LoRA delta gets transposed before refit. Absent for non-refit and
+    # for the legacy torchscript path (which stored torch-orientation
+    # natively, no transpose needed).
+    onnx_manifest = Path(str(onnx_paths[onnx_key]) + ".refit_manifest.json")
+    if onnx_manifest.is_file():
+        engine_manifest = Path(str(engine_path) + ".refit_manifest.json")
+        engine_manifest.write_text(
+            onnx_manifest.read_text(encoding="utf-8"), encoding="utf-8",
+        )
+        logger.info("Copied refit manifest to {}", engine_manifest)
     elapsed = time.time() - t0
     logger.info("Built in {:.0f}s", elapsed)
 
@@ -1119,6 +1154,11 @@ def main():
                      default="absmax",
                      help="Which activation amax field drives the FP8 scale "
                           "(default: absmax).")
+    fp8.add_argument("--activation-outlier-skip-ratio", type=float, default=0.0,
+                     help="When > 0, Linears whose absmax/p99_9 ratio exceeds "
+                          "this threshold skip activation Q-DQ and stay on the "
+                          "W8A16 path (bf16 act x FP8 weight DQ). 4.0 is a "
+                          "reasonable default for outlier-heavy DiT layers.")
     fp8.add_argument("--smoothquant-alpha", type=float, default=0.0,
                      help="SmoothQuant migration strength (0.0 = off, 0.5 = "
                           "standard).")
@@ -1218,6 +1258,7 @@ def _run_all(args, project_root, onnx_dir, env):
             calibration_npz=args.calibration_npz,
             activation_absmax_json=args.activation_absmax_json,
             activation_percentile=args.activation_percentile,
+            activation_outlier_skip_ratio=args.activation_outlier_skip_ratio,
             smoothquant_alpha=args.smoothquant_alpha,
             force=args.force_onnx,
         )
@@ -1337,6 +1378,7 @@ def _run_single(args, project_root, onnx_dir, env):
         calibration_npz=args.calibration_npz,
         activation_absmax_json=args.activation_absmax_json,
         activation_percentile=args.activation_percentile,
+        activation_outlier_skip_ratio=args.activation_outlier_skip_ratio,
         smoothquant_alpha=args.smoothquant_alpha,
         force=args.force_onnx,
     )

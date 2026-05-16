@@ -174,16 +174,21 @@ class DiffusionEngine:
             from acestep.engine.trt.lora_refit import TRTLoRAManager
 
             # Find checkpoint for base weights (needed when decoder is
-            # discarded in TRT mode)
+            # discarded in TRT mode). Pass the checkpoint DIR; the
+            # lora_refit module handles both single-file
+            # (``model.safetensors``) and HF sharded
+            # (``model.safetensors.index.json`` + shards) layouts. The 2B
+            # turbo decoder fits in a single shard; the XL decoder is
+            # split across 4. Passing only the single-file path used to
+            # silently leave 0/1184 weights mapped on XL because the
+            # candidate didn't exist.
             ckpt_path = None
             cfg = getattr(self.model, "config", None)
             if cfg is not None:
                 import os
-                candidate = os.path.join(
-                    getattr(cfg, "_name_or_path", ""), "model.safetensors"
-                )
-                if os.path.exists(candidate):
-                    ckpt_path = candidate
+                ckpt_dir = getattr(cfg, "_name_or_path", "")
+                if ckpt_dir and os.path.isdir(ckpt_dir):
+                    ckpt_path = ckpt_dir
 
             self._lora_manager = TRTLoRAManager(
                 engine=self._trt_engine,
@@ -191,6 +196,7 @@ class DiffusionEngine:
                 device=torch.device("cuda"),
                 trt_weight_prefix="decoder.",
                 checkpoint_path=ckpt_path,
+                engine_path=str(engine_path),
             )
             # Pre-register the on-disk library (MODELS_DIR/loras).  This
             # is the catalog backing the "infinite library" workflow:
