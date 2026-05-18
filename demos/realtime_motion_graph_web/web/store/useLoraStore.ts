@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 
-import { getConfig } from "@/lib/config";
+import { getConfig, isConfigApplied } from "@/lib/config";
 import { useSessionStore } from "@/store/useSessionStore";
 import {
   LORA_DEFAULT_STRENGTH_FRACTION,
@@ -55,14 +55,30 @@ function sortCatalogForDisplay(
 // explicitly disabled.
 const HARDCODED_PREFERRED_LORAS = ["deathstep", "synthpop"] as const;
 
+/** Build a lowercased alias→id lookup from the catalog. Each entry
+ *  contributes its filename stem (`entry.id`) and, when a metadata
+ *  sidecar is present, its display name (`entry.metadata.name`). Used
+ *  to resolve config references that may be written as either form
+ *  (`"deep_house-v1"` or `"Deep House"`). Lookup is case-insensitive;
+ *  the returned value is always the canonical id. */
+function buildLoraAliasMap(catalog: LoraCatalogEntry[]): Map<string, string> {
+  const aliases = new Map<string, string>();
+  for (const entry of catalog) {
+    aliases.set(entry.id.toLowerCase(), entry.id);
+    const name = entry.metadata?.name;
+    if (name) aliases.set(name.toLowerCase(), entry.id);
+  }
+  return aliases;
+}
+
 /** Resolve the initial strength for a catalog entry.
  *
  *  Priority (highest first):
  *    1. Server-reported live strength (`entry.strength > 0`) — set when
  *       the LoRA is already enabled mid-session.
- *    2. Per-LoRA override in `engine.lora_strength_overrides[id]` — the
- *       operator's escape hatch for sidecar values that don't suit a
- *       given checkpoint.
+ *    2. Inline strength on the `enabled_loras` entry (object form
+ *       `{ name, strength }`) — the operator's escape hatch for sidecar
+ *       values that don't suit a given checkpoint.
  *    3. Sidecar `recommended_strength` from the metadata loader.
  *    4. `controls.lora_default_strength` from the config.
  *    5. Hardcoded `LORA_DEFAULT_STRENGTH_FRACTION * LORA_SLIDER_MAX`.
@@ -105,15 +121,7 @@ function computeSeed(catalog: LoraCatalogEntry[]): {
     typeof cfgStrength === "number" && cfgStrength > 0
       ? cfgStrength
       : LORA_DEFAULT_STRENGTH_FRACTION * LORA_SLIDER_MAX;
-  const overrides = cfg.engine.lora_strength_overrides ?? {};
-  const strengths: Record<string, number> = {};
-  for (const entry of catalog) {
-    strengths[entry.id] = resolveDefaultStrength(
-      entry,
-      fallbackStrength,
-      overrides,
-    );
-  }
+
   // Pick the auto-enable set from the COMPATIBLE subset of the catalog
   // so a 5B LoRA listed in enabled_loras can't auto-enable on a 2B
   // session (would never apply at the engine level, and the visible-
@@ -125,17 +133,59 @@ function computeSeed(catalog: LoraCatalogEntry[]): {
   const compatibleCatalog = catalog.filter((e) =>
     isLoraCompatibleWithScale(e, sessionScale),
   );
-  const cfgPreferred = cfg.engine.enabled_loras;
+
+  // Alias resolution: `enabled_loras` entries reference LoRAs by either
+  // filename stem or sidecar display name, case-insensitively. Build
+  // from `compatibleCatalog` (not the full catalog) so a display name
+  // shared across scale variants — e.g. both `ambient-v1` (2B) and
+  // `ambient-xl-v1` (5B) carry `metadata.name = "Ambient"` — resolves
+  // to the entry matching the active checkpoint. The full-catalog map
+  // suffered last-write-wins: xl entries register after turbo, so
+  // "Ambient" would always resolve to `ambient-xl-v1`, and slot
+  // fallback would fire on 2B sessions.
+  const aliases = buildLoraAliasMap(compatibleCatalog);
+
+  // Parse `enabled_loras` entries into (a) a list of names to resolve
+  // in the auto-enable loop and (b) a per-id strength override map for
+  // any object-form entries that specify a `strength`. Bare strings
+  // contribute only to (a) and fall through to sidecar
+  // recommended_strength.
+  const preferredNames: string[] = [];
+  const overrides: Record<string, number> = {};
+  for (const entry of cfg.engine.enabled_loras) {
+    if (typeof entry === "string") {
+      preferredNames.push(entry);
+    } else {
+      preferredNames.push(entry.name);
+      if (typeof entry.strength === "number") {
+        const id = aliases.get(entry.name.toLowerCase());
+        if (id) overrides[id] = entry.strength;
+      }
+    }
+  }
+
+  const strengths: Record<string, number> = {};
+  for (const entry of catalog) {
+    strengths[entry.id] = resolveDefaultStrength(
+      entry,
+      fallbackStrength,
+      overrides,
+    );
+  }
   const preferredList: readonly string[] =
-    cfgPreferred.length > 0 ? cfgPreferred : HARDCODED_PREFERRED_LORAS;
+    preferredNames.length > 0 ? preferredNames : HARDCODED_PREFERRED_LORAS;
   const enabled = new Set<string>();
   const present = new Set(compatibleCatalog.map((e) => e.id));
   const claimed = new Set<string>();
   for (let i = 0; i < preferredList.length; i++) {
     const preferred = preferredList[i];
+    // Resolve display name or stem to canonical id. Falls through to
+    // the original string on miss so the slot-fallback path below
+    // still fires (matches pre-alias behavior).
+    const resolved = aliases.get(preferred.toLowerCase()) ?? preferred;
     let pick: string | undefined;
-    if (present.has(preferred) && !claimed.has(preferred)) {
-      pick = preferred;
+    if (present.has(resolved) && !claimed.has(resolved)) {
+      pick = resolved;
     } else {
       const slot = compatibleCatalog[i]?.id;
       pick = slot && !claimed.has(slot)
@@ -189,7 +239,16 @@ export const useLoraStore = create<LoraState>((set) => ({
       // flips on the preferred default LoRAs (config.engine.enabled_loras
       // → HARDCODED_PREFERRED_LORAS fallback, with index-slot dedup);
       // later re-broadcasts must not resurrect a user-disabled LoRA.
-      const shouldSeed = !s.seeded && catalog.length > 0;
+      //
+      // Also gate on isConfigApplied(): in LOCAL_MODE, LibraryTile fires
+      // its own /api/loras at mount, racing RTMGBoot's parallel fetches.
+      // If the catalog lands before applyConfig(), seeding here would
+      // read DEFAULT_CONFIG.engine.enabled_loras = [], fall through to
+      // the count-rule, and pick whichever LoRAs sort first. Stash the
+      // catalog and let applyConfig() retrigger this method once the
+      // config is in place.
+      const shouldSeed =
+        !s.seeded && catalog.length > 0 && isConfigApplied();
       const enabled = shouldSeed
         ? new Set<string>([...s.enabled, ...fresh.enabled])
         : s.enabled;
