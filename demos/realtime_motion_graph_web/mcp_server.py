@@ -201,8 +201,8 @@ def _build_knob_catalog(sde: bool, enabled_lora_ids: list[str]) -> dict[str, dic
     else:
         out["denoise"] = {"default": 0.0, "max": 1.0, "group": "core",
                           "description": "ODE denoise strength"}
-    out["seed"] = {"default": 0.0, "max": 1.0, "group": "core",
-                   "description": "Stream seed control"}
+    out["seed"] = {"default": 0, "max": 0xFFFFFFFF, "group": "core",
+                   "description": "Stream seed (uint32 integer; passed to torch.manual_seed)"}
     out["feedback"] = {"default": 0.0, "max": 1.0, "group": "core",
                        "description": "Feedback amount"}
     out["shift"] = {"default": 0.5, "max": 1.0, "group": "core",

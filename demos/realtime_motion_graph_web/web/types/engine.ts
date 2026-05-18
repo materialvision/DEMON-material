@@ -3,6 +3,11 @@
 export interface SliderMeta {
   /** Maximum value (slider top). */
   max: number;
+  /** Minimum value (slider bottom). Defaults to 0 when omitted. Used
+   *  for sliders whose engine value has a non-zero floor (e.g.
+   *  feedback_depth, where 0 is meaningless — the smallest valid tap is
+   *  1, "blend with the most recent finished latent"). */
+  min?: number;
   /** Arrow-key step. */
   step: number;
   /** Hide from the simple Main tile; live in pro/advanced areas. */
@@ -31,7 +36,7 @@ export const SLIDER_META: Record<string, SliderMeta> = {
   // feedback can produce echo / ghost effects without needing to crank
   // the blend coefficient near 1.0 (which is the only way to reach
   // distant past via the implicit recursion).
-  feedback_depth: { max: 8, step: 1, pro: true },
+  feedback_depth: { min: 1, max: 8, step: 1, pro: true },
   shift: { max: 1.0, step: 0.1, pro: true },
   // RCFG guidance scale. Only takes effect when rcfg_mode != "off". The
   // turbo model is CFG-distilled (trained to operate at scale=1 with

@@ -1,10 +1,30 @@
 "use client";
 
+import { useState } from "react";
+
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 
 export function SeedTile() {
   const seed = usePerformanceStore((s) => s.seed);
   const randomize = usePerformanceStore((s) => s.randomizeSeed);
+  const setSeed = usePerformanceStore((s) => s.setSeed);
+
+  // Double-click on the value cell swaps it for a text input. setSeed
+  // clamps to [0, 0xFFFFFFFF] and floors to int, so any out-of-range or
+  // decimal input lands at a sensible value rather than silently failing.
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState("");
+  const startEdit = () => {
+    setEditText(String(seed));
+    setEditing(true);
+  };
+  const commitEdit = () => {
+    const parsed = parseInt(editText, 10);
+    if (Number.isFinite(parsed)) setSeed(parsed);
+    setEditing(false);
+  };
+  const cancelEdit = () => setEditing(false);
+
   return (
     <div className="mixer-tile mixer-tile-seed" data-tile="seed">
       <div className="mixer-tile-label">Seed</div>
@@ -37,9 +57,36 @@ export function SeedTile() {
             <circle cx="15.5" cy="15.5" r="1.1" fill="currentColor" stroke="none" />
           </svg>
         </button>
-        <div className="slider-value" id="seed-value">
-          {seed.toFixed(2)}
-        </div>
+        {editing ? (
+          <input
+            className="slider-value slider-value-edit seed-value-edit"
+            id="seed-value"
+            type="text"
+            inputMode="numeric"
+            autoFocus
+            value={editText}
+            onChange={(e) => setEditText(e.target.value)}
+            onFocus={(e) => e.currentTarget.select()}
+            onBlur={commitEdit}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                e.currentTarget.blur();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                cancelEdit();
+              }
+            }}
+          />
+        ) : (
+          <div
+            className="slider-value"
+            id="seed-value"
+            onDoubleClick={startEdit}
+          >
+            {seed}
+          </div>
+        )}
         <kbd className="desktop-only">F</kbd>
       </div>
     </div>

@@ -10,7 +10,7 @@ export function ChannelGainsTile() {
   const ranges = useConfig().channel_ranges;
   return (
     <SliderTile
-      label="Channel Gains"
+      label="Channel Gains (experimental)"
       params={PARAMS.map((p) => {
         const r = ranges[p];
         return {

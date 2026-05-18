@@ -81,7 +81,7 @@ function handleCC(cc: number, value: number): void {
   // mapping (knob CW → engine value DOWN) and relative deltas (knob
   // tick UP → engine value DOWN), mirroring SliderGroup's behavior.
   const range = getChannelRange(param);
-  const min = range?.min ?? 0;
+  const min = range?.min ?? meta?.min ?? 0;
   // LoRA strength sliders (`lora_str_<id>`) aren't in SLIDER_META;
   // their range is fixed by LORA_SLIDER_MAX (matches the LibraryTile
   // widget, edge bars, and useScheduledCurves). Without this branch

@@ -396,7 +396,17 @@ class PipelineRunner:
             src_T = self.walk_window_T if walk_active else full_src_T
 
             k1 = raw[self.k1_name]
-            seed = int(raw["seed"] * 1000) if self.use_midi else self.SEED
+            # Seed flows in as a plain integer (UI store + MCP both ship
+            # uint32). Legacy clients used to send a 0..1 float which the
+            # pipeline then scaled by 1000 — that hidden multiplier
+            # silently capped entropy at ~1000 values and was the source
+            # of the "seed cell doesn't look like a seed" complaint. If a
+            # stray sub-1 value still shows up (older client connected
+            # against newer server), forward it as-is; the engine treats
+            # 0 as a valid seed.
+            seed = (
+                int(raw["seed"]) if self.use_midi else self.SEED
+            )
             feedback = raw["feedback"]
             shift_raw = raw["shift"]
 

@@ -301,7 +301,7 @@ export function OperatorStrip() {
           // misconception gets corrected before the change applies.
           const ok = await confirm({
             title: "Change key",
-            message: `Change key to "${newKey}"?\n\nThis tells the model what key the song is in. It does NOT change the song's pitch or transpose the audio.`,
+            message: `Change key to "${newKey}"?\n\nThis tells the model what key the song is in. It will affect the pitch of the output, but it does NOT perfectly transpose the audio.`,
             confirmLabel: "Change key",
           });
           if (!ok) {

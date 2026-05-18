@@ -10,7 +10,7 @@ export function ChannelsTile() {
   const ranges = useConfig().channel_ranges;
   return (
     <SliderTile
-      label="Channels"
+      label="Channels (experimental)"
       params={PARAMS.map((p) => {
         const r = ranges[p];
         return {

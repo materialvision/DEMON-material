@@ -289,7 +289,11 @@ interface PerformanceState {
    *  per-key when the demo finishes (tickDropTweens) or the user
    *  touches the slider (setSlider / bumpSlider / setSliderDirect). */
   sliderDisplayOverride: Record<string, number>;
-  /** Random seed in 0..1; "dice" button reroll. */
+  /** Integer seed forwarded straight to torch.manual_seed on the engine.
+   *  Range [0, 0xFFFFFFFF] (uint32). The "dice" button rerolls; the
+   *  value cell is double-click-editable. Previously a 0..1 float that
+   *  pipeline.py multiplied by 1000 — that hidden multiplier capped
+   *  entropy at 1001 values; we send the int as-is now. */
   seed: number;
   /** Two prompts. The A/B blend itself lives in
    *  ``sliderValues["prompt_blend"]`` so it rides the Smooth tween
@@ -489,7 +493,8 @@ function clampToMeta(param: string, value: number): number {
   // the generic 2.0 fallback.
   const max = meta?.max
     ?? (param.startsWith("lora_str_") ? LORA_SLIDER_MAX : 2.0);
-  return Math.max(0, Math.min(max, value));
+  const min = meta?.min ?? 0;
+  return Math.max(min, Math.min(max, value));
 }
 
 /** Returns a partial state that drops `param` from sliderDisplayOverride
@@ -606,8 +611,10 @@ export const usePerformanceStore = create<PerformanceState>((set) => ({
     }));
     ensureTween(param);
   },
-  setSeed: (seed) => set({ seed: Math.max(0, Math.min(1, seed)) }),
-  randomizeSeed: () => set({ seed: Math.random() }),
+  setSeed: (seed) =>
+    set({ seed: Math.max(0, Math.min(0xffffffff, Math.floor(seed))) }),
+  randomizeSeed: () =>
+    set({ seed: Math.floor(Math.random() * 0x100000000) }),
   setPromptA: (s) => set({ promptA: s }),
   setPromptB: (s) => set({ promptB: s }),
   setKey: (k) => set({ activeKey: k }),

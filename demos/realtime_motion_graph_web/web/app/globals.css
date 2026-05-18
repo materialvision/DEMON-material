@@ -155,8 +155,9 @@ body.cursor-hidden nextjs-portal * {
    pre-rasterised radial-gradient sprites + globalCompositeOperation =
    "lighter" — both engines hardware-composite that path.
 
-   body.cursor-idle fades the canvas via opacity (HW-accelerated) on the
-   existing 2s idle timer. */
+   body.kiosk.cursor-idle fades the canvas via opacity (HW-accelerated)
+   on the existing 2s idle timer — auto-hide is gated to kiosk mode so
+   the cursor stays visible during normal operation. */
 .cursor-canvas {
   position: fixed;
   inset: 0;
@@ -180,7 +181,11 @@ body.cursor-hidden nextjs-portal * {
   contain: paint;
 }
 
-body.cursor-idle .cursor-canvas { opacity: 0; }
+/* Auto-hide only kicks in inside kiosk mode. Outside kiosk the cursor
+   should always stay visible — the .cursor-idle class can still be
+   present (operators may have a partial-idle UI in the future) but it
+   no longer fades the cursor unless the body is also in kiosk. */
+body.kiosk.cursor-idle .cursor-canvas { opacity: 0; }
 
 /* ── Performance screen + Play overlay ───────────────────────────────────── */
 #performance {
@@ -1937,6 +1942,23 @@ body[data-mode="graph"] #install-video-area .focal-side-blur { display: none; }
   color: var(--slider-tint, var(--accent));
   transition: color 70ms linear;
 }
+/* Inline-edit input shown when the value cell is double-clicked.
+   Matches the static .slider-value layout so the row doesn't shift
+   when toggling between modes; visible border + focus ring make it
+   obvious the field is now an editable input. */
+input.slider-value-edit {
+  width: 4ch;
+  padding: 1px 3px;
+  text-align: center;
+  background: var(--frame);
+  border: 1px solid var(--frame-line);
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+input.slider-value-edit:focus {
+  border-color: var(--slider-tint, var(--accent));
+  box-shadow: 0 0 0 1px var(--slider-tint, var(--accent));
+}
 
 .slider-group kbd,
 .blend-kbd,
@@ -2001,6 +2023,9 @@ body[data-mode="graph"] #install-video-area .focal-side-blur { display: none; }
   flex: 1 1 auto;
   justify-content: center;
 }
+/* Seed value is an integer in [0, 0xFFFFFFFF] — up to 10 digits — so
+   override the .slider-value-edit 4ch width when used inside SeedTile. */
+input.seed-value-edit { width: 11ch; }
 
 /* Prompts tile spans the full drawer width on its own row beneath the
    fader tiles. flex-basis:100% combined with the parent's flex-wrap means
