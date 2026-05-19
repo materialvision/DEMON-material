@@ -270,7 +270,7 @@ export function SliderGroup({
     const onWheel = (e: WheelEvent) => {
       if (editingRef.current) return;
       e.preventDefault();
-      const step = e.shiftKey ? 0.005 : 0.02;
+      const step = e.shiftKey ? 0.005 : 0.01;
       const dir = -Math.sign(e.deltaY);
       if (dir === 0) return;
       const current = usePerformanceStore.getState().sliderTargets[param] ?? 0;
@@ -295,13 +295,16 @@ export function SliderGroup({
   const tooltip = tooltipFor(param);
 
   return (
-    <div className="slider-group" data-param={param} style={tintStyle}>
-      <div
-        className="slider-label"
-        {...(tooltip
-          ? { "data-dd-tooltip": tooltip, "data-dd-tooltip-wide": "" }
-          : {})}
-      >
+    <div
+      className="slider-group"
+      data-param={param}
+      style={tintStyle}
+      data-dd-tooltip-title={label}
+      {...(tooltip
+        ? { "data-dd-tooltip": tooltip, "data-dd-tooltip-wide": "" }
+        : {})}
+    >
+      <div className="slider-label">
         {label}
       </div>
       <div className="slider-track" ref={trackRef}>

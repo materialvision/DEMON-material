@@ -417,6 +417,7 @@ function LoraRow({ entry }: RowProps) {
         data-state={enabled ? "enabled" : "disabled"}
         data-dd-tooltip={tooltipText}
         data-dd-tooltip-wide={tooltipText ? "" : undefined}
+        data-dd-tooltip-title={displayName}
         data-dd-tooltip-show={confirmMsg !== null ? "true" : undefined}
         onContextMenu={onRowContextMenu}
       >
@@ -544,7 +545,7 @@ export function LibraryTile() {
 
   return (
     <div className="mixer-tile" data-tile="library">
-      <div className="mixer-tile-label">Library</div>
+      <div className="mixer-tile-label">LoRA Library</div>
       <div className="lora-search">
         <input
           type="text"

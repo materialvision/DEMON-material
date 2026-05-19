@@ -8,23 +8,27 @@ import { SliderGroup } from "./SliderGroup";
 
 interface Props {
   label: string;
-  params: {
-    param: string;
-    label: string;
-    max?: number;
-    min?: number;
-    reverse?: boolean;
-    unity?: number;
-  }[];
+  params: { param: string; label: string; max?: number }[];
 }
 
+// Display names — anchored in traditional audio vocabulary (synth /
+// multi-FX / EQ heritage) so the labels read instantly to anyone who's
+// touched a hardware unit or plugin. Where the underlying concept has
+// no clean analog (shift, noise_share), the technical label stays.
+// CSS uppercases these on render via .slider-label / .mixer-tile-label.
 const DISPLAY_NAMES: Record<string, string> = {
-  feedback_depth: "fb depth",
-  hint_strength: "structure strength",
+  // Macros where the friendly name reads more clearly than the
+  // engine-honest one: `structure` for `hint_strength`, `timbre` for
+  // `timbre_strength` (drop the "strength" suffix on knobs — the value
+  // readout already conveys magnitude). Everything else falls back to
+  // defaultLabelFor (underscore → space) so the UI matches what the
+  // engine, MIDI map, and config files call them.
+  hint_strength: "structure",
+  timbre_strength: "timbre",
+  // dcw_* keep their engine-honest "DCW low" / "DCW high" — these are
+  // DCW-internal scalers, not generic EQ.
   dcw_scaler: "DCW low",
   dcw_high_scaler: "DCW high",
-  guidance_scale: "CFG",
-  cfg_rescale: "CFG rescale",
 };
 
 // Tooltip copy for each tweakable param, surfaced via the slider label's
@@ -127,15 +131,12 @@ export function SliderTile({ label, params }: Props) {
     <div className="mixer-tile" data-tile={label.toLowerCase().replace(/ /g, "-")}>
       <div className="mixer-tile-label">{label}</div>
       <div className="mixer-channels">
-        {params.map(({ param, label: pLabel, max, min, reverse, unity }) => (
+        {params.map(({ param, label: pLabel, max }) => (
           <SliderGroup
             key={param}
             param={param}
             label={pLabel}
             max={max}
-            min={min}
-            reverse={reverse}
-            unity={unity}
             kbd={KBD_FOR_PARAM[param]}
           />
         ))}
