@@ -1846,10 +1846,11 @@ body.drawer-open {
   bottom: max(calc(var(--hud-thickness) + 24px), env(safe-area-inset-bottom, 0px));
 }
 /* The persistent help readout adds 88–28vh at the bottom of every
-   drawer body. In spread mode the user is scanning the full control
-   surface, not reading hover-help; suppress it so the grid claims
-   that vertical space instead. */
-.install-sheet--spread .drawer-help-bar { display: none; }
+   drawer body. In spread mode the static block would eat the grid
+   height the layout exists to maximise. DrawerHelpBar instead renders
+   only while actively hovering (returns null when idle) and adds the
+   `--overlay` modifier below, so the bar floats over the bottom of
+   the panel instead of pushing the grid up. */
 @media (max-width: 768px) {
   .install-sheet--spread { width: auto; }
 }
@@ -1990,6 +1991,30 @@ body.drawer-open {
   color: var(--text-dim);
   font-style: italic;
   margin: 0;
+}
+/* Overlay variant — used by the drawer's spread (all-controls) layout
+   so the bar floats over the bottom of the panel without stealing
+   grid height. Only mounted while the user is actively hovering a
+   tooltipped control (see DrawerHelpBar's `spread` prop), so there's
+   no idle chrome over the section grid. The right edge stops before
+   the 32px edge-handle column so the handle and the spread-toggle
+   pinned inside it stay clickable. */
+.drawer-help-bar--overlay {
+  position: absolute;
+  left: 0;
+  right: 32px;
+  bottom: 0;
+  margin-top: 0;
+  flex: none;
+  min-height: 0;
+  max-height: 25%;
+  background: rgba(8, 8, 14, 0.78);
+  -webkit-backdrop-filter: blur(6px);
+          backdrop-filter: blur(6px);
+  border-radius: 0 0 0 var(--radius-md);
+  /* Above the section grid (no explicit z-index → auto) but below the
+     edge handle and the spread toggle, both of which sit at z-index 3. */
+  z-index: 2;
 }
 @media (max-width: 768px) {
   /* No drawer on mobile — the help bar lives in the desktop install
@@ -2706,11 +2731,58 @@ body.drawer-open .hud-help-readout {
    pair sitting between the knob row and the tool column — same drag
    semantics as the (removed) left-edge StylePanel, just shrunk to fit
    the bay's vertical footprint. */
-.hero-macros-styles {
+.hero-macros-styles,
+.hero-macros-stems {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+/* Center the shorter sections (stems + tools) within the panel's
+   vertical band rather than letting them fall to the bottom edge. The
+   knob row + LoRA fader pair are the tallest things in the bay; with
+   flex-end alignment everything else sticks to the bottom and the
+   tops drift, which reads as unbalanced. Letting these two sections
+   center re-balances the whole bay around the body band. */
+.hero-macros-stems,
+.hero-macros-tools {
+  align-self: center;
+}
+.hero-macros-group-row {
   display: flex;
   flex-direction: row;
   align-items: flex-end;
   gap: 10px;
+}
+.hero-macros-group-label {
+  font-family: var(--font-mono);
+  /* Matches `.hero-macros .knob-label` (also 0.5em) so STEM LAYERS
+     sits at the same typographic weight as DENOISE / STRUCTURE /
+     TIMBRE / SEED above the other column labels. */
+  font-size: 0.5em;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+/* Italicised one-liner that sits between the section header and the
+   panners — mirrors the status copy the floating StemOverlayPanel used
+   to render ("Ripping stems…" / "Stem rip failed" / "Stems will load
+   on play" / "Inference source: <mode>"). Tightened to the header
+   above with a negative margin so the status reads as a subtitle, not
+   its own row. */
+.hero-macros-group-status {
+  font-family: var(--font-mono);
+  font-size: 0.42em;
+  font-style: italic;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  white-space: nowrap;
+  text-align: center;
+  margin-top: -4px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .hero-style-fader {
   display: flex;
@@ -2735,9 +2807,11 @@ body.drawer-open .hud-help-readout {
 }
 .hero-style-fader-track {
   position: relative;
-  /* Slim 4px track centered in the wider 48px column so the cap +
-     fill keep their original visual weight despite the wider fader. */
-  width: 4px;
+  /* Generous 20px hit target — matches the cap width — so the slider
+     is comfortable to grab. The visual track (::before) and fill are
+     absolutely positioned at 50%, so the rendered weight stays 3px
+     regardless of the hit-area width. */
+  width: 20px;
   margin: 0 auto;
   height: 56px;
   cursor: ns-resize;
@@ -2833,6 +2907,156 @@ body.drawer-open .hud-help-readout {
 .mixer-rack--no-kbd-hints .hero-style-fader-kbd { display: none; }
 .hero-style-fader--empty { opacity: 0.35; }
 .hero-style-fader--empty .hero-style-fader-track { cursor: default; }
+
+/* ── Stem layers: horizontal panners stacked vertically ──────────────
+   Visually distinct from the LoRA style faders next to them — the
+   horizontal layout reads as "amount of stem to mix in" rather than
+   "drive this style up/down". Each row is its own track; the column
+   stacks them so the section reads top-to-bottom. The teal tint is
+   the t=1.0 endpoint of the knob arc gradient — different enough from
+   the orange accent that the section reads as its own zone. */
+.hero-stem-panners {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 160px;
+}
+.hero-stem-panner {
+  /* Teal tint shared by the fill bar and cap highlight. Localised
+     as a custom property so future LoRA-style faders or other
+     "blend" controls could opt into the same look by overriding
+     `--stem-tint`. */
+  --stem-tint: #3db6be;
+  display: grid;
+  /* label | track | value-stack */
+  grid-template-columns: 32px 1fr 34px;
+  align-items: center;
+  column-gap: 8px;
+}
+.hero-stem-panner-label {
+  /* Button reset — the label is now a click-to-mute toggle that
+     mirrors the original StemOverlayPanel toggle behavior. The
+     subtle indicators that it's interactive: cursor: pointer +
+     color brightens to the teal tint when active (aria-pressed),
+     and a hover state that previews the active color when muted. */
+  appearance: none;
+  -webkit-appearance: none;
+  border: none;
+  padding: 0;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 7.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-align: right;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: color 140ms ease-out;
+}
+.hero-stem-panner-label[aria-pressed="true"] {
+  color: var(--stem-tint);
+}
+.hero-stem-panner-label:hover:not(:disabled) {
+  color: color-mix(in srgb, var(--stem-tint) 60%, var(--text));
+}
+.hero-stem-panner-label:disabled {
+  cursor: default;
+}
+.hero-stem-panner-label:focus-visible {
+  outline: 1px solid var(--stem-tint);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.hero-stem-panner-track {
+  position: relative;
+  /* 22px hit target — comfortable to grab; the rendered track stays
+     3px tall via the centered ::before, matching the LoRA fader's
+     visual weight. */
+  height: 22px;
+  cursor: ew-resize;
+  touch-action: none;
+}
+.hero-stem-panner-track::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 3px;
+  transform: translateY(-50%);
+  background: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.6) 0%,
+    rgba(0, 0, 0, 0.45) 50%,
+    rgba(255, 255, 255, 0.04) 100%
+  );
+  border-radius: 2px;
+  box-shadow:
+    inset 0 1px 0 rgba(0, 0, 0, 0.7),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.05);
+}
+.hero-stem-panner-fill {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  height: 3px;
+  transform: translateY(-50%);
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--stem-tint) 70%, #000) 0%,
+    var(--stem-tint) 100%
+  );
+  border-radius: 2px;
+  pointer-events: none;
+  transition: width 70ms linear;
+}
+.hero-stem-panner-cap {
+  position: absolute;
+  top: 50%;
+  width: 8px;
+  height: 18px;
+  background: linear-gradient(
+    to bottom,
+    rgb(78, 84, 96) 0%,
+    rgb(42, 46, 54) 48%,
+    rgb(18, 20, 24) 100%
+  );
+  border-radius: 2px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.65),
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    inset 1px 0 0 rgba(255, 255, 255, 0.15),
+    inset -1px 0 0 rgba(0, 0, 0, 0.5);
+  transition: left 70ms linear;
+}
+.hero-stem-panner-cap::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 50%;
+  width: 1px;
+  background: var(--stem-tint);
+  transform: translateX(-50%);
+  border-radius: 1px;
+  box-shadow: 0 0 3px var(--stem-tint);
+}
+.hero-stem-panner-value {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text);
+  text-align: right;
+  line-height: 1;
+}
+.hero-stem-panner--empty { opacity: 0.35; }
+.hero-stem-panner--empty .hero-stem-panner-track { cursor: default; }
 
 /* Record pill — simplified two-state version of the turntable. Idle:
    "Record" with a dim red dot. Active: "MM:SS" with the dot pulsing
@@ -2959,9 +3183,11 @@ body.drawer-open .hud-help-readout {
    only way to close the drawer with the bottom handle gone. */
 body.drawer-open .hero-macros-knobs,
 body.drawer-open .hero-macros-styles,
+body.drawer-open .hero-macros-stems,
 body.drawer-open .hero-macros-divider,
 .hero-macros--curve-open .hero-macros-knobs,
 .hero-macros--curve-open .hero-macros-styles,
+.hero-macros--curve-open .hero-macros-stems,
 .hero-macros--curve-open .hero-macros-divider {
   display: none;
 }
@@ -5647,87 +5873,6 @@ body.curve-open #install-video-area #graph {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 100%;
-}
-
-.stem-overlay-panel {
-  position: fixed;
-  bottom: max(calc(var(--hud-thickness) + 24px), env(safe-area-inset-bottom, 0px));
-  left: max(calc(var(--hud-thickness) + 24px), env(safe-area-inset-left, 0px));
-  z-index: 8;
-  width: min(300px, calc(100vw - 32px));
-  padding: 9px 10px 10px;
-  background: rgba(6, 6, 12, 0.78);
-  -webkit-backdrop-filter: blur(6px);
-          backdrop-filter: blur(6px);
-  border: 1px solid var(--frame-line);
-  border-radius: var(--radius-md);
-  box-shadow:
-    0 14px 36px rgba(0, 0, 0, 0.45),
-    0 0 calc(1px + var(--bloom-amount, 0) * 8px) var(--accent-glow);
-  font-family: var(--font-mono);
-}
-.stem-overlay-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-.stem-overlay-title {
-  font-size: 9px;
-  letter-spacing: var(--tracking-wide);
-  text-transform: uppercase;
-  color: var(--text-strong);
-}
-.stem-overlay-summary {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 9px;
-  letter-spacing: 0.04em;
-  color: var(--text-dim);
-}
-.stem-overlay-controls {
-  display: grid;
-  gap: 6px;
-}
-.stem-overlay-row {
-  display: grid;
-  grid-template-columns: 94px 1fr;
-  align-items: center;
-  gap: 8px;
-}
-.stem-overlay-toggle {
-  appearance: none;
-  border: 1px solid var(--frame-line);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-dim);
-  padding: 5px 8px;
-  font: inherit;
-  font-size: 9px;
-  letter-spacing: var(--tracking-wide);
-  text-transform: uppercase;
-  cursor: pointer;
-  transition: background 140ms, border-color 140ms, color 140ms;
-}
-.stem-overlay-toggle:hover:not(:disabled),
-.stem-overlay-toggle.active {
-  background: var(--accent-soft);
-  border-color: var(--accent-line);
-  color: var(--accent-hover);
-}
-.stem-overlay-toggle:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-.stem-overlay-volume {
-  width: 100%;
-  accent-color: var(--accent);
-}
-.stem-overlay-volume:disabled {
-  opacity: 0.45;
 }
 
 /* ── Fan: scrollable column of track sleeves + pinned upload sleeve ──── */
