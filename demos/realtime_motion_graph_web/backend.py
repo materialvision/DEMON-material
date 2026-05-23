@@ -1551,6 +1551,24 @@ def handle_client(
                     )
                 except Exception:
                     pass
+        elif mtype == "loop_band":
+            # Client armed / moved / cleared a loop band. The worklet
+            # replays only [start_sec, end_sec] (wrapping end→start) while
+            # the pipeline keeps generating; storing the band here lets the
+            # runner wrap its predictive decode target inside the band so
+            # the seam after ``start`` is regenerated before the playhead
+            # loops back to it. Null / degenerate range clears the band
+            # (linear chase resumes). Stored as a plain (start, end) tuple
+            # of seconds; the runner clamps it to the live buffer length.
+            try:
+                s = data.get("start_sec")
+                e = data.get("end_sec")
+                if s is None or e is None or float(e) - float(s) <= 0.0:
+                    audio_eng.loop_band = None
+                else:
+                    audio_eng.loop_band = (float(s), float(e))
+            except (TypeError, ValueError):
+                audio_eng.loop_band = None
         elif mtype == "prompt":
             ts_override = _normalize_time_signature(data.get("time_signature"))
             if ts_override is not None:
@@ -1998,6 +2016,10 @@ def handle_client(
             client_mirror_ref[0] = new_src_np.copy()
             audio_eng.swap(new_src_np)
             audio_eng.position = 0
+            # A loop band from the previous song is meaningless against the
+            # new buffer — drop it so the runner chases linearly until the
+            # client re-arms a band on the new track.
+            audio_eng.loop_band = None
 
             # Notify the client. swap_ready is the streaming-phase analog
             # of "ready"; the binary follow-up is the new initial buffer

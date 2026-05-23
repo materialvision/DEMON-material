@@ -646,6 +646,27 @@ export class RemoteBackend extends EventTarget {
     } catch {}
   }
 
+  /**
+   * Mirror the client loop band to the server. The worklet already wraps
+   * end→start locally; this tells the pipeline so it wraps its predictive
+   * decode target inside the band too, regenerating the seam after `start`
+   * before the playhead loops back to it instead of leaving one stale
+   * window of pre-change audio at every loop restart. Pass `null`s to
+   * clear (linear chase resumes). Seconds, matching `playback_pos`.
+   */
+  sendLoopBand(startSec: number | null, endSec: number | null): void {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    try {
+      this.ws.send(
+        JSON.stringify({
+          type: "loop_band",
+          start_sec: startSec,
+          end_sec: endSec,
+        }),
+      );
+    } catch {}
+  }
+
   sendEnableLora(id: string, strength?: number): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     try {

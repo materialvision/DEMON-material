@@ -743,8 +743,22 @@ class PipelineRunner:
                             # to 0.3 so fresh params land sooner at the
                             # cost of slightly more GPU work.
                             prefetch = min(1.0, self.vae_window * 0.3)
-                            if last_decode_pos is not None and abs(t_pos - last_decode_pos) < self.vae_window - prefetch:
-                                skipped = True
+                            if last_decode_pos is not None:
+                                drift = abs(t_pos - last_decode_pos)
+                                # Band-relative drift: last_decode_pos is
+                                # wrapped into the band, t_pos isn't, so near
+                                # the seam the raw distance reads as a near-
+                                # full-band jump and would force a decode
+                                # every tick. Fold it into the band so a
+                                # steady loop still skips redundant decodes.
+                                band = getattr(self.audio_eng, "loop_band", None)
+                                if band is not None:
+                                    span = float(band[1]) - float(band[0])
+                                    if span > 1e-3:
+                                        drift = drift % span
+                                        drift = min(drift, span - drift)
+                                if drift < self.vae_window - prefetch:
+                                    skipped = True
                         else:
                             skipped = True
 
@@ -780,6 +794,47 @@ class PipelineRunner:
                         decode_start = playhead_now + advance_s
                         if eff_dur > 0:
                             decode_start = decode_start % eff_dur
+
+                        # Loop-band awareness. When the client arms a band
+                        # [A, B] the worklet replays only that region (hard-
+                        # wrapping B→A) while we keep generating. Chasing the
+                        # raw playhead would decode *past* B (audio that's
+                        # never heard) and leave the region just after A
+                        # holding pre-change audio until the playhead crawls
+                        # back over it — the "snap back to the old buffer for
+                        # one window" the operator hears at every loop
+                        # restart. Wrapping the decode target inside the band
+                        # instead pre-fills the seam after A while the
+                        # playhead is still finishing the lap near B, so the
+                        # restart plays freshly-generated audio. Only the
+                        # standard windowed path is band-aware; walk mode
+                        # (multi-minute sources) keeps its linear chase.
+                        band_start_sample = None
+                        band_end_sample = None
+                        band_wrap_start_s = None
+                        band = getattr(self.audio_eng, "loop_band", None)
+                        if band is not None and eff_dur > 0 and not walk_active:
+                            a_s = max(0.0, min(float(band[0]), eff_dur))
+                            b_s = max(0.0, min(float(band[1]), eff_dur))
+                            span = b_s - a_s
+                            if span > 1e-3:
+                                if span < self.vae_window:
+                                    # Band shorter than one decode window:
+                                    # pin the target at A so every decode
+                                    # rewrites the whole band — no chase lag
+                                    # on a region this small. The write clamp
+                                    # below drops the spillover past B.
+                                    decode_start = a_s
+                                else:
+                                    # Sawtooth that mirrors the worklet's
+                                    # A→B→A playhead, led by ``advance_s``.
+                                    decode_start = a_s + (
+                                        (playhead_now + advance_s - a_s) % span
+                                    )
+                                band_start_sample = int(round(a_s * SAMPLE_RATE))
+                                band_end_sample = int(round(b_s * SAMPLE_RATE))
+                                band_wrap_start_s = a_s
+
                         # The skip-decode bookkeeping anchors on the
                         # *predicted* start so the next iteration's drift
                         # check measures distance from the start of the
@@ -848,6 +903,12 @@ class PipelineRunner:
                                 + current[win_start + s:win_start + s + tail] * (1 - t_out[:tail])
                             )
                         clamp_end = min(win_end, current.shape[0])
+                        # Loop band active: never write the first decode past
+                        # B. If the window crossed B, a second decode anchored
+                        # at A below patches the wrapped portion the worklet
+                        # will play after the loop restart.
+                        if band_end_sample is not None and band_end_sample > win_start:
+                            clamp_end = min(clamp_end, band_end_sample)
                         patched = win_np[:clamp_end - win_start]
                         # Single in-place write under the audio
                         # engine's lock. Replaces the old "copy → write
@@ -859,6 +920,60 @@ class PipelineRunner:
                         # its client mirror; standalone callers can
                         # ignore the args.
                         self.on_audio_ready(patched, win_start, win_end)
+                        if (
+                            band_start_sample is not None
+                            and band_end_sample is not None
+                            and band_wrap_start_s is not None
+                            and band_start_sample < band_end_sample
+                            and win_start < band_end_sample
+                            and win_end > band_end_sample
+                            and not (
+                                win_start <= band_start_sample
+                                and clamp_end >= band_end_sample
+                            )
+                        ):
+                            wrap_len = min(
+                                win_end - band_end_sample,
+                                band_end_sample - band_start_sample,
+                            )
+                            if wrap_len > 0:
+                                wrap_audio = self.session.decode(
+                                    result_latent,
+                                    t_start=band_wrap_start_s,
+                                    cyclic=True,
+                                )
+                                wrap_wav = (
+                                    wrap_audio.waveform.detach()
+                                    .cpu()
+                                    .float()
+                                    .squeeze(0)
+                                )
+                                wrap_np = wrap_wav.numpy().T[:wrap_len].copy()
+                                wrap_start = band_start_sample
+                                wrap_end = wrap_start + wrap_np.shape[0]
+                                xfade_wrap = min(1200, wrap_np.shape[0] // 4)
+                                if wrap_start > 0 and xfade_wrap > 0:
+                                    t_in = np.linspace(
+                                        0.0, 1.0, xfade_wrap,
+                                    ).reshape(-1, 1)
+                                    wrap_np[:xfade_wrap] = (
+                                        current[wrap_start:wrap_start + xfade_wrap]
+                                        * (1 - t_in)
+                                        + wrap_np[:xfade_wrap] * t_in
+                                    )
+                                if wrap_end < current.shape[0] and xfade_wrap > 0:
+                                    t_out = np.linspace(
+                                        1.0, 0.0, xfade_wrap,
+                                    ).reshape(-1, 1)
+                                    wrap_np[-xfade_wrap:] = (
+                                        wrap_np[-xfade_wrap:] * t_out
+                                        + current[wrap_end - xfade_wrap:wrap_end]
+                                        * (1 - t_out)
+                                )
+                                self.audio_eng.patch_window(wrap_np, wrap_start)
+                                self.on_audio_ready(wrap_np, wrap_start, wrap_end)
+                                torch.cuda.synchronize()
+                                dec_ms = (time.perf_counter() - t1) * 1000
                         # ``last_wav`` is only checked for non-None by
                         # the skip-gate above. A view of the engine
                         # buffer is enough; we don't need to retain a

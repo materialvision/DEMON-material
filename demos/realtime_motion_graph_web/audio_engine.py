@@ -24,6 +24,12 @@ class AudioEngine:
         self.current = data.copy()
         self.position = 0
         self.swap_count = 0
+        # Active client loop band as ``(start_sec, end_sec)`` or ``None``.
+        # Set cross-thread by the WS recv thread (backend ``loop_band``
+        # handler) and read by the PipelineRunner to wrap its decode target
+        # inside the band. A single immutable-tuple attribute so the read is
+        # one atomic reference load under the GIL — no torn start/end.
+        self.loop_band = None
         self.crossfade_len = max(1, int(sr * CROSSFADE_SECONDS))
         self._old = None
         self._fading = False

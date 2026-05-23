@@ -34,8 +34,12 @@ import { useSessionStore } from "@/store/useSessionStore";
 // adjustment. The grid itself is drawn faintly on the strip so bar
 // boundaries are visible at a glance.
 //
-// All client-side via AudioPlayer.setLoopBand/clearLoopBand, which the
-// AudioWorklet honours by wrapping end→start on each pass.
+// Playback is client-side via AudioPlayer.setLoopBand/clearLoopBand, which
+// the AudioWorklet honours by wrapping end→start on each pass. The band is
+// also mirrored to the server (remote.sendLoopBand) so the pipeline wraps
+// its predictive decode target inside the band — without that the backend
+// chases the raw playhead, decodes past the band end, and leaves one stale
+// window of pre-change audio at the loop start on every restart.
 
 const WAVEFORM_BUCKETS = 640;
 const EDGE_PADDING_PX = 4;
@@ -265,6 +269,12 @@ export function WaveformScrubBox() {
     const clearBand = (player as unknown as {
       clearLoopBand?: () => void;
     }).clearLoopBand;
+    // Also mirror the band to the server so the pipeline wraps its decode
+    // target inside it (kills the one-window snap-back to old audio at each
+    // loop restart). Worklet stays the source of truth for playback; this
+    // is purely a generation hint, so a missing/old remote degrades to the
+    // prior client-only behaviour.
+    const remote = useSessionStore.getState().remote;
     if (
       bandState &&
       bandState.end - bandState.start >= MIN_BAND_SEC &&
@@ -273,8 +283,10 @@ export function WaveformScrubBox() {
       if (typeof setBand === "function") {
         setBand.call(player, bandState.start, bandState.end);
       }
+      remote?.sendLoopBand(bandState.start, bandState.end);
     } else if (bandState === null) {
       if (typeof clearBand === "function") clearBand.call(player);
+      remote?.sendLoopBand(null, null);
     }
   }, [bandState, hasPlayer, player]);
 
