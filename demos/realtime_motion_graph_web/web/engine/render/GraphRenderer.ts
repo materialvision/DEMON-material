@@ -269,7 +269,60 @@ const SPARK_DODGE_PX = 5;
 // LANE_MIN_H and LANE_MAX_H. Inter-lane padding gives lanes their
 // "channel" feel without becoming a tight rack of bars.
 // ---------------------------------------------------------------
-const MAX_LANES = 10;
+// MAX_LANES is the HARD CEILING used to pre-allocate the scratch
+// buffers (_laneNameBuf, _laneLastFireBuf). It is INTENTIONALLY
+// generous (32) so the per-frame `effectiveMaxLanes` calculation —
+// not this buffer — is what governs how many lanes show on screen.
+// On a 1440p+ monitor with the drawer closed, the canvas can fit
+// well over 20 lanes; capping the buffer at 20 would silently stop
+// the resize-reactive lane count from scaling up. 32 slots × (one
+// string + one float) ≈ 280 bytes; negligible. Bumping this further
+// only matters if a single session ever surfaces > 32 simultaneously-
+// touched parameters, which the engine doesn't approach today.
+const MAX_LANES = 32;
+// Target height per lane when computing how many fit on this canvas.
+// `effectiveMaxLanes` is recomputed EVERY frame from the live canvas
+// height (`this.h`, which the ResizeObserver in `_resize` keeps in
+// sync with the canvas's CSS box). That means lane count adapts on:
+//   - window resize / drawer open-close (canvas box changes)
+//   - moving the window between monitors (CSS box re-flows)
+//   - browser zoom changes
+//   - mobile portrait↔landscape rotation
+// No additional listeners needed — the per-frame `_drawLanes` already
+// reads the freshest `this.h`. Lanes individually clamp to
+// [LANE_MIN_H, LANE_MAX_H], so on tall canvases with few active params
+// the stack is vertically centered rather than stretched.
+const LANE_TARGET_H = 30;
+const LANE_HARD_MIN_COUNT = 8;
+// Reserve at the bottom of the canvas to keep the lane stack clear of
+// the <HeroMacros/> floating panel. Hero macros are `position: fixed`
+// at the bottom of the viewport with z-index 5 — they paint OVER the
+// graph canvas (which is z-index 2) without affecting graph-wrap's
+// inset, so the lane stack would otherwise extend into their region.
+//
+// Sizing: we want the visible bottom gap (stack bottom → macros panel
+// top) to equal the visible top gap (canvas top → stack top, which
+// equals LANE_TOP_PAD when uncentered). The macros panel sticks UP
+// into the canvas by ≈ `delta_macros` pixels, where:
+//
+//     delta_macros = macros_height + 24 − hud_thickness − ribbon_bleed
+//
+// For typical desktop (macros_height ≈ 100 px, hud_thickness ≈ 56–90 px
+// via `clamp(56px, 6vmin, 90px)`, ribbon_bleed ≈ 2 px), `delta_macros`
+// lands in the 30–70 px range, ≈ 55 px on a mid-size viewport.
+//
+// To make the visible top and bottom gaps symmetric, this reserve
+// needs to be (LANE_TOP_PAD − LANE_BOTTOM_PAD + delta_macros) ≈ 64 px.
+// A fixed constant is "near right" across viewport sizes — the
+// remaining 5–15 px asymmetry on extreme viewports is acceptable for
+// the prototype. If precise symmetry matters, switch to measuring
+// `.hero-macros` getBoundingClientRect on resize.
+//
+// Hero macros are hidden under 768 px viewport width (mobile gets
+// <LiteControls/> instead, and graph-wrap's media-query inset already
+// accounts for the LiteControls bay). So this reserve only applies on
+// desktop — read via matchMedia in _drawLanes.
+const LANE_HERO_MACROS_RESERVE = 64;
 const LANE_TOP_PAD = 18;
 const LANE_BOTTOM_PAD = 10;
 const LANE_INTER_PAD = 3;
@@ -1024,9 +1077,38 @@ export class GraphRenderer {
     pulse: number,
     now: number,
   ): void {
+    // Per-frame effective cap: derive how many lanes fit comfortably on
+    // THIS canvas height. Targets LANE_TARGET_H per lane, clamps in
+    // [LANE_HARD_MIN_COUNT, MAX_LANES]. Tall canvases show more
+    // lanes (up to the buffer ceiling); short canvases still keep a
+    // usable rack.
+    //
+    // `macrosReserve` keeps the lane stack clear of the HeroMacros
+    // floating panel (desktop only — the panel matches the same
+    // 768 px breakpoint). On mobile, graph-wrap's media-query inset
+    // already accounts for LiteControls, so no reserve here.
+    const macrosReserve =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(min-width: 768px)").matches
+        ? LANE_HERO_MACROS_RESERVE
+        : 0;
+    const availableHForCount = Math.max(
+      0,
+      h - LANE_TOP_PAD - LANE_BOTTOM_PAD - macrosReserve,
+    );
+    const computedMax = Math.floor(
+      (availableHForCount + LANE_INTER_PAD) /
+        (LANE_TARGET_H + LANE_INTER_PAD),
+    );
+    const effectiveMaxLanes = Math.max(
+      LANE_HARD_MIN_COUNT,
+      Math.min(MAX_LANES, computedMax),
+    );
+
     // Step 1+2: collect active lanes into the pre-allocated scratch
     // buffer. When the pool is full, evict the lane with the oldest
-    // lastFire if this candidate is more recent (linear scan, n ≤ 10).
+    // lastFire if this candidate is more recent (linear scan, n ≤ effectiveMaxLanes).
     // Also count totalEligible so we know how many qualifying lanes
     // didn't fit — surfaces as a "+N more" pill via the labels overlay.
     let activeCount = 0;
@@ -1040,14 +1122,14 @@ export class GraphRenderer {
       // dormant LoRAs / unused params, would only add noise.
       if (headV < 0.005 && lastFire === 0) continue;
       totalEligible++;
-      if (activeCount < MAX_LANES) {
+      if (activeCount < effectiveMaxLanes) {
         this._laneNameBuf[activeCount] = name;
         this._laneLastFireBuf[activeCount] = lastFire;
         activeCount++;
       } else {
         let oldestIdx = 0;
         let oldestVal = this._laneLastFireBuf[0];
-        for (let i = 1; i < MAX_LANES; i++) {
+        for (let i = 1; i < effectiveMaxLanes; i++) {
           if (this._laneLastFireBuf[i] < oldestVal) {
             oldestVal = this._laneLastFireBuf[i];
             oldestIdx = i;
@@ -1081,19 +1163,28 @@ export class GraphRenderer {
     }
 
     // Step 4: lane geometry + gradient cache.
-    const usableH = Math.max(0, h - LANE_TOP_PAD - LANE_BOTTOM_PAD);
+    // Both lane-height computation and vertical centering use the
+    // SAME macros-reserved available area as the count cap above —
+    // otherwise the stack would still extend into the macros zone
+    // when active lanes < cap.
+    const usableH = Math.max(
+      0,
+      h - LANE_TOP_PAD - LANE_BOTTOM_PAD - macrosReserve,
+    );
     const idealLaneH =
       (usableH - (activeCount - 1) * LANE_INTER_PAD) / activeCount;
     const laneH = Math.max(LANE_MIN_H, Math.min(LANE_MAX_H, idealLaneH));
-    // Vertical centering. Lane heights are clamped at LANE_MAX_H so a
-    // tall canvas with few active lanes leaves dead space at the bottom
-    // if we anchor the stack at LANE_TOP_PAD. Compute the stack's total
-    // height and offset the top so the unused vertical space splits
-    // evenly above and below — feels balanced regardless of canvas
-    // height. Falls back to LANE_TOP_PAD when the stack would already
-    // overflow.
+    // Vertical centering within the lane area (above any macros zone).
+    // Lane heights clamp at LANE_MAX_H so a tall canvas with few active
+    // lanes leaves dead space — center the stack vertically in the
+    // available area (LANE_TOP_PAD → h − LANE_BOTTOM_PAD − macrosReserve)
+    // so it feels balanced and never bleeds into the macros region.
     const stackH = activeCount * laneH + (activeCount - 1) * LANE_INTER_PAD;
-    const stackTop = Math.max(LANE_TOP_PAD, (h - stackH) / 2);
+    const availableBottom = h - LANE_BOTTOM_PAD - macrosReserve;
+    const stackTop = Math.max(
+      LANE_TOP_PAD,
+      (LANE_TOP_PAD + availableBottom - stackH) / 2,
+    );
     if (this._laneGradient === null || this._laneGradientHeight !== laneH) {
       const g = ctx.createLinearGradient(0, 0, 0, laneH);
       // Subtle warm wash — accent at the top (where high values live),
