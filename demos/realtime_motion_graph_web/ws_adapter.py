@@ -527,7 +527,20 @@ def _handle_client_body(
                     "set_timbre_source_bytes_received name={} bytes={}",
                     name, len(audio_msg),
                 )
-                wf = _decode_audio_msg(audio_msg)
+                # Decode is outside the session boundary, so a
+                # malformed wire frame can't reach the typed-event
+                # `*_failed` path. Ack the frontend explicitly so its
+                # upload UI sees a deterministic terminal state instead
+                # of waiting on a setTimeout fallback.
+                try:
+                    wf = _decode_audio_msg(audio_msg)
+                except Exception as exc:
+                    logger.opt(exception=True).error(
+                        "set_timbre_source_decode_failed origin={} name={} error={}",
+                        origin, name, exc,
+                    )
+                    _send_json({"type": "timbre_failed", "error": str(exc)})
+                    return
                 streaming.set_timbre_source(
                     Audio(waveform=wf, sample_rate=SAMPLE_RATE),
                     name, origin=origin,
@@ -549,7 +562,15 @@ def _handle_client_body(
                     "set_structure_source_bytes_received name={} bytes={}",
                     name, len(audio_msg),
                 )
-                wf = _decode_audio_msg(audio_msg)
+                try:
+                    wf = _decode_audio_msg(audio_msg)
+                except Exception as exc:
+                    logger.opt(exception=True).error(
+                        "set_structure_source_decode_failed origin={} name={} error={}",
+                        origin, name, exc,
+                    )
+                    _send_json({"type": "structure_failed", "error": str(exc)})
+                    return
                 streaming.set_structure_source(
                     Audio(waveform=wf, sample_rate=SAMPLE_RATE),
                     name, origin=origin,
@@ -566,7 +587,15 @@ def _handle_client_body(
                 except ConnectionClosed:
                     state.running = False
                     return
-                wf = _decode_audio_msg(audio_msg)
+                try:
+                    wf = _decode_audio_msg(audio_msg)
+                except Exception as exc:
+                    logger.opt(exception=True).error(
+                        "swap_source_decode_failed origin={} error={}",
+                        origin, exc,
+                    )
+                    _send_json({"type": "swap_failed", "error": str(exc)})
+                    return
                 streaming.swap_source(
                     Audio(waveform=wf, sample_rate=SAMPLE_RATE),
                     tags=data.get("tags"),
