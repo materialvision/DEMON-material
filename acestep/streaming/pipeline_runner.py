@@ -192,8 +192,10 @@ class PipelineRunner:
                 if win_start is None:
                     audio_eng.swap(wav)
         self.on_audio_ready = on_audio_ready
-        # before_tick: optional callable invoked at the top of every loop
-        # iteration on the runner thread.  Used by the web server to
+        # before_tick: optional callable usually invoked at the top of each
+        # loop iteration on the runner thread.  A pending LoRA command can
+        # defer it by one iteration so gap-fill can pre-cover the refit stall.
+        # Used by the web server to
         # apply cross-thread mutations safely:
         #   - LoRA enable/disable (which triggers a refit; refit and
         #     inference are mutually exclusive)
@@ -297,14 +299,14 @@ class PipelineRunner:
         #      stacks, steps=16) lengthens the tick, the EMA tracks it, the
         #      lead grows proportionally. No magic constant.
         #
-        # The one interval gap-fill cannot remove is a genuine pipeline REBUILD
-        # (steps/RCFG/LoRA change), where ``tick()`` blocks ~1s in a single
-        # iteration — no loop turn runs to gap-fill it. ``_stall_extra_s``
-        # covers that: a predictive prewarm raises it the instant a
-        # rebuild-triggering param changes (before the stall lands), and a
-        # reactive term raises it for any observed gap whose SHORTFALL beyond
-        # the slice width would otherwise underrun. It decays back over
-        # ``_stall_release_tau_s`` so it never becomes a permanent latency.
+        # The one interval gap-fill cannot remove is a genuine pipeline rebuild
+        # / refit stall (steps or LoRA enable/disable), where a single loop
+        # iteration blocks for ~1s and no loop turn runs to gap-fill it.
+        # ``_stall_extra_s`` covers that: a predictive prewarm raises it before
+        # the stall lands, and a reactive term raises it for any observed gap
+        # whose SHORTFALL beyond the slice width would otherwise underrun. It
+        # decays back over ``_stall_release_tau_s`` so it never becomes a
+        # permanent latency.
         self._last_decode_wall_s = time.monotonic()
         # EMA of the inter-write interval. Seeded near a steady active tick.
         self._decode_interval_ema_s = 0.07
@@ -342,10 +344,13 @@ class PipelineRunner:
         # to a learned worst-rebuild estimate, and (2) SKIP the rebuild tick for
         # that one iteration (see ``run()``), gap-filling a far-ahead slice from
         # the cached latent so the buffer is covered through the stall, which
-        # then lands on the next tick. The estimate self-calibrates toward the
-        # largest stall we actually observe, seeded from the measured ~1.1s
-        # rebuild and capped so a one-off outlier (e.g. the multi-second
-        # session-startup build) can't push it to the ceiling.
+        # then lands on the next tick. For LoRA enable/disable, the blocking
+        # work happens inside ``before_tick`` rather than ``stream.tick()``, so
+        # ``run()`` detects pending LoRA commands before calling that hook and
+        # performs the same one-iteration gap-fill first. The estimate
+        # self-calibrates toward the largest stall we actually observe, seeded
+        # from the measured ~1.1s rebuild and capped so a one-off outlier (e.g.
+        # the multi-second session-startup build) can't push it to the ceiling.
         self._rebuild_prewarm_s = 1.1
         self._rebuild_prewarm_cap_s = 1.3
         self._last_rebuild_keys = None
@@ -458,13 +463,30 @@ class PipelineRunner:
             self._rebuild_prewarm_s = min(gap, self._rebuild_prewarm_cap_s)
         return gap
 
+    def _has_pending_lora_rebuild(self) -> bool:
+        """Return True when ``before_tick`` is about to apply LoRA commands.
+
+        LoRA enable/disable is drained by the streaming session's
+        ``before_tick`` hook and can synchronously materialize/refit weights.
+        That stall happens before the normal rebuild-signature check below, so
+        the runner must look at the pending queue first if it wants to pre-cover
+        the buffer with a gap-fill write.
+        """
+        if not self.use_lora:
+            return False
+        try:
+            with self.state._lock:
+                return bool(self.state.pending_enable or self.state.pending_disable)
+        except AttributeError:
+            return False
+
     def _rebuild_signature(self, raw: dict) -> tuple:
         """Params whose change forces a pipeline rebuild / multi-hundred-ms
         warmup stall. When this tuple changes between ticks we pre-cover the
         stall before it lands (``_decode_advance_s`` can't see it reactively,
         since the slow ``tick()`` and the new value arrive on the same
-        iteration). Keep in sync with what actually triggers a rebuild in the
-        engine: step count, RCFG mode, and LoRA *enablement*.
+        iteration). Keep in sync with what actually triggers a rebuild/stall in
+        this runner: step count and LoRA *enablement*.
 
         LoRA enablement is read from the engine's own state, NOT from
         ``raw``: the only ``lora_``-prefixed keys in ``raw`` are the live
@@ -577,12 +599,22 @@ class PipelineRunner:
         self._last_decode_wall_s = time.monotonic()
 
         # Whether the previous iteration skipped its tick to pre-cover a
-        # rebuild stall. Used to forbid two skips in a row so a continuous
+        # rebuild/refit stall. Used to forbid two skips in a row so a continuous
         # sweep of a rebuild-triggering knob can't starve real generation.
         deferred_rebuild_last = False
 
         while self.state.running:
-            if self.before_tick is not None:
+            pre_defer_lora = (
+                self._has_pending_lora_rebuild()
+                and not deferred_rebuild_last
+                and self.vae_window > 0
+                and self._last_result_latent is not None
+            )
+            if pre_defer_lora:
+                self._stall_extra_s = max(
+                    self._stall_extra_s, self._rebuild_prewarm_s,
+                )
+            elif self.before_tick is not None:
                 # Hook for cross-thread mutations (LoRA enable/disable
                 # AND source swap).  Runs on the runner thread so any
                 # GPU/refit work the callback does is serialized with
@@ -743,21 +775,21 @@ class PipelineRunner:
                     raw["periodicity"] = 0.0
 
             # Pre-stall coverage: if a rebuild-triggering param changed since
-            # the last tick (step count, RCFG mode, LoRA enablement), the
+            # the last tick (step count / LoRA enablement), the
             # rebuild will block ~1s INSIDE the ``stream.tick()`` call below.
-            # The loop is stuck there so no gap-fill runs, and the next
-            # windowed write only lands AFTER the stall — raising the lead
-            # alone can't pre-fill the hole. So we (1) raise the one-shot stall
-            # bump, and (2) SKIP the rebuild tick for this one iteration
-            # (``defer_rebuild``), routing it through the gap-fill path so a
-            # far-ahead slice (placed by the now-raised lead) is written from
-            # the cached latent and covers the buffer through the stall, which
-            # then lands on the NEXT tick. The new params take effect one tick
-            # later (~tens of ms). We never defer two ticks running, so a
-            # continuous sweep of a rebuild-triggering knob can't starve real
-            # generation; the bump decays back out via ``_note_decode_gap``.
-            # ``_last_rebuild_keys is None`` on the first tick just seeds the
-            # baseline.
+            # LoRA enable/disable is similar, except the stall happens in
+            # ``before_tick``; that case is detected at the top of the loop as
+            # ``pre_defer_lora`` and intentionally skips ``before_tick`` once.
+            # In both cases we (1) raise the one-shot stall bump, and (2) SKIP
+            # the blocking operation for this one iteration (``defer_rebuild``),
+            # routing it through the gap-fill path so a far-ahead slice is
+            # written from the cached latent and covers the buffer through the
+            # stall, which then lands on the NEXT tick. The new params take
+            # effect one tick later (~tens of ms). We never defer two ticks
+            # running, so a continuous sweep of a rebuild-triggering knob can't
+            # starve real generation; the bump decays back out via
+            # ``_note_decode_gap``. ``_last_rebuild_keys is None`` on the first
+            # tick just seeds the baseline.
             rebuild_keys = self._rebuild_signature(raw)
             rebuild_changed = (
                 self._last_rebuild_keys is not None
@@ -765,12 +797,15 @@ class PipelineRunner:
             )
             self._last_rebuild_keys = rebuild_keys
             defer_rebuild = (
-                rebuild_changed
-                and not deferred_rebuild_last
-                and self.vae_window > 0
-                and self._last_result_latent is not None
+                pre_defer_lora
+                or (
+                    rebuild_changed
+                    and not deferred_rebuild_last
+                    and self.vae_window > 0
+                    and self._last_result_latent is not None
+                )
             )
-            if defer_rebuild:
+            if defer_rebuild and not pre_defer_lora:
                 self._stall_extra_s = max(
                     self._stall_extra_s, self._rebuild_prewarm_s,
                 )
@@ -1001,14 +1036,15 @@ class PipelineRunner:
                 time.sleep(0.02)
             elif defer_rebuild:
                 # Pre-stall coverage (see the rebuild-detection block above):
-                # skip the blocking rebuild tick for THIS one iteration.
+                # skip the blocking rebuild/refit operation for THIS one
+                # iteration.
                 # ``result_latent = None`` routes the rest of the loop through
                 # the gap-fill path — a far-ahead windowed slice is written
                 # from the cached latent (placed by the now-raised lead)
                 # WITHOUT touching ``latent_history`` / ``last_latent`` /
-                # ``num_gens`` — and the actual rebuild runs on the next tick.
-                # The gap-fill VAE decode below paces this iteration, so no
-                # explicit sleep is needed.
+                # ``num_gens`` — and the actual rebuild/refit runs on the next
+                # tick. The gap-fill VAE decode below paces this iteration, so
+                # no explicit sleep is needed.
                 result_latent = None
             else:
                 result_latent = self.stream.tick(
