@@ -485,7 +485,6 @@ class PipelineRunner:
             )
         return (
             int(raw.get("steps_override", 8)),
-            str(raw.get("rcfg_mode", "off")),
             enabled_loras,
         )
 
