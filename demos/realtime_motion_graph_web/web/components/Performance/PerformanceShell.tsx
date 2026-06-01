@@ -31,6 +31,7 @@ import { useSessionStore } from "@/store/useSessionStore";
 import { AdvancedDrawer } from "./AdvancedDrawer";
 import { AudioSourceCrate } from "./AudioSourceCrate";
 import { ConfigModal } from "./ConfigModal";
+import { MidiContextMenu } from "./MidiContextMenu";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { DemonBrandMark } from "./DemonBrandMark";
 import { FooterLinks } from "./FooterLinks";
@@ -151,6 +152,7 @@ export function PerformanceShell() {
       <HudHelpReadout />
       <HeroMacrosTooltip />
       <ConfigModal />
+      <MidiContextMenu />
       <ConfirmDialog />
 
       <StatusBar />

@@ -1880,6 +1880,12 @@ body[data-mode="graph"]::before {
   background: rgba(255, 255, 255, 0.07);
   color: var(--text-strong);
 }
+.lora-context-menu-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--frame-line);
+  opacity: 0.85;
+}
 
 /* ── Hidden-LoRA footer ── */
 .lora-hidden-footer {

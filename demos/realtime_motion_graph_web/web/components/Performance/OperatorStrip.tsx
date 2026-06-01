@@ -21,6 +21,7 @@ import { confirm } from "@/store/useConfirmStore";
 import { useLoraStore } from "@/store/useLoraStore";
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
+import { useUiStore } from "@/store/useUiStore";
 import {
   TIME_SIGNATURE_LABELS,
   VALID_KEYSCALES,
@@ -185,6 +186,7 @@ export function OperatorStrip() {
           <select
             id="key-select"
             className="fixture-select"
+            data-midi-enum="key"
             title="Musical key — sidecar / auto-detected; changes apply immediately"
             value={activeKey}
             onChange={async (e) => {
@@ -217,6 +219,7 @@ export function OperatorStrip() {
           <select
             id="time-sig-select"
             className="fixture-select"
+            data-midi-enum="time_signature"
             title="Time signature — sidecar / default; tells the model the song's meter (does not change tempo or beat grid)"
             value={activeTimeSignature}
             onChange={async (e) => {
@@ -280,7 +283,7 @@ export function OperatorStrip() {
           <button
             type="button"
             className={`pause-btn${loopOn ? " active" : ""}`}
-            data-midi-learn="loop_toggle"
+            data-midi-learn="loop"
             data-dd-tooltip={
               loopOn
                 ? "Loop ON — playhead wraps at end-of-buffer (right-click to MIDI-learn)"
@@ -322,10 +325,11 @@ export function OperatorStrip() {
           <button
             type="button"
             className={`pause-btn${smooth ? " active" : ""}`}
+            data-midi-learn="smooth"
             data-dd-tooltip={
               smooth
-                ? `Smooth slider transitions over ${smoothMs} ms — click to disable`
-                : "Smooth slider transitions: slider drags + MIDI knob movement glide to their target over the chosen duration. The visual stays instant."
+                ? `Smooth slider transitions over ${smoothMs} ms — click to disable (right-click to MIDI-learn)`
+                : "Smooth slider transitions: slider drags + MIDI knob movement glide to their target over the chosen duration. The visual stays instant. Right-click to MIDI-learn."
             }
             aria-pressed={smooth}
             onClick={toggleSmooth}
@@ -348,10 +352,11 @@ export function OperatorStrip() {
           <button
             type="button"
             className={`pause-btn${lufsOn ? " active" : ""}`}
+            data-midi-learn="lufs"
             data-dd-tooltip={
               lufsOn
-                ? "Loudness match ON — quieter passages are boosted to match the loudest seen (peak-clamped at –1 dBTP). Resets on track change. Click to disable."
-                : "Loudness match: continuously meter LUFS, track the running max, boost quieter passages so they hit the loudest level seen this track. Never attenuates."
+                ? "Loudness match ON — quieter passages are boosted to match the loudest seen (peak-clamped at –1 dBTP). Resets on track change. Click to disable. Right-click to MIDI-learn."
+                : "Loudness match: continuously meter LUFS, track the running max, boost quieter passages so they hit the loudest level seen this track. Never attenuates. Right-click to MIDI-learn."
             }
             aria-pressed={lufsOn}
             onClick={toggleLufs}
@@ -394,6 +399,15 @@ export function OperatorStrip() {
       <section className="operator-section">
         <h3 className="operator-section-label">Config</h3>
         <div className="operator-row">
+          <button
+            type="button"
+            className="pause-btn"
+            data-dd-tooltip="Open configuration. MIDI mappings are on the MIDI tab."
+            aria-label="Open configuration"
+            onClick={() => useUiStore.getState().setConfigOpen(true)}
+          >
+            Config
+          </button>
           <button
             type="button"
             className="pause-btn"
