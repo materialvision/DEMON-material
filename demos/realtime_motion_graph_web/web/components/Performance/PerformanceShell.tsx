@@ -32,7 +32,6 @@ import { useSessionStore } from "@/store/useSessionStore";
 import { AdvancedDrawer } from "./AdvancedDrawer";
 import { AudioSourceCrate } from "./AudioSourceCrate";
 import { ConfigModal } from "./ConfigModal";
-import { MidiContextMenu } from "./MidiContextMenu";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { DemonBrandMark } from "./DemonBrandMark";
 import { FooterLinks } from "./FooterLinks";
@@ -42,6 +41,7 @@ import { HUDFrame } from "./HUDFrame";
 import { HudHelpReadout } from "./HudHelpReadout";
 import { InstallStage } from "./InstallStage";
 import { LiveIndicator } from "./LiveIndicator";
+import { MidiContextMenu } from "./MidiContextMenu";
 import {
   MobileLoraBlendStepper,
   MobileRemixStepper,
