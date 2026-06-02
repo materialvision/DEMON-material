@@ -41,6 +41,7 @@ import { HUDFrame } from "./HUDFrame";
 import { HudHelpReadout } from "./HudHelpReadout";
 import { InstallStage } from "./InstallStage";
 import { LiveIndicator } from "./LiveIndicator";
+import { MidiContextMenu } from "./MidiContextMenu";
 import {
   MobileLoraBlendStepper,
   MobileRemixStepper,
@@ -153,6 +154,7 @@ export function PerformanceShell() {
       <HudHelpReadout />
       <HeroMacrosTooltip />
       <ConfigModal />
+      <MidiContextMenu />
       <ConfirmDialog />
 
       <StatusBar />
