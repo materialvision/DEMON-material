@@ -45,6 +45,10 @@ import { RefSelect } from "./RefSelect";
 // to the legacy format.
 type DemonExport = RtmgConfig & { inputs?: SerializedInputs };
 
+const IMPORT_CONFIG_TOOLTIP = "Import config from JSON";
+const EXPORT_CONFIG_TOOLTIP =
+  "Download current config as JSON (optionally with input audio)";
+
 // Show a transient status message that clears itself after 2s — unless a
 // newer message replaced it meanwhile. Used for the import/export toasts,
 // which otherwise stuck on screen indefinitely.
@@ -447,11 +451,12 @@ export function OperatorStrip() {
 
       <section className="operator-section">
         <h3 className="operator-section-label">Config</h3>
-        <div className="operator-row">
+        <div className="operator-row operator-config-actions">
           <button
             type="button"
             className="pause-btn"
-            data-dd-tooltip="Import config from JSON"
+            data-dd-tooltip={IMPORT_CONFIG_TOOLTIP}
+            aria-describedby="operator-config-import-readout"
             aria-label="Import config"
             onClick={() => configFileInputRef.current?.click()}
           >
@@ -460,7 +465,8 @@ export function OperatorStrip() {
           <button
             type="button"
             className="pause-btn"
-            data-dd-tooltip="Download current config as JSON (optionally with input audio)"
+            data-dd-tooltip={EXPORT_CONFIG_TOOLTIP}
+            aria-describedby="operator-config-export-readout"
             aria-label="Export config"
             onClick={openExportDialog}
           >
@@ -477,6 +483,20 @@ export function OperatorStrip() {
               if (file) void onConfigFilePicked(file);
             }}
           />
+        </div>
+        <div className="operator-config-readout">
+          <span
+            id="operator-config-import-readout"
+            className="operator-config-readout-item"
+          >
+            {IMPORT_CONFIG_TOOLTIP}
+          </span>
+          <span
+            id="operator-config-export-readout"
+            className="operator-config-readout-item"
+          >
+            {EXPORT_CONFIG_TOOLTIP}
+          </span>
         </div>
       </section>
 
