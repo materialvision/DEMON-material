@@ -47,7 +47,12 @@ import soundfile as sf
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
 
-from acestep.streaming.knobs import knob_catalog
+from acestep.streaming.knobs import (
+    KNOB_SCHEMA_VERSION,
+    coerce_knob_values,
+    knob_catalog,
+    knob_specs,
+)
 
 
 # MCP wire protocol owns stdout — every log MUST go to stderr. Lazy
@@ -286,22 +291,49 @@ async def list_knobs(session_id: Optional[str] = None) -> dict:
     operator-knob set, including the non-bank params (guidance_scale,
     cfg_rescale, dcw_*, steps_override) and the string-valued enums
     (rcfg_mode, dcw_mode, dcw_wavelet). ``bank: false`` marks a knob that
-    rides the params channel but isn't stored in KnobState, so it won't
-    appear in ``current`` (set it blind via set_knob / set_rcfg_mode).
+    rides the params channel but isn't stored in KnobState as a live knob;
+    its default is still seeded into the snapshot, so every manifest knob
+    reports a value in ``current``. ``version`` is the schema version
+    (bump = the contract changed shape; re-skins/agents can detect a stale
+    build).
 
     Knob set depends on whether the session was started in SDE mode and
     which LoRAs are currently enabled — pulled from the live snapshot.
     """
     snap = await session_state(session_id)
+    sde, enabled = _session_knob_shape(snap)
+    return {
+        "version": KNOB_SCHEMA_VERSION,
+        "knobs": knob_catalog(sde=sde, loras=enabled),
+        "current": snap.get("knob_values") or {},
+    }
+
+
+def _session_knob_shape(snap: dict) -> tuple[bool, list]:
+    """(sde, enabled_lora_ids) for a session snapshot — the two inputs
+    knob_specs/knob_catalog need to reproduce that session's knob set."""
     sde = "sde_amp" in (snap.get("knob_values") or {})
     enabled = [
         d.get("id") for d in (snap.get("lora_catalog") or [])
         if d.get("state") == "enabled" and d.get("id")
     ]
-    return {
-        "knobs": knob_catalog(sde=sde, loras=enabled),
-        "current": snap.get("knob_values") or {},
-    }
+    return sde, enabled
+
+
+async def _validate_against_session(
+    raw: dict, session_id: Optional[str]
+) -> dict:
+    """Validate a raw knob dict against the live session's schema. Returns
+    the coerced dict to send; raises ValueError (surfaced to the agent) if
+    any value is out of range or not an allowed enum/bool option. Reuses
+    the same coerce_knob_values the server enforces, so MCP can't drift."""
+    snap = await session_state(session_id)
+    sde, enabled = _session_knob_shape(snap)
+    specs = {s.name: s for s in knob_specs(sde=sde, loras=enabled)}
+    clean, errors = coerce_knob_values(raw, specs)
+    if errors:
+        raise ValueError("; ".join(errors))
+    return clean
 
 
 # ---------------------------------------------------------------------------
@@ -356,10 +388,16 @@ async def set_knob(name: str, value: float,
     Backend merges into its current state. The browser's UI mirrors
     MCP-driven knob changes via the new ``params_echo`` message; the
     next UI param tick then carries the same value back so it sticks.
+
+    Validated against the live session's schema: an out-of-range value or
+    an unknown knob raises rather than silently clamping. Enum/bool knobs
+    (rcfg_mode, dcw_mode/wavelet, dcw_enabled) are float-rejected here —
+    use set_rcfg_mode and friends for those.
     """
+    clean = await _validate_against_session({name: float(value)}, session_id)
     return _send_cmd(session_id, {
         "type": "params",
-        "raw": {name: float(value)},
+        "raw": clean,
         "playback_pos": 0.0,
     })
 
@@ -367,11 +405,14 @@ async def set_knob(name: str, value: float,
 @mcp.tool()
 async def set_knobs(values: dict[str, float],
                     session_id: Optional[str] = None) -> dict:
-    """Bulk knob update."""
+    """Bulk knob update. Validated against the live session's schema; any
+    out-of-range or unknown knob raises (the whole batch is rejected) so the
+    agent gets explicit feedback instead of a silent clamp."""
     coerced = {k: float(v) for k, v in values.items()}
+    clean = await _validate_against_session(coerced, session_id)
     return _send_cmd(session_id, {
         "type": "params",
-        "raw": coerced,
+        "raw": clean,
         "playback_pos": 0.0,
     })
 

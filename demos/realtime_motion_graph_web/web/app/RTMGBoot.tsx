@@ -1,11 +1,14 @@
 "use client";
 
 import { installDemonDebug } from "@/engine/debugReconnect";
+import { fetchKnobManifest } from "@/engine/knobs/fetchKnobManifest";
 import { listLoras } from "@/engine/lora/listLoras";
 import { setEngineUrlBuilder } from "@/engine/rtmgConfig";
 import { installTestHooks } from "@/engine/testHooks";
 import { applyConfig, loadConfig } from "@/lib/config";
+import { useKnobManifestStore } from "@/store/useKnobManifestStore";
 import { useLoraStore } from "@/store/useLoraStore";
+import type { KnobManifest } from "@/types/knobs";
 import type { LoraCatalogEntry } from "@/types/protocol";
 
 // Same-origin URL builder. The engine's HTTP routes (/api/*, /fixtures/*,
@@ -40,13 +43,20 @@ if (typeof window !== "undefined") {
   // nothing runs until a test (or a curious operator) calls into it.
   installTestHooks();
   void (async () => {
-    const [cfg, catalog] = await Promise.all([
+    const [cfg, catalog, manifest] = await Promise.all([
       loadConfig(),
       listLoras().catch(() => [] as LoraCatalogEntry[]),
+      // Non-fatal: the manifest only drives the auto-generated knob panel.
+      // A backend without /api/knobs leaves it empty and the panel shows a
+      // placeholder; the shipped tiles are unaffected.
+      fetchKnobManifest().catch(() => ({}) as KnobManifest),
     ]);
     applyConfig(cfg);
     if (catalog.length > 0) {
       useLoraStore.getState().setCatalog(catalog);
+    }
+    if (Object.keys(manifest).length > 0) {
+      useKnobManifestStore.getState().setManifest(manifest);
     }
   })();
 }

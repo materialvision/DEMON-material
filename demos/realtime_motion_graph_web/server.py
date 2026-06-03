@@ -273,10 +273,13 @@ def _process_request(connection, request):
     # ACAO:* like /api/server-info — the UI fetches this cross-origin (Vercel)
     # before the WS handshake, and the schema carries nothing sensitive.
     if path_only == "/api/knobs":
-        from acestep.streaming.knobs import knob_catalog
+        from acestep.streaming.knobs import KNOB_SCHEMA_VERSION, knob_catalog
         query = url.split("?", 1)[1] if "?" in url else ""
         sde = "sde=1" in query or "sde=true" in query
-        body = json.dumps({"knobs": knob_catalog(sde=sde, loras=[])}).encode()
+        body = json.dumps({
+            "version": KNOB_SCHEMA_VERSION,
+            "knobs": knob_catalog(sde=sde, loras=[]),
+        }).encode()
         _log_http(remote, 200, "GET", url)
         return Response(
             200, "OK",

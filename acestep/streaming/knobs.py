@@ -14,6 +14,13 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 
+# Manifest schema version. Bump when the knob contract changes shape in a
+# way a frontend/re-skin/agent must notice (knob added/removed/retyped,
+# bounds semantics changed). Served alongside the catalog at /api/knobs and
+# by the MCP list_knobs tool so a consumer can detect a stale build.
+KNOB_SCHEMA_VERSION = 1
+
+
 # Channel groups / keystones used by the server-side pipeline for
 # channel-guided generation. Shared here so the client can display them.
 CHANNEL_GROUPS = [
@@ -275,6 +282,65 @@ def knob_catalog(sde: bool, loras=None) -> dict:
             entry["description"] = spec.description
         out[spec.name] = entry
     return out
+
+
+def coerce_knob_values(raw: dict, specs_by_name: dict) -> tuple:
+    """Validate a raw wire dict against the knob registry.
+
+    The single enforcement point for the knob contract, reused by every
+    transport so validation can't drift from :func:`knob_specs`. Returns
+    ``(clean, errors)``:
+
+    * ``clean`` is a NEW dict safe to apply. Every schema key is coerced:
+      ``float``/``int`` are parsed and clamped to ``[min, max]`` (ints
+      rounded; absent ``min`` floors at 0), and ``enum``/``bool`` values
+      are checked against ``options``. Keys absent from ``specs_by_name``
+      (curve specs, ``lora_blend``, the ``playback_pos`` clock, telemetry)
+      pass through untouched — the registry validates only what it owns.
+    * ``errors`` lists every value that had to be clamped or dropped, as
+      human-readable strings.
+
+    Hot-path callers (the 125 Hz params channel) apply ``clean`` and ignore
+    ``errors`` — silently clamping never breaks the stream. Discrete callers
+    (the MCP tools) raise when ``errors`` is non-empty so the agent gets
+    feedback. Out-of-range numerics are clamped into ``clean`` *and* recorded
+    in ``errors``; invalid enum/bool values are dropped from ``clean`` (so the
+    prior KnobState value is preserved) *and* recorded. This function never
+    raises.
+    """
+    clean: dict = {}
+    errors: list = []
+    for name, val in raw.items():
+        spec = specs_by_name.get(name)
+        if spec is None:
+            clean[name] = val  # not registry-owned: pass through verbatim
+            continue
+        if spec.type in ("float", "int"):
+            try:
+                num = float(val)
+            except (TypeError, ValueError):
+                errors.append(f"{name}: {val!r} is not a number")
+                continue  # drop → KnobState keeps its prior value
+            lo = spec.min_val if spec.min_val is not None else 0.0
+            hi = spec.max_val
+            if num < lo or num > hi:
+                errors.append(
+                    f"{name}: {num} out of range [{lo}, {hi}] (clamped)"
+                )
+                num = min(max(num, lo), hi)
+            if spec.type == "int":
+                num = float(int(round(num)))
+            clean[name] = num
+        elif spec.type in ("enum", "bool"):
+            if spec.options and val not in spec.options:
+                errors.append(
+                    f"{name}: {val!r} not one of {list(spec.options)}"
+                )
+                continue  # drop invalid enum/bool → prior value preserved
+            clean[name] = val
+        else:
+            clean[name] = val
+    return clean, errors
 
 
 class KnobState:

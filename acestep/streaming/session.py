@@ -87,7 +87,13 @@ from acestep.streaming.events import (
     TimbreFailed,
     TimbreSet,
 )
-from acestep.streaming.knobs import KnobDef, KnobState, build_banks
+from acestep.streaming.knobs import (
+    KnobDef,
+    KnobState,
+    build_banks,
+    coerce_knob_values,
+    knob_specs,
+)
 from acestep.streaming.pipeline_runner import PipelineRunner
 from acestep.streaming.source import (
     _normalize_time_signature,
@@ -392,6 +398,23 @@ class StreamingSession:
         # methods publish; transport adapters subscribe and serialize.
         self.bus = EventBus()
 
+        # Cached {name: KnobSpec} map for hot-path validation in set_knobs.
+        # knob_specs() rebuilds 34 dataclasses, so we never call it per tick;
+        # rebuilt only when the LoRA set changes (see _apply_lora_pending).
+        # Reassigned wholesale (atomic ref swap), so set_knobs can read it
+        # without a lock from the dispatch thread.
+        self._rebuild_knob_specs(self.initial_enable_ids)
+
+    def _rebuild_knob_specs(self, lora_ids: list) -> None:
+        self._knob_specs_by_name = {
+            s.name: s for s in knob_specs(self.use_sde, loras=list(lora_ids or []))
+        }
+
+    def _enabled_lora_ids(self) -> list:
+        if not (self.use_lora and self.engine_obj is not None):
+            return []
+        return [d.id for d in self.engine_obj.list_loras() if d.state == "enabled"]
+
     # ---- Snapshot / catalog helpers -------------------------------------
 
     def lora_catalog_payload(self) -> list:
@@ -625,6 +648,10 @@ class StreamingSession:
         # promptA/promptB text; the client's visible-prepend logic
         # mutates the prompt on toggle and sends a normal
         # prompt-update message.
+        # The LoRA set changed, so the lora_str_<id> knob universe did too —
+        # refresh the cached validation spec map (atomic ref swap; set_knobs
+        # reads it lock-free from the dispatch thread).
+        self._rebuild_knob_specs(self._enabled_lora_ids())
         self.bus.publish(LoraCatalogUpdate(catalog=self.lora_catalog_payload()))
 
     def _apply_depth_pending(self) -> None:
@@ -1165,8 +1192,13 @@ class StreamingSession:
         if origin is CommandOrigin.EXTERNAL:
             self.bus.publish(ParamsEcho(raw=dict(raw)))
             return
+        # Enforce the knob contract on the load-bearing path: clamp numerics
+        # to [min,max], coerce ints, drop invalid enum/bool values. Unknown
+        # keys (curve specs, the playback clock) pass through untouched.
+        # Silent clamp — never reject a 125 Hz tick over one bad value.
+        clean, _errors = coerce_knob_values(raw, self._knob_specs_by_name)
         with state._lock:
-            self.virtual_knobs.update(raw)
+            self.virtual_knobs.update(clean)
             try:
                 self.audio_eng.position = int(playback_pos * SAMPLE_RATE) % max(
                     1, len(self.audio_eng.current),
@@ -1830,6 +1862,18 @@ class StreamingSession:
             initial_knob_ids = list(initial_enable_ids) if use_lora else []
             banks = build_banks(use_sde, loras=initial_knob_ids)
             virtual_knobs = KnobState(banks)
+            # Seed non-bank knob defaults (steps_override, guidance_scale,
+            # cfg_rescale, dcw_*, and the enums) so the session snapshot's
+            # knob_values is complete from t=0 — before the first client param
+            # tick and for headless / MCP-only sessions. Bank knobs are already
+            # seeded by KnobState.__init__; these ride the params channel but are
+            # never bank-stored otherwise, so without this they'd be absent from
+            # the snapshot until a client sent them.
+            virtual_knobs.update({
+                s.name: s.default
+                for s in knob_specs(use_sde, loras=initial_knob_ids)
+                if not s.bank
+            })
 
             state = SessionState(
                 source=source,
