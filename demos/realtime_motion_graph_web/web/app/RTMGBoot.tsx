@@ -5,11 +5,14 @@ import { fetchKnobManifest } from "@/engine/knobs/fetchKnobManifest";
 import { listLoras } from "@/engine/lora/listLoras";
 import { setEngineUrlBuilder } from "@/engine/rtmgConfig";
 import { installTestHooks } from "@/engine/testHooks";
+import { fetchWireContract } from "@/engine/wire/fetchWireContract";
 import { applyConfig, loadConfig } from "@/lib/config";
 import { useKnobManifestStore } from "@/store/useKnobManifestStore";
 import { useLoraStore } from "@/store/useLoraStore";
+import { useWireContractStore } from "@/store/useWireContractStore";
 import type { KnobManifest } from "@/types/knobs";
 import type { LoraCatalogEntry } from "@/types/protocol";
+import type { WireContract } from "@/types/wireContract";
 
 // Same-origin URL builder. The engine's HTTP routes (/api/*, /fixtures/*,
 // /loras/*, /videos/*) are proxied to the Python backend at :8765 by the
@@ -43,13 +46,17 @@ if (typeof window !== "undefined") {
   // nothing runs until a test (or a curious operator) calls into it.
   installTestHooks();
   void (async () => {
-    const [cfg, catalog, manifest] = await Promise.all([
+    const [cfg, catalog, manifest, contract] = await Promise.all([
       loadConfig(),
       listLoras().catch(() => [] as LoraCatalogEntry[]),
       // Non-fatal: the manifest only drives the auto-generated knob panel.
       // A backend without /api/knobs leaves it empty and the panel shows a
       // placeholder; the shipped tiles are unaffected.
       fetchKnobManifest().catch(() => ({}) as KnobManifest),
+      // Non-fatal: the wire contract is discovery metadata for re-skins /
+      // agents; the shipped client speaks the protocol directly, so a backend
+      // without /api/protocol just leaves the store empty.
+      fetchWireContract().catch(() => null as WireContract | null),
     ]);
     applyConfig(cfg);
     if (catalog.length > 0) {
@@ -57,6 +64,9 @@ if (typeof window !== "undefined") {
     }
     if (Object.keys(manifest).length > 0) {
       useKnobManifestStore.getState().setManifest(manifest);
+    }
+    if (contract) {
+      useWireContractStore.getState().setContract(contract);
     }
   })();
 }

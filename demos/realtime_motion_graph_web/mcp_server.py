@@ -53,6 +53,7 @@ from acestep.streaming.knobs import (
     knob_catalog,
     knob_specs,
 )
+from .protocol import wire_contract
 
 
 # MCP wire protocol owns stdout — every log MUST go to stderr. Lazy
@@ -280,6 +281,23 @@ async def get_lora_metadata(lora_id: str) -> dict:
         if entry.get("id") == lora_id:
             return entry.get("metadata") or {}
     return {"error": "not_found", "lora_id": lora_id}
+
+
+@mcp.tool()
+async def describe_protocol() -> dict:
+    """The full WebSocket wire contract: ``{version, commands, events}``.
+
+    Same self-describing manifest the backend serves at ``GET /api/protocol``.
+    ``commands`` is every client->server message type (name -> fields / binary
+    / origin_sensitive / description); ``events`` is every server->client
+    message type. A consumer can build every control message and decode every
+    server event from this alone, modulo the binary framing noted per entry
+    and the separate ``/api/knobs`` payload schema for the ``params`` command.
+
+    Static (session-independent): the vocabulary doesn't change per session,
+    only the ``params`` knob set does (see list_knobs).
+    """
+    return wire_contract()
 
 
 @mcp.tool()
