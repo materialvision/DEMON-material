@@ -13,6 +13,7 @@ import { useWireContractStore } from "@/store/useWireContractStore";
 import type { KnobManifest } from "@/types/knobs";
 import type { LoraCatalogEntry } from "@/types/protocol";
 import type { WireContract } from "@/types/wireContract";
+import { PROTOCOL_VERSION } from "@/types/wireContract.gen";
 
 // Same-origin URL builder. The engine's HTTP routes (/api/*, /fixtures/*,
 // /loras/*, /videos/*) are proxied to the Python backend at :8765 by the
@@ -67,6 +68,18 @@ if (typeof window !== "undefined") {
     }
     if (contract) {
       useWireContractStore.getState().setContract(contract);
+      // The client's wire types (types/wireContract.gen.ts) are generated
+      // from the backend registry at build time; the served contract is the
+      // live truth. A version mismatch means this build's senders/ladder may
+      // be typed against a stale vocabulary — surface it instead of letting
+      // it manifest as silently ignored commands.
+      if (contract.version !== PROTOCOL_VERSION) {
+        console.warn(
+          `[boot] wire-contract version mismatch: backend serves v${contract.version}, ` +
+            `client built against v${PROTOCOL_VERSION} — regenerate ` +
+            "types/wireContract.gen.ts against this backend.",
+        );
+      }
     }
   })();
 }

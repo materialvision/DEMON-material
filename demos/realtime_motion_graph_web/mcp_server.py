@@ -53,7 +53,7 @@ from acestep.streaming.knobs import (
     knob_catalog,
     knob_specs,
 )
-from .protocol import wire_contract
+from .protocol import coerce_command_payload, wire_contract
 
 
 # MCP wire protocol owns stdout — every log MUST go to stderr. Lazy
@@ -174,8 +174,28 @@ def _encode_cmd(data: dict, audio: Optional[bytes] = None) -> bytes:
     return prefix + json_bytes + audio
 
 
+def _validate_command(data: dict) -> dict:
+    """Coerce + validate a command envelope against the wire contract
+    (:func:`demos.realtime_motion_graph_web.protocol.coerce_command_payload`).
+
+    Raises ``ValueError`` on any contract violation so the agent gets explicit
+    feedback instead of the backend silently ignoring a malformed command.
+    This is the command-envelope counterpart to the knob-level validation in
+    ``_validate_against_session``: every MCP command now derives its validity
+    from the same registry the backend and a re-skinned UI build against.
+    Returns the cleaned envelope to forward. The free-form ``params.raw`` knob
+    dict rides through untouched here — its schema is the /api/knobs manifest,
+    enforced separately by ``_validate_against_session``.
+    """
+    clean, errors = coerce_command_payload(str(data.get("type")), data)
+    if errors:
+        raise ValueError("; ".join(errors))
+    return clean
+
+
 def _send_cmd(session_id: Optional[str], data: dict,
               audio: Optional[bytes] = None) -> dict:
+    data = _validate_command(data)
     sid = _resolve_session_id(session_id)
     body = _encode_cmd(data, audio)
     return _http_json("POST", f"{CONTROL_HTTP}/sessions/{sid}/cmd",

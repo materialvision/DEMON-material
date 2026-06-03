@@ -27,6 +27,30 @@ import {
   type StemAssetsMessage,
   type SwapReadyMessage,
 } from "@/types/protocol";
+// Outbound command payloads + the inbound event-name union are GENERATED from
+// the backend wire-contract registry (protocol.py) — see
+// types/wireContract.gen.ts. Typing the senders/ladder against them means a
+// renamed command, a dropped field, or an unregistered event name fails
+// `tsc` instead of silently desyncing from the server.
+import type {
+  ClearStructureSourceCommand,
+  ClearTimbreSourceCommand,
+  DisableLoraCommand,
+  EnableLoraCommand,
+  EventName,
+  LoopBandCommand,
+  ParamsCommand,
+  PromptCommand,
+  SetDepthCommand,
+  SetInterpMethodCommand,
+  SetPromptBlendCommand,
+  SetStructureFixtureCommand,
+  SetTimbreFixtureCommand,
+  SetStructureSourceCommand,
+  SetTimbreSourceCommand,
+  SetTimbreStrengthCommand,
+  SwapSourceCommand,
+} from "@/types/wireContract.gen";
 
 export {
   SAMPLE_RATE,
@@ -480,82 +504,106 @@ export class RemoteBackend extends EventTarget {
           } catch {
             return;
           }
-          if (msg.type === "params_update") {
-            this.dispatchEvent(
-              new CustomEvent("params", { detail: msg.params }),
-            );
-          } else if (msg.type === "params_echo") {
-            // Echo of raw knob values applied by the MCP control bus;
-            // useMcpMirror writes these into the perf/lora stores so the
-            // browser's UI moves the sliders to match.
-            this.dispatchEvent(
-              new CustomEvent("params_echo", { detail: msg.raw }),
-            );
-          } else if (msg.type === "prompt_blend_echo") {
-            // Same shape as params_echo but for the dedicated prompt-
-            // blend slider, which doesn't ride the generic params
-            // channel. useMcpMirror mirrors this through setSlider so
-            // the Smooth tween eases the value and usePromptBlendSync
-            // ships the tweened sequence back to the server.
-            this.dispatchEvent(
-              new CustomEvent("prompt_blend_echo", { detail: msg.value }),
-            );
-          } else if (msg.type === "prompt_applied") {
-            this.dispatchEvent(
-              new CustomEvent("prompt_applied", { detail: msg.tags }),
-            );
-          } else if (msg.type === "lora_catalog") {
-            this.loraCatalog =
-              (msg.catalog as LoraCatalogEntry[] | undefined) || [];
-            this.dispatchEvent(
-              new CustomEvent("lora_catalog", { detail: this.loraCatalog }),
-            );
-          } else if (msg.type === "swap_ready") {
-            this._pendingSwap = msg as unknown as SwapReadyMessage;
-          } else if (msg.type === "swap_failed") {
-            this.dispatchEvent(
-              new CustomEvent("swap_failed", { detail: msg.error }),
-            );
-          } else if (msg.type === "stem_assets") {
-            this._pendingStemAssets = msg as unknown as StemAssetsMessage;
-            this._pendingStemBuffers = {};
-          } else if (msg.type === "stem_failed") {
-            this._pendingStemAssets = null;
-            this._pendingStemBuffers = {};
-            this.dispatchEvent(
-              new CustomEvent("stem_failed", { detail: msg }),
-            );
-          } else if (msg.type === "timbre_set") {
-            this.dispatchEvent(
-              new CustomEvent("timbre_set", { detail: msg }),
-            );
-          } else if (msg.type === "timbre_cleared") {
-            this.dispatchEvent(new CustomEvent("timbre_cleared"));
-          } else if (msg.type === "timbre_failed") {
-            this.dispatchEvent(
-              new CustomEvent("timbre_failed", { detail: msg.error }),
-            );
-          } else if (msg.type === "structure_set") {
-            this.dispatchEvent(
-              new CustomEvent("structure_set", { detail: msg }),
-            );
-          } else if (msg.type === "structure_cleared") {
-            this.dispatchEvent(new CustomEvent("structure_cleared"));
-          } else if (msg.type === "structure_failed") {
-            this.dispatchEvent(
-              new CustomEvent("structure_failed", { detail: msg.error }),
-            );
-          } else if (msg.type === "depth_applied") {
-            const v = typeof msg.value === "number" ? msg.value : null;
-            if (v !== null) {
-              this.pipelineDepth = v;
-              useSessionStore.getState().setPipelineDepth(v);
+          // The case labels are compile-checked against the generated
+          // EventName union (types/wireContract.gen.ts), so this ladder
+          // can't reference an event the backend wire contract doesn't
+          // declare — an unregistered name fails `tsc`, and the Python
+          // drift guard (tests/unit/test_wire_contract.py) parses these
+          // labels against the registry from its side.
+          switch (msg.type as EventName) {
+            case "params_update":
               this.dispatchEvent(
-                new CustomEvent("depth_applied", { detail: v }),
+                new CustomEvent("params", { detail: msg.params }),
               );
+              break;
+            case "params_echo":
+              // Echo of raw knob values applied by the MCP control bus;
+              // useMcpMirror writes these into the perf/lora stores so the
+              // browser's UI moves the sliders to match.
+              this.dispatchEvent(
+                new CustomEvent("params_echo", { detail: msg.raw }),
+              );
+              break;
+            case "prompt_blend_echo":
+              // Same shape as params_echo but for the dedicated prompt-
+              // blend slider, which doesn't ride the generic params
+              // channel. useMcpMirror mirrors this through setSlider so
+              // the Smooth tween eases the value and usePromptBlendSync
+              // ships the tweened sequence back to the server.
+              this.dispatchEvent(
+                new CustomEvent("prompt_blend_echo", { detail: msg.value }),
+              );
+              break;
+            case "prompt_applied":
+              this.dispatchEvent(
+                new CustomEvent("prompt_applied", { detail: msg.tags }),
+              );
+              break;
+            case "lora_catalog":
+              this.loraCatalog =
+                (msg.catalog as LoraCatalogEntry[] | undefined) || [];
+              this.dispatchEvent(
+                new CustomEvent("lora_catalog", { detail: this.loraCatalog }),
+              );
+              break;
+            case "swap_ready":
+              this._pendingSwap = msg as unknown as SwapReadyMessage;
+              break;
+            case "swap_failed":
+              this.dispatchEvent(
+                new CustomEvent("swap_failed", { detail: msg.error }),
+              );
+              break;
+            case "stem_assets":
+              this._pendingStemAssets = msg as unknown as StemAssetsMessage;
+              this._pendingStemBuffers = {};
+              break;
+            case "stem_failed":
+              this._pendingStemAssets = null;
+              this._pendingStemBuffers = {};
+              this.dispatchEvent(
+                new CustomEvent("stem_failed", { detail: msg }),
+              );
+              break;
+            case "timbre_set":
+              this.dispatchEvent(
+                new CustomEvent("timbre_set", { detail: msg }),
+              );
+              break;
+            case "timbre_cleared":
+              this.dispatchEvent(new CustomEvent("timbre_cleared"));
+              break;
+            case "timbre_failed":
+              this.dispatchEvent(
+                new CustomEvent("timbre_failed", { detail: msg.error }),
+              );
+              break;
+            case "structure_set":
+              this.dispatchEvent(
+                new CustomEvent("structure_set", { detail: msg }),
+              );
+              break;
+            case "structure_cleared":
+              this.dispatchEvent(new CustomEvent("structure_cleared"));
+              break;
+            case "structure_failed":
+              this.dispatchEvent(
+                new CustomEvent("structure_failed", { detail: msg.error }),
+              );
+              break;
+            case "depth_applied": {
+              const v = typeof msg.value === "number" ? msg.value : null;
+              if (v !== null) {
+                this.pipelineDepth = v;
+                useSessionStore.getState().setPipelineDepth(v);
+                this.dispatchEvent(
+                  new CustomEvent("depth_applied", { detail: v }),
+                );
+              }
+              break;
             }
-          } else {
-            this.dispatchEvent(new CustomEvent("json", { detail: msg }));
+            default:
+              this.dispatchEvent(new CustomEvent("json", { detail: msg }));
           }
           return;
         }
@@ -683,13 +731,12 @@ export class RemoteBackend extends EventTarget {
   ): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     try {
-      this.ws.send(
-        JSON.stringify({
-          type: "params",
-          raw,
-          playback_pos: playbackPos,
-        }),
-      );
+      const msg: ParamsCommand = {
+        type: "params",
+        raw,
+        playback_pos: playbackPos,
+      };
+      this.ws.send(JSON.stringify(msg));
     } catch {}
   }
 
@@ -715,13 +762,7 @@ export class RemoteBackend extends EventTarget {
       // carries a disabled LoRA's trigger zero times and an enabled
       // LoRA's trigger exactly once — per tag (A and B alike).
       const prefix = enabledLoraTriggerPrefix();
-      const msg: {
-        type: string;
-        tags: string;
-        tags_b?: string;
-        key?: string;
-        time_signature?: string;
-      } = {
+      const msg: PromptCommand = {
         type: "prompt",
         tags: prefix + stripLeadingTriggers(tags),
       };
@@ -759,10 +800,11 @@ export class RemoteBackend extends EventTarget {
   sendSetPromptBlend(value: number): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     try {
-      this.ws.send(JSON.stringify({
+      const msg: SetPromptBlendCommand = {
         type: "set_prompt_blend",
         value: Math.max(0, Math.min(1, value)),
-      }));
+      };
+      this.ws.send(JSON.stringify(msg));
     } catch {}
   }
 
@@ -776,14 +818,18 @@ export class RemoteBackend extends EventTarget {
    * are read live each tick), so the change is audible without a
    * restart. Discrete setting, so no smoothing/echo channel.
    */
-  sendSetInterpMethod(path: string, method: string): void {
+  sendSetInterpMethod(
+    path: SetInterpMethodCommand["path"],
+    method: SetInterpMethodCommand["method"],
+  ): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     try {
-      this.ws.send(JSON.stringify({
+      const msg: SetInterpMethodCommand = {
         type: "set_interp_method",
         path,
         method,
-      }));
+      };
+      this.ws.send(JSON.stringify(msg));
     } catch {}
   }
 
@@ -798,10 +844,11 @@ export class RemoteBackend extends EventTarget {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     if (!Number.isFinite(value)) return;
     try {
-      this.ws.send(JSON.stringify({
+      const msg: SetDepthCommand = {
         type: "set_depth",
         value: Math.round(value),
-      }));
+      };
+      this.ws.send(JSON.stringify(msg));
     } catch {}
   }
 
@@ -816,20 +863,19 @@ export class RemoteBackend extends EventTarget {
   sendLoopBand(startSec: number | null, endSec: number | null): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     try {
-      this.ws.send(
-        JSON.stringify({
-          type: "loop_band",
-          start_sec: startSec,
-          end_sec: endSec,
-        }),
-      );
+      const msg: LoopBandCommand = {
+        type: "loop_band",
+        start_sec: startSec,
+        end_sec: endSec,
+      };
+      this.ws.send(JSON.stringify(msg));
     } catch {}
   }
 
   sendEnableLora(id: string, strength?: number): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     try {
-      const msg: { type: string; id: string; strength?: number } = {
+      const msg: EnableLoraCommand = {
         type: "enable_lora",
         id,
       };
@@ -841,7 +887,8 @@ export class RemoteBackend extends EventTarget {
   sendDisableLora(id: string): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     try {
-      this.ws.send(JSON.stringify({ type: "disable_lora", id }));
+      const msg: DisableLoraCommand = { type: "disable_lora", id };
+      this.ws.send(JSON.stringify(msg));
     } catch {}
   }
 
@@ -854,28 +901,29 @@ export class RemoteBackend extends EventTarget {
   sendSetTimbreStrength(value: number): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     try {
-      this.ws.send(JSON.stringify({
+      const msg: SetTimbreStrengthCommand = {
         type: "set_timbre_strength",
         value: Math.max(0, Math.min(1, value)),
-      }));
+      };
+      this.ws.send(JSON.stringify(msg));
     } catch {}
   }
 
   /**
-   * Send a JSON header followed by a binary audio frame. Wire format
-   * matches the init handshake / swap_source: <II header (channels,
-   * samples) + interleaved float32 PCM. Used by both timbre and
-   * structure source uploads.
+   * Send a typed JSON header followed by a binary audio frame. Wire
+   * format matches the init handshake / swap_source: <II header
+   * (channels, samples) + interleaved float32 PCM. Used by both timbre
+   * and structure source uploads; the caller builds the typed command
+   * so the header is contract-checked at compile time.
    */
   private sendAudioFrame(
-    messageType: string,
-    name: string,
+    msg: SetTimbreSourceCommand | SetStructureSourceCommand,
     interleaved: Float32Array,
     channels: number,
   ): boolean {
     if (this.ws?.readyState !== WebSocket.OPEN) return false;
     try {
-      this.ws.send(JSON.stringify({ type: messageType, name }));
+      this.ws.send(JSON.stringify(msg));
       const samples = interleaved.length / channels;
       const hdr = new ArrayBuffer(8);
       const dv = new DataView(hdr);
@@ -888,7 +936,7 @@ export class RemoteBackend extends EventTarget {
       this.ws.send(combined);
       return true;
     } catch (e) {
-      console.error(`[protocol] ${messageType} failed:`, e);
+      console.error(`[protocol] ${msg.type} failed:`, e);
       return false;
     }
   }
@@ -906,7 +954,7 @@ export class RemoteBackend extends EventTarget {
     name: string,
   ): boolean {
     return this.sendAudioFrame(
-      "set_timbre_source", name, interleaved, channels,
+      { type: "set_timbre_source", name }, interleaved, channels,
     );
   }
 
@@ -921,7 +969,8 @@ export class RemoteBackend extends EventTarget {
   sendSetTimbreFixture(name: string): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     try {
-      this.ws.send(JSON.stringify({ type: "set_timbre_fixture", name }));
+      const msg: SetTimbreFixtureCommand = { type: "set_timbre_fixture", name };
+      this.ws.send(JSON.stringify(msg));
     } catch {}
   }
 
@@ -933,7 +982,8 @@ export class RemoteBackend extends EventTarget {
   sendClearTimbreSource(): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     try {
-      this.ws.send(JSON.stringify({ type: "clear_timbre_source" }));
+      const msg: ClearTimbreSourceCommand = { type: "clear_timbre_source" };
+      this.ws.send(JSON.stringify(msg));
     } catch {}
   }
 
@@ -951,7 +1001,7 @@ export class RemoteBackend extends EventTarget {
     name: string,
   ): boolean {
     return this.sendAudioFrame(
-      "set_structure_source", name, interleaved, channels,
+      { type: "set_structure_source", name }, interleaved, channels,
     );
   }
 
@@ -964,7 +1014,11 @@ export class RemoteBackend extends EventTarget {
   sendSetStructureFixture(name: string): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     try {
-      this.ws.send(JSON.stringify({ type: "set_structure_fixture", name }));
+      const msg: SetStructureFixtureCommand = {
+        type: "set_structure_fixture",
+        name,
+      };
+      this.ws.send(JSON.stringify(msg));
     } catch {}
   }
 
@@ -975,7 +1029,10 @@ export class RemoteBackend extends EventTarget {
   sendClearStructureSource(): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     try {
-      this.ws.send(JSON.stringify({ type: "clear_structure_source" }));
+      const msg: ClearStructureSourceCommand = {
+        type: "clear_structure_source",
+      };
+      this.ws.send(JSON.stringify(msg));
     } catch {}
   }
 
@@ -991,18 +1048,11 @@ export class RemoteBackend extends EventTarget {
     key?: string,
     fixtureName?: string,
     timeSignature?: string,
-    stemSourceMode?: "full" | "vocals" | "instruments",
+    stemSourceMode?: SwapSourceCommand["stem_source_mode"],
   ): boolean {
     if (this.ws?.readyState !== WebSocket.OPEN) return false;
     try {
-      const msg: {
-        type: string;
-        tags?: string;
-        key?: string;
-        fixture_name?: string;
-        time_signature?: string;
-        stem_source_mode?: "full" | "vocals" | "instruments";
-      } = {
+      const msg: SwapSourceCommand = {
         type: "swap_source",
       };
       if (tags) msg.tags = tags;
@@ -1042,19 +1092,11 @@ export class RemoteBackend extends EventTarget {
     tags?: string,
     key?: string,
     timeSignature?: string,
-    stemSourceMode?: "full" | "vocals" | "instruments",
+    stemSourceMode?: SwapSourceCommand["stem_source_mode"],
   ): boolean {
     if (this.ws?.readyState !== WebSocket.OPEN) return false;
     try {
-      const msg: {
-        type: string;
-        use_server_source: true;
-        fixture_name: string;
-        tags?: string;
-        key?: string;
-        time_signature?: string;
-        stem_source_mode?: "full" | "vocals" | "instruments";
-      } = {
+      const msg: SwapSourceCommand = {
         type: "swap_source",
         use_server_source: true,
         fixture_name: fixtureName,

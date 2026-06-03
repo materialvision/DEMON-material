@@ -93,7 +93,7 @@ from acestep.user_uploads import (
 )
 
 from .audio_codec import SliceCodec, send_stem_payload
-from .protocol import SAMPLE_RATE
+from .protocol import COMMAND_NAMES, SAMPLE_RATE, coerce_command_payload
 
 
 # ---------------------------------------------------------------------------
@@ -659,12 +659,34 @@ def _handle_client_body(
         ``source`` is ``"ws"`` for the browser's own WebSocket and
         ``"control"`` for control-bus messages. Maps to
         ``CommandOrigin`` for the two origin-dependent verbs.
+
+        Inbound envelopes are validated against the wire-contract registry
+        before dispatch: unknown command names are rejected up front
+        (registry-derived, replacing the old fall-through log), and
+        declared fields are type-coerced by ``coerce_command_payload`` —
+        the same enforcement point the MCP tools use, so per-field checks
+        can't drift between transports. Hot-path semantics are preserved:
+        coercion silently cleans (clamp-style, like the knob channel) and
+        the arms' own defensive fallbacks still apply to dropped fields.
         """
         mtype = data.get("type")
         origin = (
             CommandOrigin.EXTERNAL if source == "control"
             else CommandOrigin.PRIMARY
         )
+        if mtype not in COMMAND_NAMES:
+            # Unknown mtype — log but don't crash; lets future protocol
+            # additions degrade gracefully on older servers.
+            logger.warning(
+                "unknown_message_type origin={} mtype={}", source, mtype,
+            )
+            return
+        data, coerce_errors = coerce_command_payload(mtype, data)
+        if coerce_errors:
+            logger.warning(
+                "command_payload_coerced origin={} mtype={} errors={}",
+                source, mtype, coerce_errors,
+            )
         try:
             if mtype == "params":
                 try:
@@ -838,14 +860,6 @@ def _handle_client_body(
                     fixture_name=data.get("fixture_name"),
                     stem_source_mode=data.get("stem_source_mode"),
                     origin=origin,
-                )
-            else:
-                # Unknown mtype — log but don't crash; lets future
-                # protocol additions degrade gracefully on older
-                # servers.
-                logger.warning(
-                    "unknown_message_type origin={} mtype={}",
-                    source, mtype,
                 )
         except ConnectionClosed:
             state.running = False

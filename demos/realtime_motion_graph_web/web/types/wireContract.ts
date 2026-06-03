@@ -20,6 +20,8 @@ export interface WireFieldSpec {
   default?: number | string | boolean;
   /** Allowed values for `enum` fields. */
   options?: Array<string | boolean>;
+  /** True = explicit JSON null is a valid value (e.g. loop_band clears). */
+  nullable?: boolean;
   /** Agent/human-facing one-liner. */
   description?: string;
 }
@@ -53,4 +55,14 @@ export interface WireContract {
   version: number;
   commands: Record<string, WireCommandSpec>;
   events: Record<string, WireEventSpec>;
+  /** Session-init payload schema, derived server-side from the
+   *  SessionConfig dataclass. Optional: older backends don't ship it. */
+  config?: Record<string, WireFieldSpec>;
+  /** Init-phase upload sub-protocol (upload_track / upload_ok /
+   *  upload_failed), dispatched before a session exists. Optional:
+   *  older backends don't ship it. */
+  handshake?: {
+    commands: Record<string, WireCommandSpec>;
+    events: Record<string, WireEventSpec>;
+  };
 }

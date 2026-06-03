@@ -154,6 +154,7 @@ class FieldSpec:
     required: bool = False
     default: Any = None
     options: tuple = ()        # allowed values for enum fields
+    nullable: bool = False     # explicit JSON null is a valid value
     description: str = ""
 
 
@@ -202,9 +203,9 @@ COMMANDS: tuple = (
     CommandSpec(
         "loop_band",
         fields=(
-            FieldSpec("start_sec", "float",
+            FieldSpec("start_sec", "float", nullable=True,
                       description="Loop start in seconds; null/degenerate clears."),
-            FieldSpec("end_sec", "float",
+            FieldSpec("end_sec", "float", nullable=True,
                       description="Loop end in seconds; null/degenerate clears."),
         ),
         origin_sensitive=True,
@@ -362,13 +363,20 @@ EVENTS: tuple = (
             FieldSpec("sample_rate", "int", required=True),
             FieldSpec("lora_catalog", "list"),
             FieldSpec("lora_dir", "str"),
-            FieldSpec("bpm", "float"),
-            FieldSpec("key", "str"),
-            FieldSpec("time_signature", "str"),
+            FieldSpec("bpm", "float", nullable=True),
+            FieldSpec("key", "str", nullable=True),
+            FieldSpec("time_signature", "str", nullable=True),
             FieldSpec("checkpoint", "str"),
             FieldSpec("checkpoint_scale", "str"),
             FieldSpec("pipeline_depth", "int"),
             FieldSpec("max_pipeline_depth", "int"),
+            FieldSpec("lora_pending_enable", "list",
+                      description="LoRA ids the server will auto-enable on the "
+                                  "first tick (from the session's initial "
+                                  "enable set); empty when none."),
+            FieldSpec("session_id", "str",
+                      description="Server-minted session id, echoed for "
+                                  "client/analytics log correlation."),
         ),
         binary_follow=True,
         description="First JSON after the upload handshake, followed by the "
@@ -380,6 +388,10 @@ EVENTS: tuple = (
             FieldSpec("code", "str"),
             FieldSpec("message", "str"),
             FieldSpec("build_command", "str"),
+            FieldSpec("duration_s", "float",
+                      description="Present only on the engine_not_built code: "
+                                  "the source duration whose TRT profile is "
+                                  "missing."),
         ),
         description="Structured init failure (sent during the handshake).",
     ),
@@ -416,11 +428,12 @@ EVENTS: tuple = (
         "swap_ready",
         fields=(
             FieldSpec("duration", "float", required=True),
+            FieldSpec("sample_rate", "int", required=True),
             FieldSpec("channels", "int", required=True),
-            FieldSpec("bpm", "float"),
-            FieldSpec("key", "str"),
-            FieldSpec("time_signature", "str"),
-            FieldSpec("fixture_name", "str"),
+            FieldSpec("bpm", "float", nullable=True),
+            FieldSpec("key", "str", nullable=True),
+            FieldSpec("time_signature", "str", nullable=True),
+            FieldSpec("fixture_name", "str", nullable=True),
         ),
         binary_follow=True,
         description="Swap accepted; a binary float16 replacement buffer follows "
@@ -428,7 +441,13 @@ EVENTS: tuple = (
     ),
     EventSpec(
         "swap_failed",
-        fields=(FieldSpec("error", "str"),),
+        fields=(
+            FieldSpec("error", "str"),
+            FieldSpec("build_command", "str",
+                      description="Present only when the swap failed on a "
+                                  "missing TRT engine: the command to build "
+                                  "the profile for the new source's duration."),
+        ),
         description="Swap rejected (decode/load failure).",
     ),
     EventSpec(
@@ -491,19 +510,79 @@ COMMAND_NAMES = frozenset(c.name for c in COMMANDS)
 EVENT_NAMES = frozenset(e.name for e in EVENTS)
 
 
+# ---------------------------------------------------------------------------
+# Init-phase handshake vocabulary (pre-stream)
+# ---------------------------------------------------------------------------
+# These ride the connection BEFORE streaming begins and are dispatched
+# differently from the per-tick commands above: the session-init ``config``
+# JSON (projected from ``acestep.streaming.config.SessionConfig`` by
+# :func:`config_catalog`) and the standalone ``upload_track`` sub-protocol that
+# persists + encodes a track on the pod without starting a stream. Kept OUT of
+# COMMANDS / EVENTS so the dispatcher drift guard (which matches the streaming
+# ``mtype ==`` chain) stays exact; surfaced under ``handshake`` in
+# :func:`wire_contract`.
+
+HANDSHAKE_COMMANDS: tuple = (
+    CommandSpec(
+        "upload_track",
+        fields=(
+            FieldSpec("name", "str", default="upload",
+                      description="Requested track label; deduped server-side."),
+            FieldSpec("key", "str",
+                      description="Optional key override; forces a re-encode "
+                                  "instead of the content-dedup fast path."),
+            FieldSpec("time_signature", "str",
+                      description="Optional meter override; same effect as key."),
+        ),
+        binary=True,
+        description="Init-phase: persist + encode an uploaded track on the pod "
+                    "WITHOUT starting a stream (sent as the FIRST frame in place "
+                    "of the session config). " + _PCM_FRAME + " Acked by "
+                    "upload_ok / upload_failed, after which the socket closes.",
+    ),
+)
+
+HANDSHAKE_EVENTS: tuple = (
+    EventSpec(
+        "upload_ok",
+        fields=(
+            FieldSpec("name", "str", required=True,
+                      description="Final persisted track name (may differ from "
+                                  "the requested name after dedup/uniquify)."),
+            FieldSpec("bpm", "int"),
+            FieldSpec("key", "str"),
+            FieldSpec("time_signature", "str"),
+            FieldSpec("duration_s", "float"),
+            FieldSpec("samples", "int"),
+        ),
+        description="Init-phase ack: the uploaded track was persisted + encoded "
+                    "(or an identical existing one was reused).",
+    ),
+    EventSpec(
+        "upload_failed",
+        fields=(FieldSpec("error", "str"),),
+        description="Init-phase upload failure (decode/encode/persist error).",
+    ),
+)
+
+HANDSHAKE_COMMAND_NAMES = frozenset(c.name for c in HANDSHAKE_COMMANDS)
+HANDSHAKE_EVENT_NAMES = frozenset(e.name for e in HANDSHAKE_EVENTS)
+
+
 def _field_payload(f: "FieldSpec") -> dict:
     out: dict = {"type": f.type, "required": f.required}
     if f.default is not None:
         out["default"] = f.default
     if f.options:
         out["options"] = list(f.options)
+    if f.nullable:
+        out["nullable"] = True
     if f.description:
         out["description"] = f.description
     return out
 
 
-def command_catalog() -> dict:
-    """Project COMMANDS into a transport-agnostic ``name -> spec`` catalog."""
+def _command_catalog_of(specs) -> dict:
     return {
         c.name: {
             "fields": {f.name: _field_payload(f) for f in c.fields},
@@ -512,32 +591,206 @@ def command_catalog() -> dict:
             "origin_sensitive": c.origin_sensitive,
             "description": c.description,
         }
-        for c in COMMANDS
+        for c in specs
     }
 
 
-def event_catalog() -> dict:
-    """Project EVENTS into a transport-agnostic ``name -> spec`` catalog."""
+def _event_catalog_of(specs) -> dict:
     return {
         e.name: {
             "fields": {f.name: _field_payload(f) for f in e.fields},
             "binary_follow": e.binary_follow,
             "description": e.description,
         }
-        for e in EVENTS
+        for e in specs
+    }
+
+
+def command_catalog() -> dict:
+    """Project COMMANDS into a transport-agnostic ``name -> spec`` catalog."""
+    return _command_catalog_of(COMMANDS)
+
+
+def event_catalog() -> dict:
+    """Project EVENTS into a transport-agnostic ``name -> spec`` catalog."""
+    return _event_catalog_of(EVENTS)
+
+
+# Annotation-string -> wire type for the SessionConfig projection. With
+# ``from __future__ import annotations`` (which config.py uses) dataclass field
+# types arrive as strings, so we match on those.
+_CONFIG_TYPE_MAP = {
+    "bool": "bool",
+    "int": "int",
+    "float": "float",
+    "str": "str",
+    "str | None": "str",
+    "list": "list",
+    "dict": "dict",
+}
+
+
+def config_catalog() -> dict:
+    """Project the session-init handshake
+    (:class:`acestep.streaming.config.SessionConfig`) into the same
+    transport-agnostic ``name -> {type, required, default?}`` shape as the
+    command/event catalogs.
+
+    DERIVED from the dataclass, so the config payload a UI sends at session
+    start can't drift from what the server actually parses
+    (``SessionConfig.from_dict``). Every field is wire-optional (the dataclass
+    supplies defaults). The import is local so this module's top-level import
+    stays torch-free / acestep-free; SessionConfig itself is both.
+    """
+    from dataclasses import MISSING
+    from dataclasses import fields as _dc_fields
+
+    from acestep.streaming.config import SessionConfig
+
+    out: dict = {}
+    for f in _dc_fields(SessionConfig):
+        ann = f.type if isinstance(f.type, str) else getattr(f.type, "__name__", "str")
+        entry: dict = {
+            "type": _CONFIG_TYPE_MAP.get(ann, "str"),
+            "required": False,
+        }
+        if f.default is not MISSING and f.default is not None:
+            entry["default"] = f.default
+        out[f.name] = entry
+    return out
+
+
+def handshake_contract() -> dict:
+    """The pre-stream handshake sub-protocol: the ``upload_track`` command and
+    its ``upload_ok`` / ``upload_failed`` acks. Separate from the streaming
+    commands/events because it's dispatched before a session exists."""
+    return {
+        "commands": _command_catalog_of(HANDSHAKE_COMMANDS),
+        "events": _event_catalog_of(HANDSHAKE_EVENTS),
     }
 
 
 def wire_contract() -> dict:
-    """Full self-describing WS contract: ``{version, commands, events}``.
+    """Full self-describing WS contract.
 
-    Backs ``GET /api/protocol`` and the MCP ``describe_protocol`` tool. A
-    consumer can build (and validate) every control message and decode every
-    server event from this alone, modulo the binary framing documented in
-    each entry and the ``/api/knobs`` payload for ``params``.
+    ``{version, commands, events, config, handshake}``. Backs
+    ``GET /api/protocol`` and the MCP ``describe_protocol`` tool. A consumer
+    can build (and validate) every control message, decode every server event,
+    assemble the session-init ``config`` payload, and run the pre-stream
+    upload handshake from this alone — modulo the binary framing documented in
+    each entry and the ``/api/knobs`` payload schema for ``params``.
+
+    * ``commands`` / ``events`` — the per-tick streaming vocabulary.
+    * ``config`` — the session-init payload, derived from SessionConfig.
+    * ``handshake`` — the init-phase ``upload_track`` sub-protocol.
     """
     return {
         "version": PROTOCOL_VERSION,
         "commands": command_catalog(),
         "events": event_catalog(),
+        "config": config_catalog(),
+        "handshake": handshake_contract(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Command-envelope validation
+# ---------------------------------------------------------------------------
+
+_COMMANDS_BY_NAME = {c.name: c for c in COMMANDS}
+
+
+def _coerce_command_field(cmd: str, field: "FieldSpec", val):
+    """Coerce one command field by its declared type.
+
+    Returns ``(value, error, keep)``; ``keep`` False means drop the field
+    from the cleaned envelope (a type mismatch a prior value can't recover).
+    Commands carry no numeric bounds (unlike knobs), so this only does type
+    coercion + enum membership, never clamping.
+    """
+    t = field.type
+    label = f"{cmd}.{field.name}"
+    if val is None and field.nullable:
+        return None, None, True  # explicit JSON null is part of the contract
+    if t == "float":
+        try:
+            return float(val), None, True
+        except (TypeError, ValueError):
+            return None, f"{label}: {val!r} is not a number", False
+    if t == "int":
+        try:
+            return int(round(float(val))), None, True
+        except (TypeError, ValueError):
+            return None, f"{label}: {val!r} is not an integer", False
+    if t == "bool":
+        if isinstance(val, bool):
+            return val, None, True
+        if isinstance(val, int) and val in (0, 1):
+            return bool(val), None, True  # tolerate JSON 0/1
+        return None, f"{label}: {val!r} is not a bool", False
+    if t == "str":
+        if isinstance(val, str):
+            return val, None, True
+        if val is None:
+            return None, f"{label}: expected str, got None", False
+        return str(val), None, True
+    if t == "enum":
+        if field.options and val not in field.options:
+            return None, f"{label}: {val!r} not one of {list(field.options)}", False
+        return val, None, True
+    if t == "dict":
+        if isinstance(val, dict):
+            return val, None, True
+        return None, f"{label}: expected object, got {type(val).__name__}", False
+    if t == "list":
+        if isinstance(val, list):
+            return val, None, True
+        return None, f"{label}: expected array, got {type(val).__name__}", False
+    return val, None, True
+
+
+def coerce_command_payload(name: str, payload: dict) -> tuple:
+    """Validate a command envelope against its :class:`CommandSpec`.
+
+    The wire-vocabulary analog of
+    :func:`acestep.streaming.knobs.coerce_knob_values`: the single place that
+    turns the command registry into enforcement, so every transport (the
+    onboard MCP control bus today; the ws_adapter dispatcher in a later phase)
+    validates inbound commands against one contract instead of re-deriving
+    per-field checks inline. Returns ``(clean, errors)``:
+
+    * ``clean`` — a NEW envelope safe to forward. Declared scalar fields are
+      coerced to their type; ``enum`` fields are checked against ``options``;
+      ``dict``/``list`` fields are type-checked. The ``type`` key and any field
+      absent from the spec pass through untouched (forward-compat, plus
+      free-form payloads like ``params.raw`` whose schema is the separate
+      ``/api/knobs`` manifest, NOT this contract).
+    * ``errors`` — human-readable strings for every missing required field and
+      every value dropped on a type/enum mismatch.
+
+    Discrete callers (the MCP tools) raise when ``errors`` is non-empty so the
+    agent gets feedback. This function itself never raises.
+    """
+    spec = _COMMANDS_BY_NAME.get(name)
+    if spec is None:
+        return dict(payload), [f"unknown command {name!r}"]
+    fields_by_name = {f.name: f for f in spec.fields}
+    errors: list = []
+    for f in spec.fields:
+        if f.required and f.name not in payload:
+            errors.append(f"{name}.{f.name}: required field missing")
+    clean: dict = {}
+    for key, val in payload.items():
+        if key == "type":
+            clean[key] = val
+            continue
+        f = fields_by_name.get(key)
+        if f is None:
+            clean[key] = val  # unknown field: pass through verbatim
+            continue
+        coerced, err, keep = _coerce_command_field(name, f, val)
+        if err:
+            errors.append(err)
+        if keep:
+            clean[key] = coerced
+    return clean, errors
