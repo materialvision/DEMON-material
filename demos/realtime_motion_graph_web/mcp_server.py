@@ -47,6 +47,8 @@ import soundfile as sf
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
 
+from acestep.streaming.knobs import knob_catalog
+
 
 # MCP wire protocol owns stdout — every log MUST go to stderr. Lazy
 # configure so this module stays importable without a hard dependency on
@@ -212,53 +214,6 @@ def _waveform_to_audio_bytes(waveform: np.ndarray) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Knob catalog (mirrors demos/realtime_motion_graph_web/knobs.py)
-# ---------------------------------------------------------------------------
-
-
-_GROUP_NAMES = [
-    "ch_g0", "ch_g1", "ch_g2", "ch_g3", "ch_g4", "ch_g5", "ch_g6", "ch_g7",
-]
-_KEYSTONE_NAMES = ["ch13", "ch14", "ch19", "ch23", "ch29", "ch56"]
-
-
-def _build_knob_catalog(sde: bool, enabled_lora_ids: list[str]) -> dict[str, dict]:
-    out: dict[str, dict] = {}
-    if sde:
-        out["sde_amp"] = {"default": 0.0, "max": 1.0, "group": "core",
-                          "description": "SDE diffusion amplitude (replaces denoise in SDE mode)"}
-        out["periodicity"] = {"default": 0.0, "max": 12.5, "group": "core",
-                              "description": "SDE periodicity"}
-    else:
-        out["denoise"] = {"default": 0.0, "max": 1.0, "group": "core",
-                          "description": "ODE denoise strength"}
-    out["seed"] = {"default": 0, "max": 0xFFFFFFFF, "group": "core",
-                   "description": "Stream seed (uint32 integer; passed to torch.manual_seed)"}
-    out["feedback"] = {"default": 0.0, "max": 1.0, "group": "core",
-                       "description": "Feedback amount"}
-    out["shift"] = {"default": 3.5, "min": 1.0, "max": 6.0, "group": "core",
-                    "description": "Flow shift (timing/curve shape). Passed verbatim to the diffusion solver."}
-    out["steps_override"] = {"default": 8, "min": 1, "max": 16, "group": "core",
-                             "description": "Diffusion step count. Lower = lower quality, higher = more latency. Changing rebuilds the StreamPipeline."}
-    for lid in enabled_lora_ids:
-        out[f"lora_str_{lid}"] = {
-            "default": 0.0, "max": 2.0, "group": "core",
-            "description": f"Strength for LoRA {lid!r}",
-        }
-    out["hint_strength"] = {"default": 1.0, "max": 1.0, "group": "core",
-                            "description": "Structure (semantic hint) blend strength"}
-    out["feedback_depth"] = {"default": 1.0, "max": 8.0, "group": "core",
-                             "description": "Feedback delay-tap depth in ticks (1 = last, N = N ticks back)"}
-    for name in _GROUP_NAMES:
-        out[name] = {"default": 1.0, "max": 3.0, "group": "groups",
-                     "description": f"Channel-group amplifier {name}"}
-    for name in _KEYSTONE_NAMES:
-        out[name] = {"default": 1.0, "max": 3.0, "group": "keystones",
-                     "description": f"Keystone channel amplifier {name}"}
-    return out
-
-
-# ---------------------------------------------------------------------------
 # Tools — discovery
 # ---------------------------------------------------------------------------
 
@@ -324,8 +279,15 @@ async def get_lora_metadata(lora_id: str) -> dict:
 
 @mcp.tool()
 async def list_knobs(session_id: Optional[str] = None) -> dict:
-    """Knob catalog (name → default/max/group/description) plus the
-    session's current knob_values dict.
+    """Knob catalog (name → type/default/min/max/group/options/description/
+    bank) plus the session's current knob_values dict.
+
+    Same manifest the backend serves at ``/api/knobs`` — the complete
+    operator-knob set, including the non-bank params (guidance_scale,
+    cfg_rescale, dcw_*, steps_override) and the string-valued enums
+    (rcfg_mode, dcw_mode, dcw_wavelet). ``bank: false`` marks a knob that
+    rides the params channel but isn't stored in KnobState, so it won't
+    appear in ``current`` (set it blind via set_knob / set_rcfg_mode).
 
     Knob set depends on whether the session was started in SDE mode and
     which LoRAs are currently enabled — pulled from the live snapshot.
@@ -337,7 +299,7 @@ async def list_knobs(session_id: Optional[str] = None) -> dict:
         if d.get("state") == "enabled" and d.get("id")
     ]
     return {
-        "knobs": _build_knob_catalog(sde=sde, enabled_lora_ids=enabled),
+        "knobs": knob_catalog(sde=sde, loras=enabled),
         "current": snap.get("knob_values") or {},
     }
 

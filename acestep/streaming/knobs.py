@@ -11,6 +11,7 @@ the operator's hardware controller.
 
 import threading
 from dataclasses import dataclass
+from typing import Any, Optional
 
 
 # Channel groups / keystones used by the server-side pipeline for
@@ -28,9 +29,14 @@ KEYSTONE_CHANNELS = [
 
 @dataclass
 class KnobDef:
+    """KnobState value type. Only ``default`` is read by KnobState; the
+    rest is metadata carried over from the registry (:func:`knob_specs`)
+    for the discovery surfaces that project it."""
     default: float = 0.0
     sensitivity: float = 2.0
     max_val: float = 1.0
+    min_val: Optional[float] = None
+    description: str = ""
 
 
 @dataclass
@@ -39,62 +45,236 @@ class KnobBank:
     knobs: dict
 
 
-def build_banks(sde: bool, loras=None) -> list:
-    """Build the knob banks driving the streaming pipeline.
+@dataclass
+class KnobSpec:
+    """One operator knob, fully self-describing.
 
-    ``loras`` is an iterable of LoRA ids (filename stems). Each id gets
-    a ``lora_str_<id>`` knob. Ids replace the old positional
-    ``lora_str_1`` / ``lora_str_2`` naming so toggling catalog entries
-    on and off doesn't shuffle knob identities.
+    This is the single source of truth for the knob universe. The
+    KnobState banks (:func:`build_banks`) and the transport-agnostic
+    catalog / manifest (:func:`knob_catalog`, served at ``/api/knobs``
+    and by the MCP ``list_knobs`` tool) are both projections of it. Add a
+    knob here and every backend surface — plus any frontend that consumes
+    the manifest — picks it up automatically.
 
-    Backward-compat: an int ``loras`` is accepted and treated as
-    ``[f"slot{i}" for i in range(1, n+1)]`` so callers that haven't
-    migrated still get something usable, with the old-style names.
+    ``bank`` knobs are KnobState-backed: continuous params the streaming
+    runner reads via ``get_param``. Non-``bank`` knobs ride the same
+    ``params`` channel but are consumed straight from the raw wire dict
+    (e.g. ``raw.get("guidance_scale")``) and are never stored in
+    KnobState — they still belong in the schema so every frontend can
+    render and validate them.
+    """
+    name: str
+    default: Any = 0.0
+    min_val: Optional[float] = None
+    max_val: float = 1.0
+    sensitivity: float = 2.0
+    group: str = "core"
+    type: str = "float"            # "float" | "int" | "enum" | "bool"
+    options: tuple = ()             # allowed values for enum / bool
+    description: str = ""
+    bank: bool = True
+
+
+# Registry group -> KnobState bank name, in display order. Only ``bank``
+# specs land in a KnobState bank; their ``group`` must be one of these.
+_BANKS = (("core", "Core"), ("groups", "Groups"), ("keystones", "Keystones"))
+
+
+def knob_specs(sde: bool, loras=None) -> list:
+    """The complete operator-knob registry for a session.
+
+    Parameterized by ``sde`` (SDE vs ODE core knobs) and the enabled
+    ``loras`` (each id gets a ``lora_str_<id>`` strength knob, replacing
+    the old positional ``lora_str_1`` naming so toggling catalog entries
+    doesn't shuffle knob identities). ``loras`` accepts an int for
+    back-compat (treated as ``slot1..slotN``). See :class:`KnobSpec`.
     """
     if isinstance(loras, int):
         lora_ids = [f"slot{i}" for i in range(1, loras + 1)]
     else:
         lora_ids = list(loras or [])
 
-    core = {}
+    specs: list = []
+
+    # --- Core bank knobs (KnobState-backed) ---
     if sde:
-        core["sde_amp"] = KnobDef(sensitivity=2.0)
+        specs.append(KnobSpec(
+            "sde_amp", sensitivity=2.0,
+            description="SDE diffusion amplitude (replaces denoise in SDE mode)",
+        ))
     else:
-        core["denoise"] = KnobDef(sensitivity=2.0)
-    core["seed"] = KnobDef(sensitivity=0.5)
-    core["feedback"] = KnobDef(sensitivity=2.0)
+        specs.append(KnobSpec(
+            "denoise", sensitivity=2.0, description="ODE denoise strength",
+        ))
+    specs.append(KnobSpec(
+        "seed", max_val=float(0xFFFFFFFF), sensitivity=0.5, type="int",
+        description="Stream seed (uint32 integer; passed to torch.manual_seed)",
+    ))
+    specs.append(KnobSpec(
+        "feedback", sensitivity=2.0, description="Feedback amount",
+    ))
     # Delay-tap depth for the feedback knob. 1 == blend with the most
-    # recent finished latent (current behavior); N>1 reaches N ticks
-    # back for an echo / ghost effect that the scalar feedback alone
-    # can't reach without dominating the source. Integer-valued; capped
-    # at 8 to match the StreamPipeline ring buffer ceiling and the
-    # operator's mental tick budget.
-    core["feedback_depth"] = KnobDef(
-        default=1.0, sensitivity=4.0, max_val=8.0,
-    )
-    # Shift value flows verbatim into the diffusion solver. Useful
-    # operator range is roughly [1, 6]; max_val caps the sweep at 6.
-    core["shift"] = KnobDef(default=3.5, sensitivity=1.0, max_val=6.0)
+    # recent finished latent; N>1 reaches N ticks back for an echo / ghost
+    # effect. Integer-valued; capped at 8 (StreamPipeline ring ceiling).
+    specs.append(KnobSpec(
+        "feedback_depth", default=1.0, min_val=1.0, max_val=8.0,
+        sensitivity=4.0, type="int",
+        description="Feedback delay-tap depth in ticks (1 = last, N = N ticks back)",
+    ))
+    # Flow shift flows verbatim into the diffusion solver; useful ~[1, 6].
+    specs.append(KnobSpec(
+        "shift", default=3.5, min_val=1.0, max_val=6.0, sensitivity=1.0,
+        description="Flow shift (timing/curve shape). Passed verbatim to the diffusion solver.",
+    ))
     if sde:
-        core["periodicity"] = KnobDef(sensitivity=2.0, max_val=12.5)
+        specs.append(KnobSpec(
+            "periodicity", max_val=12.5, sensitivity=2.0,
+            description="SDE periodicity",
+        ))
     for lid in lora_ids:
-        core[f"lora_str_{lid}"] = KnobDef(
-            default=0.0, sensitivity=2.0, max_val=2.0,
-        )
-    core["hint_strength"] = KnobDef(default=1.0, sensitivity=2.0)
+        specs.append(KnobSpec(
+            f"lora_str_{lid}", max_val=2.0, sensitivity=2.0,
+            description=f"Strength for LoRA {lid!r}",
+        ))
+    specs.append(KnobSpec(
+        "hint_strength", default=1.0, sensitivity=2.0,
+        description="Structure (semantic hint) blend strength",
+    ))
+    # Scalar source-lock target blend. Runner reads via get_param("x0_target")
+    # and pushes it in as the x0_target_strength shared curve.
+    specs.append(KnobSpec(
+        "x0_target", max_val=1.0, sensitivity=2.0,
+        description=(
+            "Scalar blend toward the x0 source-lock target (second half of "
+            "the schedule). Requires a source latent."
+        ),
+    ))
 
-    channels = {}
+    # --- Channel-group / keystone bank knobs (KnobState-backed) ---
     for (name, _start, _end) in CHANNEL_GROUPS:
-        channels[name] = KnobDef(default=1.0, sensitivity=1.5, max_val=3.0)
-    keystones = {}
+        specs.append(KnobSpec(
+            name, default=1.0, max_val=3.0, sensitivity=1.5, group="groups",
+            description=f"Channel-group amplifier {name}",
+        ))
     for (name, _ch) in KEYSTONE_CHANNELS:
-        keystones[name] = KnobDef(default=1.0, sensitivity=1.5, max_val=3.0)
+        specs.append(KnobSpec(
+            name, default=1.0, max_val=3.0, sensitivity=1.5, group="keystones",
+            description=f"Keystone channel amplifier {name}",
+        ))
 
-    return [
-        KnobBank(name="Core", knobs=core),
-        KnobBank(name="Groups", knobs=channels),
-        KnobBank(name="Keystones", knobs=keystones),
-    ]
+    # --- Raw-param knobs (NOT KnobState-backed) ---
+    # Step count, guidance, and the DCW corrector ride the params channel
+    # but the runner consumes them via raw.get(...), never storing them in
+    # KnobState. They live in the schema so the catalog/manifest is complete
+    # and every frontend can render them.
+    specs.append(KnobSpec(
+        "steps_override", default=8.0, min_val=1.0, max_val=16.0, type="int",
+        bank=False,
+        description="Diffusion step count. Lower = lower quality, higher = more latency. Changing rebuilds the StreamPipeline.",
+    ))
+    specs.append(KnobSpec(
+        "guidance_scale", default=1.0, min_val=1.0, max_val=15.0,
+        group="guidance", bank=False,
+        description="RCFG guidance scale. Only applied when rcfg_mode != 'off'.",
+    ))
+    specs.append(KnobSpec(
+        "cfg_rescale", default=0.0, max_val=1.0, group="guidance", bank=False,
+        description="APG norm rescale toward vt_pos magnitude. Only applied when rcfg_mode != 'off'.",
+    ))
+    specs.append(KnobSpec(
+        "rcfg_mode", default="off", group="guidance", type="enum",
+        options=("off", "self", "initialize", "full"), bank=False,
+        description="Residual-CFG mode. String-valued; set via the set_rcfg_mode tool, not set_knob.",
+    ))
+    specs.append(KnobSpec(
+        "dcw_enabled", default=True, group="dcw", type="bool",
+        options=(False, True), bank=False,
+        description="Enable the DCW wavelet-domain corrector.",
+    ))
+    specs.append(KnobSpec(
+        "dcw_mode", default="double", group="dcw", type="enum",
+        options=("low", "high", "double", "pix"), bank=False,
+        description="DCW correction band.",
+    ))
+    specs.append(KnobSpec(
+        "dcw_wavelet", default="haar", group="dcw", type="enum",
+        options=("haar", "db4", "sym8", "db8"), bank=False,
+        description="DCW wavelet basis.",
+    ))
+    specs.append(KnobSpec(
+        "dcw_scaler", default=0.05, max_val=0.5, group="dcw", bank=False,
+        description="DCW low-band push strength.",
+    ))
+    specs.append(KnobSpec(
+        "dcw_high_scaler", default=0.02, max_val=0.5, group="dcw", bank=False,
+        description="DCW high-band push strength.",
+    ))
+    specs.append(KnobSpec(
+        "dcw_mult_blend", default=0.0, max_val=1.0, group="dcw", bank=False,
+        description="DCW multiplicative-blend fader (advanced; 0 = upstream behavior).",
+    ))
+    specs.append(KnobSpec(
+        "dcw_mag_phase", default=0.0, max_val=1.0, group="dcw", bank=False,
+        description="DCW magnitude+phase fader (advanced; 0 = upstream behavior).",
+    ))
+    specs.append(KnobSpec(
+        "dcw_soft_thresh", default=0.0, max_val=0.3, group="dcw", bank=False,
+        description="DCW soft-threshold sparsity (advanced; 0 = upstream behavior).",
+    ))
+    return specs
+
+
+def build_banks(sde: bool, loras=None) -> list:
+    """Build the KnobState banks driving the streaming pipeline.
+
+    Derived from :func:`knob_specs` (the single registry): the ``bank``
+    knobs, grouped into the Core / Groups / Keystones banks the runner
+    expects. Non-``bank`` schema knobs (steps_override, guidance, DCW)
+    are intentionally excluded — the runner reads those from the raw wire
+    dict, not KnobState.
+    """
+    group_to_bank = {g: bank_name for g, bank_name in _BANKS}
+    grouped = {bank_name: {} for _g, bank_name in _BANKS}
+    for spec in knob_specs(sde, loras):
+        if not spec.bank:
+            continue
+        bank_name = group_to_bank.get(spec.group, "Core")
+        grouped[bank_name][spec.name] = KnobDef(
+            default=spec.default, sensitivity=spec.sensitivity,
+            max_val=spec.max_val, min_val=spec.min_val,
+            description=spec.description,
+        )
+    return [KnobBank(name=bank_name, knobs=grouped[bank_name])
+            for _g, bank_name in _BANKS]
+
+
+def knob_catalog(sde: bool, loras=None) -> dict:
+    """Project the full registry into a transport-agnostic catalog:
+    ``name -> {type, default, min?, max, group, options?, description?,
+    bank}``. Backs both the MCP ``list_knobs`` tool and the HTTP
+    ``/api/knobs`` manifest, so every frontend builds against one
+    backend-owned contract instead of re-declaring the knob set.
+    """
+    out: dict = {}
+    for spec in knob_specs(sde, loras):
+        entry: dict = {
+            "type": spec.type,
+            "default": spec.default,
+            "group": spec.group,
+            "bank": spec.bank,
+        }
+        # min/max are only meaningful for the numeric types; enum/bool
+        # knobs carry their valid set in ``options`` instead.
+        if spec.type in ("float", "int"):
+            entry["max"] = spec.max_val
+            if spec.min_val is not None:
+                entry["min"] = spec.min_val
+        if spec.options:
+            entry["options"] = list(spec.options)
+        if spec.description:
+            entry["description"] = spec.description
+        out[spec.name] = entry
+    return out
 
 
 class KnobState:
