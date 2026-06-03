@@ -16,8 +16,9 @@ export interface WireFieldSpec {
   type: "str" | "float" | "int" | "bool" | "dict" | "list" | "enum";
   /** True = the sender must include this field. */
   required: boolean;
-  /** Neutral/reset value, when the field has one. */
-  default?: number | string | boolean;
+  /** Neutral/reset value, when the field has one. Container-typed config
+   *  fields (list/dict) surface their empty-container defaults. */
+  default?: number | string | boolean | unknown[] | Record<string, unknown>;
   /** Allowed values for `enum` fields. */
   options?: Array<string | boolean>;
   /** True = explicit JSON null is a valid value (e.g. loop_band clears). */
@@ -35,9 +36,15 @@ export interface WireCommandSpec {
   /** True = the binary frame is present only in some variants (e.g.
    *  `swap_source` omits it when `use_server_source` is set). */
   binary_optional: boolean;
-  /** True = applied only when sent by the primary transport; an MCP/control
-   *  send is echoed back for the browser to mirror rather than applied. */
+  /** True = an EXTERNAL (MCP / control-bus) send is NOT applied; the server
+   *  echoes it back on `echo_event` for the session's own UI to mirror and
+   *  re-send through its smoothing tween. Commands without this flag apply
+   *  identically from any origin and ack via their normal events. */
   origin_sensitive: boolean;
+  /** The event that mirrors an EXTERNAL send of this command (`params` →
+   *  `params_echo`, `set_prompt_blend` → `prompt_blend_echo`). Present only
+   *  on origin-sensitive commands. */
+  echo_event?: string;
   description?: string;
 }
 

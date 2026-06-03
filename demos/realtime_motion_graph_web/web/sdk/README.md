@@ -86,10 +86,14 @@ setInterval(() => {
    in-flight slices for the old source are droppable (`slice.epoch` vs
    `AudioPlayer.swapCount`). `stem_assets` similarly heralds one binary
    buffer per listed stem.
-4. **Echo channels.** Commands marked `origin_sensitive` in the contract
-   are applied when sent on the session's own WS and echoed back
-   (`params_echo`, `prompt_blend_echo`) when driven externally (MCP),
-   so a UI can mirror agent-driven changes.
+4. **Echo channels.** Two commands are `origin_sensitive` in the
+   contract — `params` and `set_prompt_blend`. Sent on the session's own
+   WS they apply directly; driven externally (MCP / control bus) they are
+   *not* applied — the server echoes them back on the command's
+   `echo_event` (`params_echo`, `prompt_blend_echo`) for the session's
+   own UI to mirror and re-send through its smoothing tween. Every other
+   command applies identically from any origin and acks via its normal
+   events (`lora_catalog`, `timbre_set`, `swap_ready`, ...).
 5. **Upload handshake.** A connection whose first frame is
    `{type: "upload_track"}` + PCM persists a track on the pod without
    starting a stream (`upload_ok` / `upload_failed`), then closes.

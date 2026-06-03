@@ -11,10 +11,10 @@ import { applyConfig, loadConfig } from "@/lib/config";
 import { useKnobManifestStore } from "@/store/useKnobManifestStore";
 import { useLoraStore } from "@/store/useLoraStore";
 import { useWireContractStore } from "@/store/useWireContractStore";
-import type { KnobManifest } from "@demon/client";
+import type { KnobManifestResponse } from "@demon/client";
 import type { LoraCatalogEntry } from "@demon/client";
 import type { WireContract } from "@demon/client";
-import { PROTOCOL_VERSION } from "@demon/client";
+import { KNOB_SCHEMA_VERSION, PROTOCOL_VERSION } from "@demon/client";
 
 // Same-origin URL builder. The engine's HTTP routes (/api/*, /fixtures/*,
 // /loras/*, /videos/*) are proxied to the Python backend at :8765 by the
@@ -54,7 +54,9 @@ if (typeof window !== "undefined") {
       // Non-fatal: the manifest only drives the auto-generated knob panel.
       // A backend without /api/knobs leaves it empty and the panel shows a
       // placeholder; the shipped tiles are unaffected.
-      fetchKnobManifest(false, podHttp).catch(() => ({}) as KnobManifest),
+      fetchKnobManifest(false, podHttp).catch(
+        () => ({ knobs: {} }) as KnobManifestResponse,
+      ),
       // Non-fatal: the wire contract is discovery metadata for re-skins /
       // agents; the shipped client speaks the protocol directly, so a backend
       // without /api/protocol just leaves the store empty.
@@ -64,8 +66,21 @@ if (typeof window !== "undefined") {
     if (catalog.length > 0) {
       useLoraStore.getState().setCatalog(catalog);
     }
-    if (Object.keys(manifest).length > 0) {
-      useKnobManifestStore.getState().setManifest(manifest);
+    if (Object.keys(manifest.knobs).length > 0) {
+      useKnobManifestStore.getState().setManifest(manifest.knobs);
+      // Same staleness check as the wire contract below: the served
+      // manifest's schema version is the live truth; a mismatch means this
+      // build's knob handling may predate a knob-contract reshape.
+      if (
+        typeof manifest.version === "number" &&
+        manifest.version !== KNOB_SCHEMA_VERSION
+      ) {
+        console.warn(
+          `[boot] knob-manifest version mismatch: backend serves v${manifest.version}, ` +
+            `client built against v${KNOB_SCHEMA_VERSION} — regenerate ` +
+            "sdk/types/wireContract.gen.ts against this backend.",
+        );
+      }
     }
     if (contract) {
       useWireContractStore.getState().setContract(contract);

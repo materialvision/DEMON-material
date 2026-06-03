@@ -49,15 +49,6 @@ import type {
   WireEvent,
 } from "./types/wireContract.gen";
 
-export {
-  SAMPLE_RATE,
-  T,
-  CROSSFADE_SECONDS,
-  SLICE_FLAG_DELTA,
-  SLICE_FLAG_RAW,
-  SLICE_HDR_SIZE,
-} from "./types/protocol";
-
 /** Optional behaviors the host app injects into RemoteBackend. */
 export interface RemoteBackendOptions {
   /** Applied to `tags` and `tags_b` on every `sendPrompt` before they hit
@@ -102,6 +93,25 @@ export function float16ArrayToFloat32(u16: Uint16Array): Float32Array {
   const out = new Float32Array(u16.length);
   for (let i = 0; i < u16.length; i++) out[i] = _half2single(u16[i]);
   return out;
+}
+
+// ── PCM framing ────────────────────────────────────────────────────────
+// The one binary upload frame shape in the protocol: `<II` header
+// (channels, samples, little-endian) + interleaved float32 PCM. Shared by
+// the init-handshake upload, the timbre/structure reference uploads, and
+// swap_source.
+
+function packPcmFrame(interleaved: Float32Array, channels: number): Uint8Array {
+  const samples = interleaved.length / channels;
+  const hdr = new ArrayBuffer(8);
+  const dv = new DataView(hdr);
+  dv.setUint32(0, channels, true);
+  dv.setUint32(4, samples, true);
+  const pcm = new Uint8Array(interleaved.buffer);
+  const combined = new Uint8Array(hdr.byteLength + pcm.byteLength);
+  combined.set(new Uint8Array(hdr), 0);
+  combined.set(pcm, hdr.byteLength);
+  return combined;
 }
 
 // ── RemoteBackend ──────────────────────────────────────────────────────
@@ -352,16 +362,7 @@ export class RemoteBackend extends EventTarget {
           this._pending.config.use_server_fixture === true;
         if (!useServerFixture) {
           const { interleaved, channels } = this._pending;
-          const samples = interleaved.length / channels;
-          const hdr = new ArrayBuffer(8);
-          const dv = new DataView(hdr);
-          dv.setUint32(0, channels, true);
-          dv.setUint32(4, samples, true);
-          const pcm = new Uint8Array(interleaved.buffer);
-          const combined = new Uint8Array(hdr.byteLength + pcm.byteLength);
-          combined.set(new Uint8Array(hdr), 0);
-          combined.set(pcm, hdr.byteLength);
-          ws.send(combined);
+          ws.send(packPcmFrame(interleaved, channels));
         }
         this._updateTrace({ configSentAt: Date.now(), phase: "config_sent" });
         phase = "ready";
@@ -901,30 +902,20 @@ export class RemoteBackend extends EventTarget {
   }
 
   /**
-   * Send a typed JSON header followed by a binary audio frame. Wire
-   * format matches the init handshake / swap_source: <II header
-   * (channels, samples) + interleaved float32 PCM. Used by both timbre
-   * and structure source uploads; the caller builds the typed command
-   * so the header is contract-checked at compile time.
+   * Send a typed JSON header followed by a binary audio frame
+   * (packPcmFrame). Used by the timbre/structure source uploads and
+   * swap_source; the caller builds the typed command so the header is
+   * contract-checked at compile time.
    */
   private sendAudioFrame(
-    msg: SetTimbreSourceCommand | SetStructureSourceCommand,
+    msg: SetTimbreSourceCommand | SetStructureSourceCommand | SwapSourceCommand,
     interleaved: Float32Array,
     channels: number,
   ): boolean {
     if (this.ws?.readyState !== WebSocket.OPEN) return false;
     try {
       this.ws.send(JSON.stringify(msg));
-      const samples = interleaved.length / channels;
-      const hdr = new ArrayBuffer(8);
-      const dv = new DataView(hdr);
-      dv.setUint32(0, channels, true);
-      dv.setUint32(4, samples, true);
-      const pcm = new Uint8Array(interleaved.buffer);
-      const combined = new Uint8Array(hdr.byteLength + pcm.byteLength);
-      combined.set(new Uint8Array(hdr), 0);
-      combined.set(pcm, hdr.byteLength);
-      this.ws.send(combined);
+      this.ws.send(packPcmFrame(interleaved, channels));
       return true;
     } catch (e) {
       console.error(`[protocol] ${msg.type} failed:`, e);
@@ -1041,32 +1032,15 @@ export class RemoteBackend extends EventTarget {
     timeSignature?: string,
     stemSourceMode?: SwapSourceCommand["stem_source_mode"],
   ): boolean {
-    if (this.ws?.readyState !== WebSocket.OPEN) return false;
-    try {
-      const msg: SwapSourceCommand = {
-        type: "swap_source",
-      };
-      if (tags) msg.tags = tags;
-      if (key) msg.key = key;
-      if (fixtureName) msg.fixture_name = fixtureName;
-      if (timeSignature) msg.time_signature = timeSignature;
-      if (stemSourceMode) msg.stem_source_mode = stemSourceMode;
-      this.ws.send(JSON.stringify(msg));
-      const samples = interleaved.length / channels;
-      const hdr = new ArrayBuffer(8);
-      const dv = new DataView(hdr);
-      dv.setUint32(0, channels, true);
-      dv.setUint32(4, samples, true);
-      const pcm = new Uint8Array(interleaved.buffer);
-      const combined = new Uint8Array(hdr.byteLength + pcm.byteLength);
-      combined.set(new Uint8Array(hdr), 0);
-      combined.set(pcm, hdr.byteLength);
-      this.ws.send(combined);
-      return true;
-    } catch (e) {
-      console.error("[protocol] sendSwapSource failed:", e);
-      return false;
-    }
+    const msg: SwapSourceCommand = {
+      type: "swap_source",
+    };
+    if (tags) msg.tags = tags;
+    if (key) msg.key = key;
+    if (fixtureName) msg.fixture_name = fixtureName;
+    if (timeSignature) msg.time_signature = timeSignature;
+    if (stemSourceMode) msg.stem_source_mode = stemSourceMode;
+    return this.sendAudioFrame(msg, interleaved, channels);
   }
 
   /**

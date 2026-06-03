@@ -4,7 +4,7 @@ import { useMemo } from "react";
 
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import { useKnobManifestStore } from "@/store/useKnobManifestStore";
-import type { DcwMode, DcwWavelet, RcfgMode } from "@/types/engine";
+import { isDcwMode, isDcwWavelet, isRcfgMode } from "@/types/engine";
 import type { KnobManifestEntry } from "@demon/client";
 
 import { SliderGroup } from "./SliderGroup";
@@ -142,30 +142,48 @@ function EnumKnob({ name, spec }: { name: string; spec: KnobManifestEntry }) {
   const setDcwMode = usePerformanceStore((s) => s.setDcwMode);
   const setDcwWavelet = usePerformanceStore((s) => s.setDcwWavelet);
 
+  // Each binding pairs the store setter with the app vocabulary's type
+  // guard: the setter only fires on values the guard admits, and manifest
+  // options outside the vocabulary are filtered from the dropdown instead
+  // of cast through. The vocabularies can deliberately diverge — the
+  // registry declares rcfg "full" but the app hides it (turbo is
+  // CFG-distilled; see types/engine.ts) — and this keeps the manifest-
+  // driven panel from punching through that decision.
   let value: string | undefined;
+  let allows: ((v: string) => boolean) | undefined;
   let onChange: ((v: string) => void) | undefined;
   if (name === "rcfg_mode") {
     value = rcfgMode;
-    onChange = (v) => setRcfgMode(v as RcfgMode);
+    allows = isRcfgMode;
+    onChange = (v) => {
+      if (isRcfgMode(v)) setRcfgMode(v);
+    };
   } else if (name === "dcw_mode") {
     value = dcwMode;
-    onChange = (v) => setDcwMode(v as DcwMode);
+    allows = isDcwMode;
+    onChange = (v) => {
+      if (isDcwMode(v)) setDcwMode(v);
+    };
   } else if (name === "dcw_wavelet") {
     value = dcwWavelet;
-    onChange = (v) => setDcwWavelet(v as DcwWavelet);
+    allows = isDcwWavelet;
+    onChange = (v) => {
+      if (isDcwWavelet(v)) setDcwWavelet(v);
+    };
   }
   const bound = !!onChange;
+  const shown = allows ? options.filter(allows) : options;
 
   return (
     <label className="dyn-knob-field" title={spec.description}>
       <span className="dyn-knob-field-label">{prettify(name)}</span>
       <select
         className="dyn-knob-select"
-        value={value ?? options[0] ?? ""}
+        value={value ?? shown[0] ?? ""}
         disabled={!bound}
         onChange={(e) => onChange?.(e.target.value)}
       >
-        {options.map((o) => (
+        {shown.map((o) => (
           <option key={o} value={o}>
             {o}
           </option>

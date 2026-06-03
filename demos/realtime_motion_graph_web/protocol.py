@@ -165,7 +165,14 @@ class CommandSpec:
     fields: tuple = ()
     binary: bool = False           # a trailing binary audio frame follows
     binary_optional: bool = False  # binary present only in some variants
-    origin_sensitive: bool = False  # PRIMARY applies; EXTERNAL (MCP) echoes
+    # True = an EXTERNAL (MCP / control-bus) send is NOT applied; the server
+    # echoes it back on ``echo_event`` for the session's own UI to mirror
+    # and re-send through its smoothing tween. Commands without this flag
+    # apply identically from any origin and ack via their normal events.
+    # Must match the session's actual origin handling (StreamingSession:
+    # only set_knobs and set_prompt_blend are origin-aware).
+    origin_sensitive: bool = False
+    echo_event: str = ""           # mirror event for EXTERNAL sends
     description: str = ""
 
 
@@ -197,6 +204,7 @@ COMMANDS: tuple = (
                                   "ratio); used for time-keyed curve sampling."),
         ),
         origin_sensitive=True,
+        echo_event="params_echo",
         description="Continuous parameter update; sent every tick (~125 Hz) "
                     "carrying the full knob dict.",
     ),
@@ -208,7 +216,6 @@ COMMANDS: tuple = (
             FieldSpec("end_sec", "float", nullable=True,
                       description="Loop end in seconds; null/degenerate clears."),
         ),
-        origin_sensitive=True,
         description="Arm / move / clear the playback loop band.",
     ),
     CommandSpec(
@@ -223,7 +230,6 @@ COMMANDS: tuple = (
             FieldSpec("time_signature", "str",
                       description='Meter numerator, e.g. "3"/"4"/"6".'),
         ),
-        origin_sensitive=True,
         description="Re-encode the live prompt (text-encoder pass).",
     ),
     CommandSpec(
@@ -231,6 +237,7 @@ COMMANDS: tuple = (
         fields=(FieldSpec("value", "float", required=True, default=0.0,
                           description="0.0 = A, 1.0 = B. Clamped to [0,1]."),),
         origin_sensitive=True,
+        echo_event="prompt_blend_echo",
         description="Lerp cached prompt A/B conditioning. Cheap; no encode pass.",
     ),
     CommandSpec(
@@ -243,7 +250,6 @@ COMMANDS: tuple = (
                       options=("slerp", "linear"),
                       description="Interpolation curve."),
         ),
-        origin_sensitive=True,
         description="Switch a blend path between slerp (norm-preserving) and "
                     "linear.",
     ),
@@ -252,7 +258,6 @@ COMMANDS: tuple = (
         fields=(FieldSpec("value", "int", required=True,
                           description="Target ring depth; clamped to "
                                       "[1, max_pipeline_depth]."),),
-        origin_sensitive=True,
         description="Live pipeline_depth retune. Echoed back as depth_applied.",
     ),
     CommandSpec(
@@ -263,13 +268,11 @@ COMMANDS: tuple = (
             FieldSpec("strength", "float",
                       description="Target strength the refit lands at."),
         ),
-        origin_sensitive=True,
         description="Enable a LoRA; allocates a lora_str_<id> knob.",
     ),
     CommandSpec(
         "disable_lora",
         fields=(FieldSpec("id", "str", required=True),),
-        origin_sensitive=True,
         description="Disable a LoRA and drop its lora_str_<id> knob.",
     ),
     CommandSpec(
@@ -277,7 +280,6 @@ COMMANDS: tuple = (
         fields=(FieldSpec("value", "float", required=True, default=1.0,
                           description="1.0 = full reference, 0.0 = silence "
                                       "baseline. Clamped to [0,1]."),),
-        origin_sensitive=True,
         description="Blend the cached (silence, full) timbre conditioning pair.",
     ),
     CommandSpec(
@@ -285,7 +287,6 @@ COMMANDS: tuple = (
         fields=(FieldSpec("name", "str", default="timbre",
                           description="Label echoed back in timbre_set."),),
         binary=True,
-        origin_sensitive=True,
         description="Upload audio as the timbre reference. " + _PCM_FRAME +
                     " Acked by timbre_set / timbre_failed.",
     ),
@@ -293,13 +294,11 @@ COMMANDS: tuple = (
         "set_timbre_fixture",
         fields=(FieldSpec("name", "str", required=True,
                           description="Fixture name (see /api/fixtures)."),),
-        origin_sensitive=True,
         description="Use a server-side fixture as the timbre reference (no "
                     "upload round-trip).",
     ),
     CommandSpec(
         "clear_timbre_source",
-        origin_sensitive=True,
         description="Drop the timbre override; fall back to self-timbre. Acked "
                     "by timbre_cleared.",
     ),
@@ -308,7 +307,6 @@ COMMANDS: tuple = (
         fields=(FieldSpec("name", "str", default="structure",
                           description="Label echoed back in structure_set."),),
         binary=True,
-        origin_sensitive=True,
         description="Upload audio as the structure (semantic-hint) reference. "
                     + _PCM_FRAME + " Acked by structure_set / structure_failed.",
     ),
@@ -316,13 +314,11 @@ COMMANDS: tuple = (
         "set_structure_fixture",
         fields=(FieldSpec("name", "str", required=True,
                           description="Fixture name (see /api/fixtures)."),),
-        origin_sensitive=True,
         description="Use a server-side fixture as the structure reference (no "
                     "upload round-trip).",
     ),
     CommandSpec(
         "clear_structure_source",
-        origin_sensitive=True,
         description="Drop the structure override; restore the source's own "
                     "context_latent. Acked by structure_cleared.",
     ),
@@ -347,7 +343,6 @@ COMMANDS: tuple = (
         ),
         binary=True,
         binary_optional=True,
-        origin_sensitive=True,
         description="Replace the playback source in-flight. A binary PCM frame "
                     "follows UNLESS use_server_source is set. Acked by "
                     "swap_ready (+ binary buffer) / swap_failed.",
@@ -598,16 +593,19 @@ def _field_payload(f: "FieldSpec") -> dict:
 
 
 def _command_catalog_of(specs) -> dict:
-    return {
-        c.name: {
+    out: dict = {}
+    for c in specs:
+        entry: dict = {
             "fields": {f.name: _field_payload(f) for f in c.fields},
             "binary": c.binary,
             "binary_optional": c.binary_optional,
             "origin_sensitive": c.origin_sensitive,
             "description": c.description,
         }
-        for c in specs
-    }
+        if c.echo_event:
+            entry["echo_event"] = c.echo_event
+        out[c.name] = entry
+    return out
 
 
 def _event_catalog_of(specs) -> dict:
@@ -701,6 +699,11 @@ def config_catalog() -> dict:
             entry["nullable"] = True
         if f.default is not MISSING and f.default is not None:
             entry["default"] = f.default
+        elif f.default_factory is not MISSING:
+            # Container fields (enabled_loras, lora_strengths, lora_paths)
+            # default via factory; surface the produced value so the
+            # contract shows their empty-container defaults too.
+            entry["default"] = f.default_factory()
         out[f.name] = entry
     return out
 
@@ -820,6 +823,12 @@ def coerce_command_payload(name: str, payload: dict) -> tuple:
 
     Discrete callers (the MCP tools) raise when ``errors`` is non-empty so the
     agent gets feedback. This function itself never raises.
+
+    Deliberately divergent from the knob coercer
+    (:func:`acestep.streaming.knobs.coerce_knob_values`): command fields
+    carry no numeric bounds and DROP on type mismatch; knobs CLAMP
+    out-of-range numerics into ``[min, max]``. Don't merge the two — the
+    divergence is the contract.
     """
     spec = _COMMANDS_BY_NAME.get(name)
     if spec is None:

@@ -55,14 +55,32 @@ def _dispatcher_command_types() -> set:
     return found
 
 
+def _balanced_braces(src: str, open_idx: int) -> str:
+    """The text of the ``{...}`` block opening at ``open_idx`` (inclusive),
+    by brace counting. Good enough for the ladder body, which contains no
+    string literals with unbalanced braces."""
+    depth = 0
+    for i in range(open_idx, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[open_idx:i + 1]
+    raise AssertionError("unbalanced braces — ladder parse drifted?")
+
+
 def _client_handled_events() -> set:
     """Every event name the browser protocol client (the demon-client SDK's
-    RemoteBackend) handles: the streaming ladder's ``case "<x>":`` labels (a
-    switch over the generated WireEvent union) plus the init-phase
+    RemoteBackend) handles: the streaming ladder's ``case "<x>":`` labels
+    (scanned only inside ``switch (msg.type)`` blocks, so an unrelated
+    future switch can't inject false positives) plus the init-phase
     ``msg.type === "<x>"`` checks."""
     src = (_DEMO / "web" / "sdk" / "protocol.ts").read_text(encoding="utf-8")
     handled = set(re.findall(r'msg\.type === "([^"]+)"', src))
-    handled |= set(re.findall(r'case "([^"]+)":', src))
+    for m in re.finditer(r"switch \(msg\.type\)", src):
+        block = _balanced_braces(src, src.index("{", m.end()))
+        handled |= set(re.findall(r'case "([^"]+)":', block))
     return handled
 
 
@@ -501,8 +519,10 @@ def test_generated_wire_types_match_contract():
     # The committed web/types/wireContract.gen.ts must be a byte-for-byte
     # projection of the live contract. Regenerate with
     # `python demos/realtime_motion_graph_web/scripts/gen_wire_types.py`.
+    from acestep.streaming.knobs import KNOB_SCHEMA_VERSION
+
     gen = _load_codegen_module()
-    expected = gen.render_wire_types_ts(wire_contract())
+    expected = gen.render_wire_types_ts(wire_contract(), KNOB_SCHEMA_VERSION)
     committed = (
         _DEMO / "web" / "sdk" / "types" / "wireContract.gen.ts"
     ).read_text(encoding="utf-8")
@@ -529,3 +549,23 @@ def test_catalog_projection_shapes():
     evts = event_catalog()
     assert evts["ready"]["binary_follow"] is True
     assert evts["timbre_cleared"]["fields"] == {}
+
+
+def test_origin_sensitive_matches_session_semantics():
+    # origin_sensitive means "an EXTERNAL (MCP) send is echoed via echo_event
+    # instead of applied". StreamingSession implements that for exactly two
+    # verbs (set_knobs -> ParamsEcho, set_prompt_blend -> PromptBlendEcho);
+    # every other command applies identically for both origins. Pin the
+    # registry to those semantics so the contract can't drift back to
+    # flagging commands the session doesn't actually gate.
+    cmds = command_catalog()
+    flagged = {n for n, c in cmds.items() if c["origin_sensitive"]}
+    assert flagged == {"params", "set_prompt_blend"}
+    assert cmds["params"]["echo_event"] == "params_echo"
+    assert cmds["set_prompt_blend"]["echo_event"] == "prompt_blend_echo"
+    # The echo events are themselves registered, and non-gated commands
+    # carry no echo_event.
+    assert {"params_echo", "prompt_blend_echo"} <= set(EVENT_NAMES)
+    for name, c in cmds.items():
+        if name not in flagged:
+            assert "echo_event" not in c, name

@@ -89,11 +89,9 @@ from acestep.streaming.events import (
 )
 from acestep.streaming.knobs import (
     KnobState,
-    build_banks,
     coerce_knob_values,
     knob_specs,
     lora_strength_spec,
-    spec_to_knob_def,
 )
 from acestep.streaming.pipeline_runner import PipelineRunner
 from acestep.streaming.source import (
@@ -470,6 +468,12 @@ class StreamingSession:
             "knob_values": self.virtual_knobs.get_all_values(),
             "channels": state.n_channels,
             "sample_rate": SAMPLE_RATE,
+            # One of the two inputs that determine this session's knob
+            # universe (see knob_specs; the other is the enabled-LoRA set
+            # in lora_catalog). Lets transport adapters (the MCP server's
+            # schema validation) reproduce the knob set without sniffing
+            # knob names out of knob_values.
+            "sde": self.use_sde,
         }
 
     # ---- Runner lifecycle ----------------------------------------------
@@ -633,15 +637,15 @@ class StreamingSession:
                 # driven by the client's params dict. The knob's shape
                 # comes from the registry (lora_strength_spec), never
                 # re-declared here; only the default is overridden to
-                # the strength we just enabled at, so the runner's
+                # the strength we just enabled at (the spec is a fresh
+                # instance, so mutating it is safe), so the runner's
                 # slider-delta check (set_lora_strength only when the
                 # new value differs by > 0.02) doesn't fire a
                 # redundant refit on tick 1.
                 spec = lora_strength_spec(lid)
-                kdef = spec_to_knob_def(spec)
                 if strength is not None:
-                    kdef.default = float(strength)
-                self.virtual_knobs.add_knob(spec.name, kdef)
+                    spec.default = float(strength)
+                self.virtual_knobs.add_knob(spec)
             except Exception as e:
                 logger.exception("lora_enable_failed id={} error={}", lid, e)
         # Publish the refreshed catalog. No automatic re-encode here.
@@ -1861,20 +1865,11 @@ class StreamingSession:
 
             k1_name = "sde_amp" if use_sde else "denoise"
             initial_knob_ids = list(initial_enable_ids) if use_lora else []
-            banks = build_banks(use_sde, loras=initial_knob_ids)
-            virtual_knobs = KnobState(banks)
-            # Seed non-bank knob defaults (steps_override, guidance_scale,
-            # cfg_rescale, dcw_*, and the enums) so the session snapshot's
-            # knob_values is complete from t=0 — before the first client param
-            # tick and for headless / MCP-only sessions. Bank knobs are already
-            # seeded by KnobState.__init__; these ride the params channel but are
-            # never bank-stored otherwise, so without this they'd be absent from
-            # the snapshot until a client sent them.
-            virtual_knobs.update({
-                s.name: s.default
-                for s in knob_specs(use_sde, loras=initial_knob_ids)
-                if not s.bank
-            })
+            # Seeded from the full registry (bank knobs and raw-param knobs
+            # alike), so the session snapshot's knob_values is complete from
+            # t=0 — before the first client param tick and for headless /
+            # MCP-only sessions.
+            virtual_knobs = KnobState(knob_specs(use_sde, loras=initial_knob_ids))
 
             state = SessionState(
                 source=source,

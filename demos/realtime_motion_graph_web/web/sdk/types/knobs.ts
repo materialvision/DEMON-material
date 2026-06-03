@@ -30,3 +30,12 @@ export interface KnobManifestEntry {
 }
 
 export type KnobManifest = Record<string, KnobManifestEntry>;
+
+/** The full `GET /api/knobs` response envelope. */
+export interface KnobManifestResponse {
+  /** Knob-manifest schema version (KNOB_SCHEMA_VERSION server-side; the
+   *  generated `KNOB_SCHEMA_VERSION` constant is the client's expected
+   *  value). Absent from older backends that predate versioning. */
+  version?: number;
+  knobs: KnobManifest;
+}

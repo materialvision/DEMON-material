@@ -116,8 +116,11 @@ def _name_array(const_name: str, type_name: str, names) -> str:
     )
 
 
-def render_wire_types_ts(contract: dict) -> str:
-    """Render the full generated module from a ``wire_contract()`` dict.
+def render_wire_types_ts(contract: dict, knob_schema_version: int) -> str:
+    """Render the full generated module from a ``wire_contract()`` dict plus
+    the knob-manifest schema version (``acestep.streaming.knobs.
+    KNOB_SCHEMA_VERSION``), passed in so this stays a pure function of its
+    inputs and the drift guard can regenerate in-memory.
 
     Pure + deterministic (registry insertion order), so a byte-for-byte string
     compare against the committed file is a sound drift check.
@@ -132,6 +135,10 @@ def render_wire_types_ts(contract: dict) -> str:
     blocks: list = [
         _HEADER.rstrip(),
         f"export const PROTOCOL_VERSION = {contract['version']};",
+        "// Knob-manifest schema version (the `version` field served by GET\n"
+        "// /api/knobs and the MCP list_knobs tool). Compare against the live\n"
+        "// manifest to detect a stale build, exactly like PROTOCOL_VERSION.\n"
+        f"export const KNOB_SCHEMA_VERSION = {knob_schema_version};",
         _name_union("CommandName", commands.keys()),
         _name_array("COMMAND_NAMES", "CommandName", commands.keys()),
         _name_union("EventName", events.keys()),
@@ -188,9 +195,10 @@ def main() -> None:
     # acestep (config_catalog reaches it), not a sibling ACE-Step checkout.
     repo_root = Path(__file__).resolve().parents[3]
     sys.path.insert(0, str(repo_root))
+    from acestep.streaming.knobs import KNOB_SCHEMA_VERSION
     from demos.realtime_motion_graph_web.protocol import wire_contract
 
-    text = render_wire_types_ts(wire_contract())
+    text = render_wire_types_ts(wire_contract(), KNOB_SCHEMA_VERSION)
     out = output_path()
     out.write_text(text, encoding="utf-8", newline="\n")
     print(f"wrote {out} ({len(text)} bytes)")

@@ -350,7 +350,11 @@ async def list_knobs(session_id: Optional[str] = None) -> dict:
 def _session_knob_shape(snap: dict) -> tuple[bool, list]:
     """(sde, enabled_lora_ids) for a session snapshot — the two inputs
     knob_specs/knob_catalog need to reproduce that session's knob set."""
-    sde = "sde_amp" in (snap.get("knob_values") or {})
+    sde = snap.get("sde")
+    if not isinstance(sde, bool):
+        # Older server whose snapshot doesn't carry ``sde``: infer it from
+        # the SDE-only knob's presence.
+        sde = "sde_amp" in (snap.get("knob_values") or {})
     enabled = [
         d.get("id") for d in (snap.get("lora_catalog") or [])
         if d.get("state") == "enabled" and d.get("id")
@@ -432,7 +436,7 @@ async def set_knob(name: str, value: float,
     (rcfg_mode, dcw_mode/wavelet, dcw_enabled) are float-rejected here —
     use set_rcfg_mode and friends for those.
     """
-    clean = await _validate_against_session({name: float(value)}, session_id)
+    clean = await _validate_against_session({name: value}, session_id)
     return _send_cmd(session_id, {
         "type": "params",
         "raw": clean,
@@ -445,9 +449,10 @@ async def set_knobs(values: dict[str, float],
                     session_id: Optional[str] = None) -> dict:
     """Bulk knob update. Validated against the live session's schema; any
     out-of-range or unknown knob raises (the whole batch is rejected) so the
-    agent gets explicit feedback instead of a silent clamp."""
-    coerced = {k: float(v) for k, v in values.items()}
-    clean = await _validate_against_session(coerced, session_id)
+    agent gets explicit feedback instead of a silent clamp. Numeric parsing
+    is owned by coerce_knob_values, so a bad value yields a contract error
+    naming the knob rather than a bare float() crash."""
+    clean = await _validate_against_session(dict(values), session_id)
     return _send_cmd(session_id, {
         "type": "params",
         "raw": clean,
@@ -463,15 +468,12 @@ async def get_knob(name: str, session_id: Optional[str] = None) -> dict:
     return {"name": name, "value": kv.get(name)}
 
 
-_RCFG_MODES = ("off", "self", "initialize", "full")
-
-
 @mcp.tool()
 async def set_rcfg_mode(mode: str, session_id: Optional[str] = None) -> dict:
     """Set the RCFG (Residual CFG) mode. String-valued, so it can't ride
     set_knob (which is float-only).
 
-    Modes:
+    Modes (the authoritative set is the ``rcfg_mode`` entry in list_knobs):
       "off"        — no guidance (turbo default; free)
       "self"       — virtual uncond from initial noise (~1.06x cost)
       "initialize" — uncond run once per slot then cached (~1.07x cost)
@@ -484,13 +486,13 @@ async def set_rcfg_mode(mode: str, session_id: Optional[str] = None) -> dict:
     useMcpMirror has a string-value branch that drives setRcfgMode so
     the value persists across the next UI param tick.
     """
-    if mode not in _RCFG_MODES:
-        raise ValueError(
-            f"mode must be one of {list(_RCFG_MODES)}; got {mode!r}"
-        )
+    # Enum membership comes from the knob registry (coerce_knob_values
+    # checks ``mode`` against the rcfg_mode spec's options), so adding a
+    # mode is a one-place edit in knobs.py.
+    clean = await _validate_against_session({"rcfg_mode": mode}, session_id)
     return _send_cmd(session_id, {
         "type": "params",
-        "raw": {"rcfg_mode": mode},
+        "raw": clean,
         "playback_pos": 0.0,
     })
 

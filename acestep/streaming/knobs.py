@@ -1,9 +1,9 @@
-"""Knob bank definitions + transport-agnostic knob state.
+"""Knob registry + transport-agnostic knob state.
 
 Torch-free, acestep-free. Pure dataclasses + constants.
 
-The ``cc`` MIDI-controller-number field is intentionally absent from
-``KnobDef`` because hardware MIDI binding is a transport concern that
+A MIDI-controller-number field is intentionally absent from
+``KnobSpec`` because hardware MIDI binding is a transport concern that
 the streaming session does not need to know about. The browser-side
 MIDI store (``web/store/useMidiStore.ts``) owns its own CC mapping for
 the operator's hardware controller.
@@ -35,56 +35,33 @@ KEYSTONE_CHANNELS = [
 
 
 @dataclass
-class KnobDef:
-    """KnobState value type. Only ``default`` is read by KnobState; the
-    rest is metadata carried over from the registry (:func:`knob_specs`)
-    for the discovery surfaces that project it."""
-    default: float = 0.0
-    sensitivity: float = 2.0
-    max_val: float = 1.0
-    min_val: Optional[float] = None
-    description: str = ""
-
-
-@dataclass
-class KnobBank:
-    name: str
-    knobs: dict
-
-
-@dataclass
 class KnobSpec:
     """One operator knob, fully self-describing.
 
     This is the single source of truth for the knob universe. The
-    KnobState banks (:func:`build_banks`) and the transport-agnostic
+    session's live :class:`KnobState` and the transport-agnostic
     catalog / manifest (:func:`knob_catalog`, served at ``/api/knobs``
     and by the MCP ``list_knobs`` tool) are both projections of it. Add a
     knob here and every backend surface — plus any frontend that consumes
     the manifest — picks it up automatically.
 
-    ``bank`` knobs are KnobState-backed: continuous params the streaming
-    runner reads via ``get_param``. Non-``bank`` knobs ride the same
+    ``bank`` knobs are continuous params the streaming runner reads from
+    KnobState via ``get_param``. Non-``bank`` knobs ride the same
     ``params`` channel but are consumed straight from the raw wire dict
-    (e.g. ``raw.get("guidance_scale")``) and are never stored in
-    KnobState — they still belong in the schema so every frontend can
-    render and validate them.
+    (e.g. ``raw.get("guidance_scale")``) — KnobState still seeds and
+    carries their values (so session snapshots are complete from t=0),
+    but the runner never reads them through it. They belong in the schema
+    so every frontend can render and validate them.
     """
     name: str
     default: Any = 0.0
     min_val: Optional[float] = None
     max_val: float = 1.0
-    sensitivity: float = 2.0
     group: str = "core"
     type: str = "float"            # "float" | "int" | "enum" | "bool"
     options: tuple = ()             # allowed values for enum / bool
     description: str = ""
     bank: bool = True
-
-
-# Registry group -> KnobState bank name, in display order. Only ``bank``
-# specs land in a KnobState bank; their ``group`` must be one of these.
-_BANKS = (("core", "Core"), ("groups", "Groups"), ("keystones", "Keystones"))
 
 
 def knob_specs(sde: bool, loras=None) -> list:
@@ -106,48 +83,47 @@ def knob_specs(sde: bool, loras=None) -> list:
     # --- Core bank knobs (KnobState-backed) ---
     if sde:
         specs.append(KnobSpec(
-            "sde_amp", sensitivity=2.0,
+            "sde_amp",
             description="SDE diffusion amplitude (replaces denoise in SDE mode)",
         ))
     else:
         specs.append(KnobSpec(
-            "denoise", sensitivity=2.0, description="ODE denoise strength",
+            "denoise", description="ODE denoise strength",
         ))
     specs.append(KnobSpec(
-        "seed", max_val=float(0xFFFFFFFF), sensitivity=0.5, type="int",
+        "seed", max_val=float(0xFFFFFFFF), type="int",
         description="Stream seed (uint32 integer; passed to torch.manual_seed)",
     ))
     specs.append(KnobSpec(
-        "feedback", sensitivity=2.0, description="Feedback amount",
+        "feedback", description="Feedback amount",
     ))
     # Delay-tap depth for the feedback knob. 1 == blend with the most
     # recent finished latent; N>1 reaches N ticks back for an echo / ghost
     # effect. Integer-valued; capped at 8 (StreamPipeline ring ceiling).
     specs.append(KnobSpec(
-        "feedback_depth", default=1.0, min_val=1.0, max_val=8.0,
-        sensitivity=4.0, type="int",
+        "feedback_depth", default=1.0, min_val=1.0, max_val=8.0, type="int",
         description="Feedback delay-tap depth in ticks (1 = last, N = N ticks back)",
     ))
     # Flow shift flows verbatim into the diffusion solver; useful ~[1, 6].
     specs.append(KnobSpec(
-        "shift", default=3.5, min_val=1.0, max_val=6.0, sensitivity=1.0,
+        "shift", default=3.5, min_val=1.0, max_val=6.0,
         description="Flow shift (timing/curve shape). Passed verbatim to the diffusion solver.",
     ))
     if sde:
         specs.append(KnobSpec(
-            "periodicity", max_val=12.5, sensitivity=2.0,
+            "periodicity", max_val=12.5,
             description="SDE periodicity",
         ))
     for lid in lora_ids:
         specs.append(lora_strength_spec(lid))
     specs.append(KnobSpec(
-        "hint_strength", default=1.0, sensitivity=2.0,
+        "hint_strength", default=1.0,
         description="Structure (semantic hint) blend strength",
     ))
     # Scalar source-lock target blend. Runner reads via get_param("x0_target")
     # and pushes it in as the x0_target_strength shared curve.
     specs.append(KnobSpec(
-        "x0_target", max_val=1.0, sensitivity=2.0,
+        "x0_target", max_val=1.0,
         description=(
             "Scalar blend toward the x0 source-lock target (second half of "
             "the schedule). Requires a source latent."
@@ -157,20 +133,20 @@ def knob_specs(sde: bool, loras=None) -> list:
     # --- Channel-group / keystone bank knobs (KnobState-backed) ---
     for (name, _start, _end) in CHANNEL_GROUPS:
         specs.append(KnobSpec(
-            name, default=1.0, max_val=3.0, sensitivity=1.5, group="groups",
+            name, default=1.0, max_val=3.0, group="groups",
             description=f"Channel-group amplifier {name}",
         ))
     for (name, _ch) in KEYSTONE_CHANNELS:
         specs.append(KnobSpec(
-            name, default=1.0, max_val=3.0, sensitivity=1.5, group="keystones",
+            name, default=1.0, max_val=3.0, group="keystones",
             description=f"Keystone channel amplifier {name}",
         ))
 
     # --- Raw-param knobs (NOT KnobState-backed) ---
     # Step count, guidance, and the DCW corrector ride the params channel
-    # but the runner consumes them via raw.get(...), never storing them in
-    # KnobState. They live in the schema so the catalog/manifest is complete
-    # and every frontend can render them.
+    # but the runner consumes them via raw.get(...), never reading them
+    # through KnobState. They live in the schema so the catalog/manifest is
+    # complete and every frontend can render them.
     specs.append(KnobSpec(
         "steps_override", default=8.0, min_val=1.0, max_val=16.0, type="int",
         bank=False,
@@ -237,40 +213,9 @@ def lora_strength_spec(lora_id: str) -> KnobSpec:
     than being declared a second time at the enable site.
     """
     return KnobSpec(
-        f"lora_str_{lora_id}", max_val=2.0, sensitivity=2.0,
+        f"lora_str_{lora_id}", max_val=2.0,
         description=f"Strength for LoRA {lora_id!r}",
     )
-
-
-def spec_to_knob_def(spec: KnobSpec) -> KnobDef:
-    """Project a registry :class:`KnobSpec` onto the :class:`KnobDef`
-    value type KnobState stores. The single conversion point, used by
-    :func:`build_banks` and the session's runtime LoRA-knob allocation."""
-    return KnobDef(
-        default=spec.default, sensitivity=spec.sensitivity,
-        max_val=spec.max_val, min_val=spec.min_val,
-        description=spec.description,
-    )
-
-
-def build_banks(sde: bool, loras=None) -> list:
-    """Build the KnobState banks driving the streaming pipeline.
-
-    Derived from :func:`knob_specs` (the single registry): the ``bank``
-    knobs, grouped into the Core / Groups / Keystones banks the runner
-    expects. Non-``bank`` schema knobs (steps_override, guidance, DCW)
-    are intentionally excluded — the runner reads those from the raw wire
-    dict, not KnobState.
-    """
-    group_to_bank = {g: bank_name for g, bank_name in _BANKS}
-    grouped = {bank_name: {} for _g, bank_name in _BANKS}
-    for spec in knob_specs(sde, loras):
-        if not spec.bank:
-            continue
-        bank_name = group_to_bank.get(spec.group, "Core")
-        grouped[bank_name][spec.name] = spec_to_knob_def(spec)
-    return [KnobBank(name=bank_name, knobs=grouped[bank_name])
-            for _g, bank_name in _BANKS]
 
 
 def knob_catalog(sde: bool, loras=None) -> dict:
@@ -327,6 +272,12 @@ def coerce_knob_values(raw: dict, specs_by_name: dict) -> tuple:
     in ``errors``; invalid enum/bool values are dropped from ``clean`` (so the
     prior KnobState value is preserved) *and* recorded. This function never
     raises.
+
+    Deliberately divergent from the command-envelope coercer
+    (``demos/realtime_motion_graph_web/protocol.py`` ::
+    ``coerce_command_payload``): knobs CLAMP out-of-range numerics into
+    bounds, command fields carry no bounds and DROP on type mismatch.
+    Don't merge the two — the divergence is the contract.
     """
     clean: dict = {}
     errors: list = []
@@ -366,23 +317,24 @@ def coerce_knob_values(raw: dict, specs_by_name: dict) -> tuple:
 class KnobState:
     """Transport-agnostic knob state.
 
-    Drop-in replacement for the demo's old ``VirtualMidiKnobs`` class.
+    Holds the live value for every registry knob, seeded from the
+    :func:`knob_specs` defaults — bank knobs and raw-param knobs alike —
+    so a session snapshot's ``knob_values`` is complete from t=0, before
+    the first client param tick and for headless / MCP-only sessions.
+
     Values come from whatever source the transport adapter wires up
     (WebSocket client params, an MCP command, a VST plugin parameter
     update). The streaming runner reads via ``get_param`` /
     ``get_all_values`` and never knows or cares about the transport.
+    Knob *metadata* (bounds, types, options) lives in the registry, not
+    here; validation happens upstream via :func:`coerce_knob_values`.
     """
 
-    def __init__(self, banks):
-        self._banks = banks
-        self._active_bank = 0
+    def __init__(self, specs):
         self._values = {}
-        self._all_knobs = {}
-        for bank in banks:
-            for name, k in bank.knobs.items():
-                if name not in self._values:
-                    self._values[name] = k.default
-                self._all_knobs[name] = k
+        for spec in specs:
+            if spec.name not in self._values:
+                self._values[spec.name] = spec.default
         self._lock = threading.Lock()
 
     def update(self, raw: dict):
@@ -390,46 +342,23 @@ class KnobState:
         with self._lock:
             self._values.update(raw)
 
-    def add_knob(self, name, knob_def):
+    def add_knob(self, spec):
         """Register a new knob after construction (used when the client
-        enables a LoRA at runtime and we need a ``lora_str_<id>`` slot)."""
+        enables a LoRA at runtime and we need a ``lora_str_<id>`` slot).
+        An existing live value is preserved; only a missing slot is
+        seeded with the spec's default."""
         with self._lock:
-            if name not in self._values:
-                self._values[name] = knob_def.default
-            self._all_knobs[name] = knob_def
+            if spec.name not in self._values:
+                self._values[spec.name] = spec.default
 
     def remove_knob(self, name):
         with self._lock:
             self._values.pop(name, None)
-            self._all_knobs.pop(name, None)
-
-    def get(self, name: str) -> float:
-        with self._lock:
-            return self._values.get(name, 0.0)
-
-    def get_all(self) -> dict:
-        with self._lock:
-            bank = self._banks[self._active_bank]
-            return {name: self._values[name] for name in bank.knobs}
-
-    def get_all_values(self) -> dict:
-        with self._lock:
-            return dict(self._values)
 
     def get_param(self, name: str) -> float:
         with self._lock:
             return self._values.get(name, 0.0)
 
-    def all_knob_defs(self) -> dict:
-        return dict(self._all_knobs)
-
-    @property
-    def active_bank_index(self) -> int:
-        return self._active_bank
-
-    @property
-    def active_bank(self):
-        return self._banks[self._active_bank]
-
-    def release(self):
-        pass
+    def get_all_values(self) -> dict:
+        with self._lock:
+            return dict(self._values)

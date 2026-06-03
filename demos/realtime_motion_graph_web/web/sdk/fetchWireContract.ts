@@ -15,7 +15,7 @@ import type { WireContract } from "./types/wireContract";
  */
 export async function fetchWireContract(
   toUrl: (path: string) => string = (p) => p,
-): Promise<WireContract | null> {
+): Promise<WireContract> {
   const res = await fetchWithRetry(toUrl("/api/protocol"));
   if (!res.ok) throw new Error(`/api/protocol failed: ${res.status}`);
   return (await res.json()) as WireContract;
