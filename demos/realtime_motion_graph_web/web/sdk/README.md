@@ -11,6 +11,11 @@ Nothing in this directory imports from the host app (drift-guarded by
 standalone. The shipped demo UI in `../` is itself a consumer, imported
 via the `@demon/client` tsconfig alias.
 
+Vibecoding a new frontend (or pointing an agent at this SDK)? Start at
+[AGENTS.md](./AGENTS.md) — the imperative recipe: discovery-first
+workflow, the five invariants the manifests can't express, and the
+reference implementations to copy.
+
 ## What the backend gives you
 
 The control surface is backend-owned and self-describing. Build against
