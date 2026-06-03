@@ -56,10 +56,11 @@ def _dispatcher_command_types() -> set:
 
 
 def _client_handled_events() -> set:
-    """Every event name the browser protocol client handles: the streaming
-    ladder's ``case "<x>":`` labels (a switch typed against the generated
-    EventName union) plus the init-phase ``msg.type === "<x>"`` checks."""
-    src = (_DEMO / "web" / "engine" / "protocol.ts").read_text(encoding="utf-8")
+    """Every event name the browser protocol client (the demon-client SDK's
+    RemoteBackend) handles: the streaming ladder's ``case "<x>":`` labels (a
+    switch over the generated WireEvent union) plus the init-phase
+    ``msg.type === "<x>"`` checks."""
+    src = (_DEMO / "web" / "sdk" / "protocol.ts").read_text(encoding="utf-8")
     handled = set(re.findall(r'msg\.type === "([^"]+)"', src))
     handled |= set(re.findall(r'case "([^"]+)":', src))
     return handled
@@ -165,32 +166,82 @@ def _upload_handler_header_fields() -> set:
     return set()
 
 
+def _command_dict_type(node: ast.Dict):
+    """The ``"type"`` value of a dict literal, if it's a known command."""
+    type_node = next(
+        (v for k, v in zip(node.keys, node.values)
+         if isinstance(k, ast.Constant) and k.value == "type"),
+        None,
+    )
+    if (isinstance(type_node, ast.Constant)
+            and isinstance(type_node.value, str)
+            and type_node.value in COMMAND_NAMES):
+        return type_node.value
+    return None
+
+
 def _mcp_command_dicts() -> dict:
-    """Map ``command name -> set(fields)`` from the ``{"type": "<cmd>", ...}``
-    dict literals the MCP tools build (third hand copy of the vocabulary)."""
+    """Map ``command name -> set(fields)`` from the envelopes the MCP tools
+    build (third hand copy of the vocabulary). Two shapes are covered:
+
+    * ``{"type": "<cmd>", ...}`` dict literals anywhere in the module, and
+    * fields added to such a dict after the fact via subscript assignment
+      (``msg["tags_b"] = ...``), which the tools use for optional fields.
+      Tracked per function: an Assign/AnnAssign binding a name to a command
+      dict literal registers that name, and later ``name["field"] = ...``
+      stores in the same function are attributed to that command.
+    """
     src = (_DEMO / "mcp_server.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
     out: dict = {}
-    for node in ast.walk(ast.parse(src)):
+
+    # Pass 1: every command dict literal, wherever it appears.
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Dict):
             continue
-        str_keys = {
+        cmd = _command_dict_type(node)
+        if cmd is None:
+            continue
+        out.setdefault(cmd, set()).update(
             k.value
-            for k, v in zip(node.keys, node.values)
+            for k in node.keys
             if isinstance(k, ast.Constant) and isinstance(k.value, str)
-        }
-        type_node = next(
-            (v for k, v in zip(node.keys, node.values)
-             if isinstance(k, ast.Constant) and k.value == "type"),
-            None,
+            and k.value != "type"
         )
-        if not (isinstance(type_node, ast.Constant)
-                and isinstance(type_node.value, str)):
+
+    # Pass 2: subscript-assigned fields on names bound to a command dict.
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if type_node.value not in COMMAND_NAMES:
-            continue
-        out.setdefault(type_node.value, set()).update(
-            k for k in str_keys if k != "type"
-        )
+        # Sub-pass A: names bound to a command dict literal anywhere in the
+        # function (`msg = {...}` / `msg: dict[...] = {...}`). Collected
+        # before sub-pass B so the guard is insensitive to ast.walk order.
+        var_cmd: dict = {}
+        for node in ast.walk(fn):
+            target = None
+            value = None
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target, value = node.targets[0], node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                target, value = node.target, node.value
+            if isinstance(target, ast.Name) and isinstance(value, ast.Dict):
+                cmd = _command_dict_type(value)
+                if cmd is not None:
+                    var_cmd[target.id] = cmd
+        # Sub-pass B: `msg["field"] = ...` stores on tracked names.
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Subscript)
+                    and isinstance(node.targets[0].value, ast.Name)
+                    and node.targets[0].value.id in var_cmd
+                    and isinstance(node.targets[0].slice, ast.Constant)
+                    and isinstance(node.targets[0].slice.value, str)):
+                field = node.targets[0].slice.value
+                if field != "type":
+                    out.setdefault(
+                        var_cmd[node.targets[0].value.id], set(),
+                    ).add(field)
     return out
 
 
@@ -262,6 +313,13 @@ def test_mcp_command_fields_are_declared():
     cmds = command_catalog()
     built = _mcp_command_dicts()
     assert built, "no MCP command dict literals found — parse drifted?"
+    # Self-check: the subscript-assignment pass must be seeing the fields the
+    # tools add incrementally (set_prompt does `msg["tags_b"] = ...`). If this
+    # fails, the AST helper went blind to that shape and the guard is hollow.
+    assert "tags_b" in built.get("prompt", set()), (
+        "MCP subscript-assigned fields not detected — _mcp_command_dicts "
+        "pass 2 drifted from mcp_server.py's envelope-building style"
+    )
     undeclared = {
         c: sorted(f - set(cmds[c]["fields"]))
         for c, f in built.items()
@@ -366,23 +424,41 @@ def test_coerce_command_payload_dispatcher_equivalence():
 
 
 def test_config_payload_matches_dataclass():
-    # config_catalog() is DERIVED from SessionConfig; this pins that derivation
-    # so a new config field (or a field with a novel annotation the type map
-    # doesn't cover) can't slip into the session-init contract untyped — which
-    # would also desync the generated TS SessionConfigPayload.
+    # config_catalog() is DERIVED from SessionConfig via get_type_hints; this
+    # pins that derivation so a new config field can't slip into the
+    # session-init contract untyped — which would also desync the generated TS
+    # SessionConfigPayload. A field with an annotation the projection can't
+    # handle raises TypeError from config_catalog itself (covered below).
     from dataclasses import fields as dc_fields
+    from typing import get_type_hints
+
+    import pytest
 
     from acestep.streaming.config import SessionConfig
-    from demos.realtime_motion_graph_web.protocol import _CONFIG_TYPE_MAP
+    from demos.realtime_motion_graph_web.protocol import _project_config_type
 
     cat = config_catalog()
     assert set(cat) == {f.name for f in dc_fields(SessionConfig)}
-    for f in dc_fields(SessionConfig):
-        ann = f.type if isinstance(f.type, str) else getattr(f.type, "__name__", "")
-        assert ann in _CONFIG_TYPE_MAP, (
-            f"SessionConfig.{f.name} has annotation {ann!r} not in "
-            f"_CONFIG_TYPE_MAP — add it (and regenerate the TS types)"
+
+    wire_vocab = {"bool", "int", "float", "str", "list", "dict"}
+    hints = get_type_hints(SessionConfig)
+    for name, entry in cat.items():
+        assert entry["type"] in wire_vocab, (name, entry)
+        # Optional fields project to nullable; plain fields must not.
+        is_optional = hints[name] != type(None) and type(None) in getattr(
+            hints[name], "__args__", (),
         )
+        assert entry.get("nullable", False) == is_optional, (name, entry)
+    # The str | None family really is marked nullable.
+    assert cat["prompt_b"]["nullable"] is True
+    assert cat["fixture_name"]["nullable"] is True
+    assert "nullable" not in cat["sde"]
+
+    # An annotation with no wire projection fails loudly, not as "str".
+    with pytest.raises(TypeError):
+        _project_config_type(complex)
+    with pytest.raises(TypeError):
+        _project_config_type(int | str)  # non-Optional union
 
 
 def test_handshake_upload_is_registered_and_handled():
@@ -428,7 +504,7 @@ def test_generated_wire_types_match_contract():
     gen = _load_codegen_module()
     expected = gen.render_wire_types_ts(wire_contract())
     committed = (
-        _DEMO / "web" / "types" / "wireContract.gen.ts"
+        _DEMO / "web" / "sdk" / "types" / "wireContract.gen.ts"
     ).read_text(encoding="utf-8")
     # Normalize EOLs: git autocrlf may rewrite the committed file on checkout.
     assert expected.replace("\r\n", "\n") == committed.replace("\r\n", "\n"), (

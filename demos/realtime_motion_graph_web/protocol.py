@@ -356,6 +356,21 @@ COMMANDS: tuple = (
 
 EVENTS: tuple = (
     EventSpec(
+        "init_ack",
+        fields=(
+            FieldSpec("session_id", "str",
+                      description="Server-minted session id, sent as soon as "
+                                  "log context binds so client startup "
+                                  "failures correlate with pod logs."),
+            FieldSpec("client_id", "str", nullable=True,
+                      description="The config client_id echoed back, or null "
+                                  "when the client sent none."),
+        ),
+        description="Optional telemetry ack emitted after config parse but "
+                    "before audio/model init. Sent ONLY when the config opts "
+                    "in via telemetry_version, so old clients never see it.",
+    ),
+    EventSpec(
         "ready",
         fields=(
             FieldSpec("duration", "float", required=True),
@@ -616,44 +631,74 @@ def event_catalog() -> dict:
     return _event_catalog_of(EVENTS)
 
 
-# Annotation-string -> wire type for the SessionConfig projection. With
-# ``from __future__ import annotations`` (which config.py uses) dataclass field
-# types arrive as strings, so we match on those.
-_CONFIG_TYPE_MAP = {
-    "bool": "bool",
-    "int": "int",
-    "float": "float",
-    "str": "str",
-    "str | None": "str",
-    "list": "list",
-    "dict": "dict",
+# Python type -> wire type for the SessionConfig projection.
+_CONFIG_WIRE_TYPES = {
+    bool: "bool",
+    int: "int",
+    float: "float",
+    str: "str",
+    list: "list",
+    dict: "dict",
 }
+
+
+def _project_config_type(tp) -> tuple:
+    """Resolve one SessionConfig annotation to ``(wire_type, nullable)``.
+
+    Unwraps ``X | None`` / ``Optional[X]`` into the inner type with
+    ``nullable=True``. Raises ``TypeError`` on an annotation with no wire
+    projection, so a novel field type fails loudly at codegen/serve time
+    instead of silently landing in the contract as ``str``.
+    """
+    import types as _pytypes
+    import typing as _typing
+
+    origin = _typing.get_origin(tp)
+    if origin is _typing.Union or origin is getattr(_pytypes, "UnionType", None):
+        args = [a for a in _typing.get_args(tp) if a is not type(None)]
+        if len(args) != 1:
+            raise TypeError(
+                f"SessionConfig union annotation {tp!r} is not a simple "
+                f"Optional; no wire projection"
+            )
+        inner, _ = _project_config_type(args[0])
+        return inner, True
+    wire = _CONFIG_WIRE_TYPES.get(tp)
+    if wire is None:
+        raise TypeError(
+            f"SessionConfig annotation {tp!r} has no wire projection; "
+            f"extend _CONFIG_WIRE_TYPES / _project_config_type"
+        )
+    return wire, False
 
 
 def config_catalog() -> dict:
     """Project the session-init handshake
     (:class:`acestep.streaming.config.SessionConfig`) into the same
-    transport-agnostic ``name -> {type, required, default?}`` shape as the
-    command/event catalogs.
+    transport-agnostic ``name -> {type, required, nullable?, default?}``
+    shape as the command/event catalogs.
 
-    DERIVED from the dataclass, so the config payload a UI sends at session
-    start can't drift from what the server actually parses
-    (``SessionConfig.from_dict``). Every field is wire-optional (the dataclass
+    DERIVED from the dataclass via ``typing.get_type_hints`` (real resolved
+    types, not annotation strings), so the config payload a UI sends at
+    session start can't drift from what the server actually parses
+    (``SessionConfig.from_dict``), and ``X | None`` fields project to
+    ``nullable`` for free. Every field is wire-optional (the dataclass
     supplies defaults). The import is local so this module's top-level import
     stays torch-free / acestep-free; SessionConfig itself is both.
     """
     from dataclasses import MISSING
     from dataclasses import fields as _dc_fields
+    from typing import get_type_hints
 
     from acestep.streaming.config import SessionConfig
 
+    hints = get_type_hints(SessionConfig)
     out: dict = {}
     for f in _dc_fields(SessionConfig):
-        ann = f.type if isinstance(f.type, str) else getattr(f.type, "__name__", "str")
-        entry: dict = {
-            "type": _CONFIG_TYPE_MAP.get(ann, "str"),
-            "required": False,
-        }
+        wire_type, nullable = _project_config_type(hints[f.name])
+        entry: dict = {"type": wire_type, "required": False}
+        if nullable:
+            entry["nullable"] = True
         if f.default is not MISSING and f.default is not None:
             entry["default"] = f.default
         out[f.name] = entry
@@ -698,6 +743,11 @@ def wire_contract() -> dict:
 # ---------------------------------------------------------------------------
 
 _COMMANDS_BY_NAME = {c.name: c for c in COMMANDS}
+# Per-command {field name: FieldSpec}, precomputed once: coerce_command_payload
+# runs on the 125 Hz params channel, so it must not rebuild this per call.
+_COMMAND_FIELDS_BY_NAME = {
+    c.name: {f.name: f for f in c.fields} for c in COMMANDS
+}
 
 
 def _coerce_command_field(cmd: str, field: "FieldSpec", val):
@@ -774,7 +824,7 @@ def coerce_command_payload(name: str, payload: dict) -> tuple:
     spec = _COMMANDS_BY_NAME.get(name)
     if spec is None:
         return dict(payload), [f"unknown command {name!r}"]
-    fields_by_name = {f.name: f for f in spec.fields}
+    fields_by_name = _COMMAND_FIELDS_BY_NAME[name]
     errors: list = []
     for f in spec.fields:
         if f.required and f.name not in payload:

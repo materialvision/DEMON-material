@@ -5,7 +5,7 @@ import { useMemo } from "react";
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import { useKnobManifestStore } from "@/store/useKnobManifestStore";
 import type { DcwMode, DcwWavelet, RcfgMode } from "@/types/engine";
-import type { KnobManifestEntry } from "@/types/knobs";
+import type { KnobManifestEntry } from "@demon/client";
 
 import { SliderGroup } from "./SliderGroup";
 

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import type { KnobManifest } from "@/types/knobs";
+import type { KnobManifest } from "@demon/client";
 
 // Holds the backend knob manifest fetched at boot (GET /api/knobs).
 // Seeded empty; RTMGBoot fills it. Any manifest-driven surface (the

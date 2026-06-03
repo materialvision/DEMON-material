@@ -1,19 +1,20 @@
 "use client";
 
 import { installDemonDebug } from "@/engine/debugReconnect";
-import { fetchKnobManifest } from "@/engine/knobs/fetchKnobManifest";
+import { fetchKnobManifest } from "@demon/client";
 import { listLoras } from "@/engine/lora/listLoras";
+import { podHttp } from "@/engine/podUrl";
 import { setEngineUrlBuilder } from "@/engine/rtmgConfig";
 import { installTestHooks } from "@/engine/testHooks";
-import { fetchWireContract } from "@/engine/wire/fetchWireContract";
+import { fetchWireContract } from "@demon/client";
 import { applyConfig, loadConfig } from "@/lib/config";
 import { useKnobManifestStore } from "@/store/useKnobManifestStore";
 import { useLoraStore } from "@/store/useLoraStore";
 import { useWireContractStore } from "@/store/useWireContractStore";
-import type { KnobManifest } from "@/types/knobs";
-import type { LoraCatalogEntry } from "@/types/protocol";
-import type { WireContract } from "@/types/wireContract";
-import { PROTOCOL_VERSION } from "@/types/wireContract.gen";
+import type { KnobManifest } from "@demon/client";
+import type { LoraCatalogEntry } from "@demon/client";
+import type { WireContract } from "@demon/client";
+import { PROTOCOL_VERSION } from "@demon/client";
 
 // Same-origin URL builder. The engine's HTTP routes (/api/*, /fixtures/*,
 // /loras/*, /videos/*) are proxied to the Python backend at :8765 by the
@@ -53,11 +54,11 @@ if (typeof window !== "undefined") {
       // Non-fatal: the manifest only drives the auto-generated knob panel.
       // A backend without /api/knobs leaves it empty and the panel shows a
       // placeholder; the shipped tiles are unaffected.
-      fetchKnobManifest().catch(() => ({}) as KnobManifest),
+      fetchKnobManifest(false, podHttp).catch(() => ({}) as KnobManifest),
       // Non-fatal: the wire contract is discovery metadata for re-skins /
       // agents; the shipped client speaks the protocol directly, so a backend
       // without /api/protocol just leaves the store empty.
-      fetchWireContract().catch(() => null as WireContract | null),
+      fetchWireContract(podHttp).catch(() => null as WireContract | null),
     ]);
     applyConfig(cfg);
     if (catalog.length > 0) {
@@ -68,7 +69,7 @@ if (typeof window !== "undefined") {
     }
     if (contract) {
       useWireContractStore.getState().setContract(contract);
-      // The client's wire types (types/wireContract.gen.ts) are generated
+      // The client's wire types (sdk/types/wireContract.gen.ts) are generated
       // from the backend registry at build time; the served contract is the
       // live truth. A version mismatch means this build's senders/ladder may
       // be typed against a stale vocabulary — surface it instead of letting
@@ -77,7 +78,7 @@ if (typeof window !== "undefined") {
         console.warn(
           `[boot] wire-contract version mismatch: backend serves v${contract.version}, ` +
             `client built against v${PROTOCOL_VERSION} — regenerate ` +
-            "types/wireContract.gen.ts against this backend.",
+            "sdk/types/wireContract.gen.ts against this backend.",
         );
       }
     }

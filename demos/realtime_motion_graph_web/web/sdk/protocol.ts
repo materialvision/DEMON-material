@@ -1,4 +1,7 @@
 // WebSocket client for the DEMON realtime motion-to-music backend.
+// Part of the demon-client SDK: no imports from the host app (no "@/"),
+// no store writes. The app observes session state via the CustomEvents
+// this class dispatches (ready / slice / swap_ready / depth_applied / ...).
 //
 // Phases:
 //   1. config   client sends JSON config + binary (uint32 channels, uint32
@@ -12,21 +15,15 @@
 import * as fzstd from "fzstd";
 
 import {
-  enabledLoraTriggerPrefix,
-  stripLeadingTriggers,
-} from "@/lib/loraTriggers";
-import { useSessionStore } from "@/store/useSessionStore";
-import {
   SAMPLE_RATE,
   SLICE_FLAG_DELTA,
   SLICE_HDR_SIZE,
   type AudioSlice,
-  type InitAckMessage,
   type LoraCatalogEntry,
   type SessionConfig,
   type StemAssetsMessage,
   type SwapReadyMessage,
-} from "@/types/protocol";
+} from "./types/protocol";
 // Outbound command payloads + the inbound event-name union are GENERATED from
 // the backend wire-contract registry (protocol.py) — see
 // types/wireContract.gen.ts. Typing the senders/ladder against them means a
@@ -37,7 +34,6 @@ import type {
   ClearTimbreSourceCommand,
   DisableLoraCommand,
   EnableLoraCommand,
-  EventName,
   LoopBandCommand,
   ParamsCommand,
   PromptCommand,
@@ -50,7 +46,8 @@ import type {
   SetTimbreSourceCommand,
   SetTimbreStrengthCommand,
   SwapSourceCommand,
-} from "@/types/wireContract.gen";
+  WireEvent,
+} from "./types/wireContract.gen";
 
 export {
   SAMPLE_RATE,
@@ -59,7 +56,15 @@ export {
   SLICE_FLAG_DELTA,
   SLICE_FLAG_RAW,
   SLICE_HDR_SIZE,
-} from "@/types/protocol";
+} from "./types/protocol";
+
+/** Optional behaviors the host app injects into RemoteBackend. */
+export interface RemoteBackendOptions {
+  /** Applied to `tags` and `tags_b` on every `sendPrompt` before they hit
+   *  the wire. The shipped app injects enabled-LoRA trigger prefixes here;
+   *  a bare client can omit it and prompts are sent verbatim. */
+  promptTransform?: (tags: string) => string;
+}
 
 // ── float16 → float32 ──────────────────────────────────────────────────
 // Browsers don't have native float16; decode by hand via a reusable
@@ -214,11 +219,14 @@ export class RemoteBackend extends EventTarget {
   // chunks of the previous song through.
   private _sliceEpoch = 0;
 
+  private _promptTransform: (tags: string) => string;
+
   constructor(
     url: string,
     interleaved: Float32Array,
     channels: number,
     config: SessionConfig,
+    opts: RemoteBackendOptions = {},
   ) {
     super();
     this.url = url;
@@ -240,6 +248,7 @@ export class RemoteBackend extends EventTarget {
       closeCode: null,
       closeReason: "",
     };
+    this._promptTransform = opts.promptTransform ?? ((tags) => tags);
     this._initDecoderWorker();
   }
 
@@ -255,10 +264,9 @@ export class RemoteBackend extends EventTarget {
       closedByUser: this.closedByUser,
       wsReadyState: this.ws?.readyState ?? null,
     };
+    // SDK code never touches app stores: the host app mirrors the trace
+    // into its session store by subscribing to this event.
     const snapshot = this._snapshotTrace();
-    try {
-      useSessionStore.getState().setLastWsTrace(snapshot);
-    } catch {}
     this.dispatchEvent(new CustomEvent("ws_trace_update", { detail: snapshot }));
     return snapshot;
   }
@@ -341,8 +349,7 @@ export class RemoteBackend extends EventTarget {
         // so we must skip the send to match.
         ws.send(JSON.stringify(this._pending.config));
         const useServerFixture =
-          (this._pending.config as { use_server_fixture?: boolean })
-            .use_server_fixture === true;
+          this._pending.config.use_server_fixture === true;
         if (!useServerFixture) {
           const { interleaved, channels } = this._pending;
           const samples = interleaved.length / channels;
@@ -363,20 +370,18 @@ export class RemoteBackend extends EventTarget {
       ws.onmessage = (ev) => {
         if (phase === "ready") {
           try {
-            const msg = JSON.parse(ev.data as string);
+            // The generated discriminated union narrows the init messages:
+            // `init_ack`, `error` and `ready` field reads below are
+            // compile-checked against the registry instead of going
+            // through `any`.
+            const msg = JSON.parse(ev.data as string) as WireEvent;
             if (msg.type === "init_ack") {
-              const ack = msg as InitAckMessage;
               this.backendSessionId =
-                typeof ack.session_id === "string" ? ack.session_id : null;
+                typeof msg.session_id === "string" ? msg.session_id : null;
               this.backendClientId =
-                typeof ack.client_id === "string" ? ack.client_id : null;
-              {
-                const s = useSessionStore.getState();
-                s.setLastBackendSessionId(this.backendSessionId);
-                s.setLastBackendClientId(this.backendClientId);
-              }
+                typeof msg.client_id === "string" ? msg.client_id : null;
               this._updateTrace({ initAckAt: Date.now(), phase: "init_ack" });
-              this.dispatchEvent(new CustomEvent("ws_init_ack", { detail: ack }));
+              this.dispatchEvent(new CustomEvent("ws_init_ack", { detail: msg }));
               return;
             }
             if (msg.type === "error") {
@@ -396,7 +401,9 @@ export class RemoteBackend extends EventTarget {
             this.duration = msg.duration;
             this.channels = msg.channels;
             this.sampleRate = msg.sample_rate;
-            this.loraCatalog = msg.lora_catalog || [];
+            // The contract types list elements as unknown; LoraCatalogEntry
+            // is the client-side refinement of the catalog rows.
+            this.loraCatalog = (msg.lora_catalog as LoraCatalogEntry[]) || [];
             this.loraDir = msg.lora_dir || "";
             this.detectedBpm = msg.bpm ?? null;
             this.detectedKey = msg.key ?? null;
@@ -411,15 +418,9 @@ export class RemoteBackend extends EventTarget {
               typeof msg.max_pipeline_depth === "number"
                 ? msg.max_pipeline_depth
                 : null;
-            // Push the scale + depth bounds into the session store so the
-            // LoRA library / engine controls can render without subscribing
-            // to RemoteBackend instance fields.
-            {
-              const s = useSessionStore.getState();
-              s.setCheckpointScale(this.checkpointScale);
-              s.setPipelineDepth(this.pipelineDepth);
-              s.setMaxPipelineDepth(this.maxPipelineDepth);
-            }
+            // Scale + depth bounds are exposed as instance fields; the host
+            // app mirrors them into its own state from the "ready" event
+            // listener (the SDK never writes app stores).
             phase = "initial-buffer";
           } catch (e) {
             this._updateTrace({ errorAt: Date.now(), phase: "error" });
@@ -498,19 +499,20 @@ export class RemoteBackend extends EventTarget {
         }
 
         if (typeof ev.data === "string") {
-          let msg: { type: string; [k: string]: unknown };
+          let msg: WireEvent;
           try {
-            msg = JSON.parse(ev.data);
+            msg = JSON.parse(ev.data) as WireEvent;
           } catch {
             return;
           }
-          // The case labels are compile-checked against the generated
-          // EventName union (types/wireContract.gen.ts), so this ladder
-          // can't reference an event the backend wire contract doesn't
-          // declare — an unregistered name fails `tsc`, and the Python
-          // drift guard (tests/unit/test_wire_contract.py) parses these
-          // labels against the registry from its side.
-          switch (msg.type as EventName) {
+          // `msg` is the generated WireEvent discriminated union
+          // (types/wireContract.gen.ts), so each case below narrows to its
+          // event's payload type: a case label the backend wire contract
+          // doesn't declare, or a field read the registry doesn't carry,
+          // fails `tsc`. The Python drift guard
+          // (tests/unit/test_wire_contract.py) parses these labels against
+          // the registry from its side.
+          switch (msg.type) {
             case "params_update":
               this.dispatchEvent(
                 new CustomEvent("params", { detail: msg.params }),
@@ -540,14 +542,13 @@ export class RemoteBackend extends EventTarget {
               );
               break;
             case "lora_catalog":
-              this.loraCatalog =
-                (msg.catalog as LoraCatalogEntry[] | undefined) || [];
+              this.loraCatalog = (msg.catalog as LoraCatalogEntry[]) || [];
               this.dispatchEvent(
                 new CustomEvent("lora_catalog", { detail: this.loraCatalog }),
               );
               break;
             case "swap_ready":
-              this._pendingSwap = msg as unknown as SwapReadyMessage;
+              this._pendingSwap = msg;
               break;
             case "swap_failed":
               this.dispatchEvent(
@@ -555,7 +556,9 @@ export class RemoteBackend extends EventTarget {
               );
               break;
             case "stem_assets":
-              this._pendingStemAssets = msg as unknown as StemAssetsMessage;
+              // Sole surviving narrowing cast: StemAssetsMessage refines the
+              // generated event's `stems: unknown[]` to the literal names.
+              this._pendingStemAssets = msg as StemAssetsMessage;
               this._pendingStemBuffers = {};
               break;
             case "stem_failed":
@@ -595,7 +598,6 @@ export class RemoteBackend extends EventTarget {
               const v = typeof msg.value === "number" ? msg.value : null;
               if (v !== null) {
                 this.pipelineDepth = v;
-                useSessionStore.getState().setPipelineDepth(v);
                 this.dispatchEvent(
                   new CustomEvent("depth_applied", { detail: v }),
                 );
@@ -748,40 +750,29 @@ export class RemoteBackend extends EventTarget {
   ): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
     try {
-      // Inject the enabled-LoRA trigger words on the WIRE only.
-      // Callers pass the operator's prompt text (promptA/promptB from
-      // the Tags A/B boxes); the trigger prefix is computed fresh here
-      // so every send path — Send Tags button, key change, LoRA toggle
-      // — carries the current trigger set without the textareas ever
-      // showing it.
-      //
-      // Hard guarantee, independent of upstream state: stripLeadingTriggers
-      // removes ANY trigger prefix already on the text (stale, stacked,
-      // or belonging to a since-disabled LoRA), then we prepend exactly
-      // the de-duped enabled-set prefix. So the wire prompt always
-      // carries a disabled LoRA's trigger zero times and an enabled
-      // LoRA's trigger exactly once — per tag (A and B alike).
-      const prefix = enabledLoraTriggerPrefix();
+      // The host app's promptTransform (RemoteBackendOptions) is applied to
+      // both tags on every send. The shipped app injects enabled-LoRA
+      // trigger prefixes there, so every send path — Send Tags button, key
+      // change, LoRA toggle — carries the current trigger set without the
+      // textareas ever showing it. Without a transform, prompts go out
+      // verbatim.
       const msg: PromptCommand = {
         type: "prompt",
-        tags: prefix + stripLeadingTriggers(tags),
+        tags: this._promptTransform(tags),
       };
-      if (tagsB) msg.tags_b = prefix + stripLeadingTriggers(tagsB);
+      if (tagsB) msg.tags_b = this._promptTransform(tagsB);
       if (key) msg.key = key;
       if (timeSignature) msg.time_signature = timeSignature;
       this.ws.send(JSON.stringify(msg));
       // Opt-in wire-prompt debug. Run `window.__demonPromptLog = true`
-      // in the browser console to log exactly what each `prompt`
-      // message carries: the injected LoRA-trigger prefix and the
-      // final Tags A / B as actually sent to the engine. `false` (or
-      // unset) silences it. Pure console output, no other effect.
+      // in the browser console to log exactly what each `prompt` message
+      // carries as actually sent to the engine.
       if (
         typeof window !== "undefined" &&
         (window as unknown as { __demonPromptLog?: boolean }).__demonPromptLog
       ) {
         console.log(
           "[demon prompt → engine]\n" +
-            `  trigger prefix : ${prefix ? JSON.stringify(prefix) : "(none)"}\n` +
             `  tags A (wire)  : ${JSON.stringify(msg.tags)}\n` +
             `  tags B (wire)  : ${
               msg.tags_b != null ? JSON.stringify(msg.tags_b) : "(none)"

@@ -643,6 +643,13 @@ def _handle_client_body(
         snap["fixture_name"] = fixture_name
         return snap
 
+    # Throttle state for coercion warnings, keyed (source, mtype). The
+    # params channel runs at ~125 Hz; a client that trips coercion on
+    # every tick would otherwise emit a warning per message on the
+    # dispatch thread (the same thread that feeds set_knobs).
+    _coerce_warn_last: dict = {}
+    _COERCE_WARN_INTERVAL_S = 5.0
+
     # --- Dispatcher router: WS / control bus JSON → session method ---
     def _dispatch_message(
         data: dict,
@@ -683,10 +690,14 @@ def _handle_client_body(
             return
         data, coerce_errors = coerce_command_payload(mtype, data)
         if coerce_errors:
-            logger.warning(
-                "command_payload_coerced origin={} mtype={} errors={}",
-                source, mtype, coerce_errors,
-            )
+            _now = time.monotonic()
+            _key = (source, mtype)
+            if _now - _coerce_warn_last.get(_key, 0.0) >= _COERCE_WARN_INTERVAL_S:
+                _coerce_warn_last[_key] = _now
+                logger.warning(
+                    "command_payload_coerced origin={} mtype={} errors={}",
+                    source, mtype, coerce_errors,
+                )
         try:
             if mtype == "params":
                 try:

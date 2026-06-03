@@ -17,7 +17,9 @@ export interface KnobManifestEntry {
    *  dict). Its default is seeded server-side, so it still reports a live
    *  value in a session's `knob_values`. */
   bank: boolean;
-  /** Numeric floor (float/int only). */
+  /** Numeric floor (float/int only). Always emitted by current backends
+   *  (0 when the registry leaves it unset); optional only for older
+   *  backends that omitted the implicit-zero floor. */
   min?: number;
   /** Numeric ceiling (float/int only). */
   max?: number;

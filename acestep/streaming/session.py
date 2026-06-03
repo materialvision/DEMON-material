@@ -88,11 +88,12 @@ from acestep.streaming.events import (
     TimbreSet,
 )
 from acestep.streaming.knobs import (
-    KnobDef,
     KnobState,
     build_banks,
     coerce_knob_values,
     knob_specs,
+    lora_strength_spec,
+    spec_to_knob_def,
 )
 from acestep.streaming.pipeline_runner import PipelineRunner
 from acestep.streaming.source import (
@@ -617,7 +618,7 @@ class StreamingSession:
         for lid in local_disable:
             try:
                 self.engine_obj.disable_lora(lid)
-                self.virtual_knobs.remove_knob(f"lora_str_{lid}")
+                self.virtual_knobs.remove_knob(lora_strength_spec(lid).name)
                 logger.info("lora_disabled id={}", lid)
             except Exception as e:
                 logger.exception("lora_disable_failed id={} error={}", lid, e)
@@ -629,18 +630,18 @@ class StreamingSession:
                     lid, strength,
                 )
                 # Allocate a knob slot so set_lora_strength can be
-                # driven by the client's params dict. Default the slot
-                # to the strength we just enabled at so the runner's
+                # driven by the client's params dict. The knob's shape
+                # comes from the registry (lora_strength_spec), never
+                # re-declared here; only the default is overridden to
+                # the strength we just enabled at, so the runner's
                 # slider-delta check (set_lora_strength only when the
                 # new value differs by > 0.02) doesn't fire a
                 # redundant refit on tick 1.
-                self.virtual_knobs.add_knob(
-                    f"lora_str_{lid}",
-                    KnobDef(
-                        default=float(strength) if strength is not None else 0.0,
-                        sensitivity=2.0, max_val=2.0,
-                    ),
-                )
+                spec = lora_strength_spec(lid)
+                kdef = spec_to_knob_def(spec)
+                if strength is not None:
+                    kdef.default = float(strength)
+                self.virtual_knobs.add_knob(spec.name, kdef)
             except Exception as e:
                 logger.exception("lora_enable_failed id={} error={}", lid, e)
         # Publish the refreshed catalog. No automatic re-encode here.

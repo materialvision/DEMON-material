@@ -3,9 +3,9 @@
 The single source of truth for the WebSocket vocabulary is
 ``demos/realtime_motion_graph_web/protocol.py`` (:func:`wire_contract`). This
 script projects that contract into committed TypeScript types
-(``web/types/wireContract.gen.ts``) so a re-skinned / vibecoded UI builds
-against generated, always-in-sync types instead of hand-copying message shapes
-out of ``engine/protocol.ts``.
+(``web/sdk/types/wireContract.gen.ts``, part of the demon-client SDK) so a
+re-skinned / vibecoded UI builds against generated, always-in-sync types
+instead of hand-copying message shapes out of ``sdk/protocol.ts``.
 
 ``render_wire_types_ts(contract)`` is a pure function of the contract dict, so
 the drift guard (``tests/unit/test_wire_contract.py``) can regenerate in-memory
@@ -18,6 +18,7 @@ Regenerate after any change to the registry::
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -43,8 +44,16 @@ def _ts_lit(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, str):
-        return '"%s"' % value
+        # json.dumps gives a valid (escaped) TS double-quoted string literal,
+        # so a quote or backslash in a registry value can't break the output.
+        return json.dumps(value)
     return str(value)
+
+
+def _ts_comment(text: str) -> str:
+    """Sanitize free text for a single-line ``/** ... */`` doc comment:
+    collapse whitespace/newlines and defang a literal ``*/``."""
+    return " ".join(str(text).split()).replace("*/", "*\\/")
 
 
 def _ts_field_type(field: dict) -> str:
@@ -82,7 +91,7 @@ def _emit_interface(
     for fname, fspec in fields.items():
         desc = fspec.get("description")
         if desc:
-            lines.append(f"  /** {desc} */")
+            lines.append(f"  /** {_ts_comment(desc)} */")
         opt = "" if fspec.get("required") else "?"
         ts_type = _ts_field_type(fspec)
         if fspec.get("nullable"):
@@ -169,7 +178,8 @@ def render_wire_types_ts(contract: dict) -> str:
 
 def output_path() -> Path:
     return (
-        Path(__file__).resolve().parents[1] / "web" / "types" / "wireContract.gen.ts"
+        Path(__file__).resolve().parents[1]
+        / "web" / "sdk" / "types" / "wireContract.gen.ts"
     )
 
 

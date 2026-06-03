@@ -139,10 +139,7 @@ def knob_specs(sde: bool, loras=None) -> list:
             description="SDE periodicity",
         ))
     for lid in lora_ids:
-        specs.append(KnobSpec(
-            f"lora_str_{lid}", max_val=2.0, sensitivity=2.0,
-            description=f"Strength for LoRA {lid!r}",
-        ))
+        specs.append(lora_strength_spec(lid))
     specs.append(KnobSpec(
         "hint_strength", default=1.0, sensitivity=2.0,
         description="Structure (semantic hint) blend strength",
@@ -231,6 +228,31 @@ def knob_specs(sde: bool, loras=None) -> list:
     return specs
 
 
+def lora_strength_spec(lora_id: str) -> KnobSpec:
+    """The registry spec for one enabled LoRA's strength knob.
+
+    Factored out of :func:`knob_specs` because the session also allocates
+    this knob at runtime (when the client enables a LoRA mid-stream), and
+    the knob's shape must come from the registry in both cases rather
+    than being declared a second time at the enable site.
+    """
+    return KnobSpec(
+        f"lora_str_{lora_id}", max_val=2.0, sensitivity=2.0,
+        description=f"Strength for LoRA {lora_id!r}",
+    )
+
+
+def spec_to_knob_def(spec: KnobSpec) -> KnobDef:
+    """Project a registry :class:`KnobSpec` onto the :class:`KnobDef`
+    value type KnobState stores. The single conversion point, used by
+    :func:`build_banks` and the session's runtime LoRA-knob allocation."""
+    return KnobDef(
+        default=spec.default, sensitivity=spec.sensitivity,
+        max_val=spec.max_val, min_val=spec.min_val,
+        description=spec.description,
+    )
+
+
 def build_banks(sde: bool, loras=None) -> list:
     """Build the KnobState banks driving the streaming pipeline.
 
@@ -246,11 +268,7 @@ def build_banks(sde: bool, loras=None) -> list:
         if not spec.bank:
             continue
         bank_name = group_to_bank.get(spec.group, "Core")
-        grouped[bank_name][spec.name] = KnobDef(
-            default=spec.default, sensitivity=spec.sensitivity,
-            max_val=spec.max_val, min_val=spec.min_val,
-            description=spec.description,
-        )
+        grouped[bank_name][spec.name] = spec_to_knob_def(spec)
     return [KnobBank(name=bank_name, knobs=grouped[bank_name])
             for _g, bank_name in _BANKS]
 
@@ -271,11 +289,13 @@ def knob_catalog(sde: bool, loras=None) -> dict:
             "bank": spec.bank,
         }
         # min/max are only meaningful for the numeric types; enum/bool
-        # knobs carry their valid set in ``options`` instead.
+        # knobs carry their valid set in ``options`` instead. ``min`` is
+        # always emitted (the coercer floors at 0 when a spec leaves
+        # min_val unset) so consumers never need to know that implicit
+        # convention out-of-band.
         if spec.type in ("float", "int"):
             entry["max"] = spec.max_val
-            if spec.min_val is not None:
-                entry["min"] = spec.min_val
+            entry["min"] = spec.min_val if spec.min_val is not None else 0.0
         if spec.options:
             entry["options"] = list(spec.options)
         if spec.description:

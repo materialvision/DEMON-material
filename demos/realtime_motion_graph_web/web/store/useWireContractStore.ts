@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import type { WireContract } from "@/types/wireContract";
+import type { WireContract } from "@demon/client";
 
 // Holds the backend WebSocket wire contract fetched at boot
 // (GET /api/protocol). Seeded empty; RTMGBoot fills it. Any surface that

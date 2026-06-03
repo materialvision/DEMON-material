@@ -53,6 +53,7 @@ export const COMMAND_NAMES: readonly CommandName[] = [
 ] as const;
 
 export type EventName =
+  | "init_ack"
   | "ready"
   | "error"
   | "params_update"
@@ -73,6 +74,7 @@ export type EventName =
   | "structure_failed";
 
 export const EVENT_NAMES: readonly EventName[] = [
+  "init_ack",
   "ready",
   "error",
   "params_update",
@@ -217,6 +219,14 @@ export interface SwapSourceCommand {
 
 // ── Event payloads (server → client) ──
 
+export interface InitAckEvent {
+  type: "init_ack";
+  /** Server-minted session id, sent as soon as log context binds so client startup failures correlate with pod logs. */
+  session_id?: string;
+  /** The config client_id echoed back, or null when the client sent none. */
+  client_id?: string | null;
+}
+
 export interface ReadyEvent {
   type: "ready";
   duration: number;
@@ -353,20 +363,20 @@ export interface SessionConfigPayload {
   depth?: number;
   steps?: number;
   prompt?: string;
-  prompt_b?: string;
+  prompt_b?: string | null;
   fast_vae?: boolean;
   walk_window?: boolean;
   walk_window_s?: number;
   lead_floor_s?: number;
   lead_ceiling_s?: number;
   lead_release_tau_s?: number;
-  fixture_name?: string;
+  fixture_name?: string | null;
   use_server_fixture?: boolean;
-  stem_source_mode?: string;
+  stem_source_mode?: string | null;
   enabled_loras?: unknown[];
   lora_strengths?: Record<string, unknown>;
   lora_paths?: unknown[];
-  client_id?: string;
+  client_id?: string | null;
   // SessionConfig is permissive; extras pass through.
   [k: string]: unknown;
 }
@@ -420,6 +430,7 @@ export type WireCommand =
   | SwapSourceCommand;
 
 export type WireEvent =
+  | InitAckEvent
   | ReadyEvent
   | ErrorEvent
   | ParamsUpdateEvent
