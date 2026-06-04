@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { WsReconnector, type ReconnectAttempt } from "@/engine/wsReconnect";
+import { WsReconnector, type ReconnectAttempt } from "@demon/client";
 
 describe("WsReconnector", () => {
   beforeEach(() => {

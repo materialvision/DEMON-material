@@ -66,11 +66,12 @@ the **diff between builds**, not the pass/fail.
 
 ## Refactor portability
 
-These tests import the app through the same `@/engine/...`,
-`@/store/...`, `@/types/...` aliases the app itself uses. When the SDK
-refactor moves `engine/protocol.ts` to `sdk/`, the port is the
-mechanical import-path rename plus `vitest.config.ts` / `tsconfig.json`
-alias updates — no test logic changes.
+These tests import the SDK surface (RemoteBackend, AudioPlayer,
+WsReconnector, protocol types/constants) through the same
+`@demon/client` alias the app itself uses, plus `@/store/...` for the
+app stores. The SDK extraction (`engine/protocol.ts` -> `sdk/`) was
+absorbed as a mechanical import-path rename plus a `vitest.config.ts`
+alias entry — no test logic changes.
 
 ## Browser test hooks
 

@@ -19,12 +19,12 @@
 
 import { describe, expect, it } from "vitest";
 
-import { RemoteBackend } from "@/engine/protocol";
+import { RemoteBackend } from "@demon/client";
 import type {
   AudioSlice,
   SessionConfig,
   SwapReadyDetail,
-} from "@/types/protocol";
+} from "@demon/client";
 
 import {
   BufferMirror,
