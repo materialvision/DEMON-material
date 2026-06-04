@@ -33,6 +33,12 @@ READY_S = _ceiling("DEMON_LAT_CEILING_READY_S", 240.0)         # cold init
 FIRST_SLICE_S = _ceiling("DEMON_LAT_CEILING_FIRST_SLICE_S", 20.0)
 SLICE_GAP_P95_MS = _ceiling("DEMON_LAT_CEILING_SLICE_GAP_P95_MS", 3000.0)
 ACTION_TO_SLICE_MS = _ceiling("DEMON_LAT_CEILING_ACTION_SLICE_MS", 5000.0)
+# Knob-to-ear, full-effect bound (playhead reaches the action-time
+# generation frontier). Dominated by the playback-lead buffer (~0.2 s at
+# depth 4 on the reference 5090) plus enqueue depth; a chunk-scale
+# architecture would put this at whole-chunk latency, far above this.
+ACTION_TO_AUDIBLE_MS = _ceiling("DEMON_LAT_CEILING_ACTION_AUDIBLE_MS",
+                                8000.0)
 REALTIME_FACTOR_MIN = _ceiling("DEMON_LAT_FLOOR_REALTIME_FACTOR", 1.0)
 
 
@@ -83,6 +89,10 @@ def test_latency_envelope(name, scenario_runs):
         elif gap > ACTION_TO_SLICE_MS:
             problems.append(f"{a['kind']}->next-slice {gap}ms > "
                             f"{ACTION_TO_SLICE_MS}ms")
+        audible = a.get("audible_full_ms")
+        if audible is not None and audible > ACTION_TO_AUDIBLE_MS:
+            problems.append(f"{a['kind']}->audible(full) {audible}ms > "
+                            f"{ACTION_TO_AUDIBLE_MS}ms")
 
     assert not problems, (
         f"{name} blew a latency ceiling (report: {out}):\n"

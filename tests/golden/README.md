@@ -103,6 +103,19 @@ full percentile detail to `runs/latency-reports/latency-<scenario>.json`
 for diffing between builds. Treat the diff, not the pass/fail, as the
 interesting output.
 
+Each fired action also carries **knob-to-ear** numbers, derived from the
+recorded slices against the runner's simulated 1.0x playhead:
+`audible_first_ms` (playhead reaches the first post-action slice ahead
+of it — the effect starts ramping in, since in-flight windows refine
+their remaining steps with the new params) and `audible_full_ms`
+(playhead reaches the action-time generation frontier — windows past it
+got every denoise step with the new params). Reference point: the
+knob_step baseline on the 5090 at depth 4 measures 234 / 594 ms. The
+dominant term is the playback-lead buffer, which is the architectural
+quantity worth watching; the ceiling
+(`DEMON_LAT_CEILING_ACTION_AUDIBLE_MS`, default 8000) only trips on a
+chunk-scale regression.
+
 ## Transcripts
 
 Every run records `transcript.jsonl` + `blobs/` — the full wire session

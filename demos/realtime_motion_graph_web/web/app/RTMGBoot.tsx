@@ -3,6 +3,7 @@
 import { installDemonDebug } from "@/engine/debugReconnect";
 import { listLoras } from "@/engine/lora/listLoras";
 import { setEngineUrlBuilder } from "@/engine/rtmgConfig";
+import { installTestHooks } from "@/engine/testHooks";
 import { applyConfig, loadConfig } from "@/lib/config";
 import { useLoraStore } from "@/store/useLoraStore";
 import type { LoraCatalogEntry } from "@/types/protocol";
@@ -34,6 +35,10 @@ if (typeof window !== "undefined") {
   // it available in prod also lets us hot-test the reconnect path
   // against a live pod without needing a separate build.
   installDemonDebug();
+  // Same posture for the e2e observation hooks on window.__demonTest:
+  // installing is just assigning an object of store-reading closures;
+  // nothing runs until a test (or a curious operator) calls into it.
+  installTestHooks();
   void (async () => {
     const [cfg, catalog] = await Promise.all([
       loadConfig(),

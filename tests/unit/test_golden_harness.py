@@ -163,3 +163,46 @@ def test_audio_metrics_identity_and_perturbation():
     diff = audio_metrics(ref, bad)
     assert diff["mel_l2"] > 0.5
     assert diff["win_cos_min"] < 0.9
+
+
+def test_action_audible_bounds():
+    """Knob-to-ear computation: playhead (wall - ready_at) reaching the
+    first post-action slice ahead of it (lower bound) and the action-time
+    frontier (full effect), gated on content arrival."""
+    from types import SimpleNamespace
+
+    from tests.golden.runner import _action_audible
+
+    ready_at = 10.0
+
+    def sl(recv_at, start_s):
+        return SimpleNamespace(recv_at=recv_at,
+                               start_sample=int(start_s * SR))
+
+    # Action at wall 15.0 -> playhead 5.0s; frontier already at 6.0s.
+    entry = {"sent_wall": 15.0, "frontier_s": 6.0, "slices_before": 1}
+    slices = [
+        sl(14.9, 4.0),   # pre-action: excluded via slices_before
+        sl(15.05, 5.2),  # first post-action content ahead of playhead
+        sl(15.10, 6.5),  # first content past the action-time frontier
+    ]
+    out = _action_audible(ready_at, slices, entry)
+    # Playhead reaches 5.2s at wall 15.2 (arrival 15.05 is earlier).
+    assert out["audible_first_ms"] == pytest.approx(200.0)
+    # Full effect anchors at the action-time FRONTIER (6.0s): playhead
+    # reaches it at wall 16.0; the covering slice arrived earlier.
+    assert out["audible_full_ms"] == pytest.approx(1000.0)
+
+    # Arrival can dominate: content lands AFTER the playhead got there.
+    late = [sl(18.0, 5.2), sl(18.0, 6.0)]
+    entry2 = {"sent_wall": 15.0, "frontier_s": 6.0, "slices_before": 0}
+    out2 = _action_audible(ready_at, late, entry2)
+    assert out2["audible_first_ms"] == pytest.approx(3000.0)  # 18.0 - 15.0
+    assert out2["audible_full_ms"] == pytest.approx(3000.0)
+
+    # No qualifying content recorded -> None, not a crash.
+    out3 = _action_audible(ready_at, [sl(15.1, 4.5)],
+                           {"sent_wall": 15.0, "frontier_s": 6.0,
+                            "slices_before": 0})
+    assert out3["audible_first_ms"] is None
+    assert out3["audible_full_ms"] is None

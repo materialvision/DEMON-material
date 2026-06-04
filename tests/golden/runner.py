@@ -129,6 +129,53 @@ _ACK_EVENT = {
 }
 
 
+def _action_audible(ready_at: float, slices: list, entry: dict) -> dict:
+    """Knob-to-ear latency for one fired action, from recorded data.
+
+    The playhead is the runner's simulated 1.0x clock (position =
+    wall - ready_at, the same value sent as ``playback_pos``). An action
+    becomes audible when the playhead reaches re-generated content, so:
+
+    * ``audible_first_ms`` — lower bound: the playhead reaches the start
+      of the first post-action slice that landed ahead of where the
+      playhead was at send time. Windows already in flight refine their
+      REMAINING denoise steps with the new params, so this is where the
+      effect starts ramping in (partially refined).
+    * ``audible_full_ms`` — upper bound: the playhead reaches the
+      generation frontier as of the send. Windows past that point enter
+      the pipeline after the action and get EVERY step with the new
+      params — full effect from here on.
+
+    Both take max(arrival, playhead-reaches-position): content can't be
+    heard before it lands in the buffer, nor before the playhead gets
+    there. Values are None when no qualifying slice was recorded.
+    ``swap`` actions are excluded by the caller (the audible event for a
+    swap is the buffer crossfade itself; ``ack_gap_ms`` covers it).
+    """
+    sent = entry["sent_wall"]
+    pos_at_send = sent - ready_at
+    later = slices[entry["slices_before"]:]
+    out: dict = {"audible_first_ms": None, "audible_full_ms": None}
+
+    first = next((s for s in later
+                  if s.recv_at >= sent
+                  and s.start_sample / SAMPLE_RATE > pos_at_send), None)
+    if first is not None:
+        heard = max(first.recv_at,
+                    ready_at + first.start_sample / SAMPLE_RATE)
+        out["audible_first_ms"] = round((heard - sent) * 1000.0, 1)
+
+    frontier = entry.get("frontier_s")
+    if frontier is not None:
+        cover = next((s for s in later
+                      if s.recv_at >= sent
+                      and s.start_sample / SAMPLE_RATE >= frontier), None)
+        if cover is not None:
+            heard = max(cover.recv_at, ready_at + frontier)
+            out["audible_full_ms"] = round((heard - sent) * 1000.0, 1)
+    return out
+
+
 # ── core ────────────────────────────────────────────────────────────────
 
 def run_scenario(pod_url: str, sc: Scenario, out_dir: Path,
@@ -297,6 +344,12 @@ def _finalize(client: GoldenClient, sc: Scenario, fired: list,
                     if s.recv_at >= sent), None)
         entry["next_slice_gap_ms"] = (round((nxt - sent) * 1000.0, 1)
                                       if nxt is not None else None)
+        # Knob-to-ear: when the simulated playhead reaches re-generated
+        # content (first-touched lower bound / past-frontier full
+        # effect). Not meaningful for swap (the crossfade IS the event).
+        if entry["kind"] != "swap" and client.ready_at is not None:
+            entry.update(_action_audible(
+                client.ready_at, client.slices, entry))
     out["actions"] = fired
 
     # Stream-level timing.
