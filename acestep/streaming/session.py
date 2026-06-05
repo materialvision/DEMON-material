@@ -93,6 +93,7 @@ from acestep.streaming.knobs import (
     knob_specs,
     lora_strength_spec,
 )
+from acestep.streaming.families import make_backend
 from acestep.streaming.pipeline_runner import PipelineRunner
 from acestep.streaming.source import (
     _normalize_time_signature,
@@ -506,21 +507,23 @@ class StreamingSession:
         event bus.
         """
         try:
+            # Backend + runner construction stays inside the try so a
+            # setup failure still reaches the finally's close(), but it
+            # is NOT inside the run() swallow-path below: constructor
+            # errors propagate to the caller (warmup must see them).
+            backend = make_backend(
+                getattr(self.config, "backend", "acestep") or "acestep", self,
+            )
             runner = PipelineRunner(
-                self.session, self.stream, self.audio_eng,
+                backend, self.audio_eng,
                 state=self.state,
+                # The backend clamps vae_window to the Session's effective
+                # post-engine-profile value; the runner's slice scheduling
+                # must match the slice length the backend actually renders.
+                vae_window=backend.vae_window,
                 idle_threshold_s=IDLE_PAUSE_S,
-                use_midi=True,  # always "MIDI" mode; KnobState provides values
-                use_sde=self.use_sde, use_lora=self.use_lora,
-                midi_knobs=self.virtual_knobs,
-                engine_obj=self.engine_obj,
-                vae_window=self.vae_window, crop_seconds=self.crop_seconds,
-                k1_name=self.k1_name, seed=1528, skip_threshold=5e-4,
                 on_audio_ready=self._on_audio_ready,
                 before_tick=self.apply_pending,
-                walk_window=self.walk_window,
-                walk_window_s=self.walk_window_s,
-                neg_conditioning=self.cond_negative,
                 lead_floor_s=self.config.lead_floor_s,
                 lead_ceiling_s=self.config.lead_ceiling_s,
                 lead_release_tau_s=self.config.lead_release_tau_s,

@@ -382,6 +382,7 @@ export interface SessionConfigPayload {
   lora_strengths?: Record<string, unknown>;
   lora_paths?: unknown[];
   client_id?: string | null;
+  backend?: string;
   // SessionConfig is permissive; extras pass through.
   [k: string]: unknown;
 }
