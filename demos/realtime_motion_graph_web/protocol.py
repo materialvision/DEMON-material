@@ -11,6 +11,11 @@ from typing import Any
 
 import numpy as np
 
+# Legacy module constants. Since the Phase-2 contract surface, the
+# DECLARED truth for a session's audio shape is the backend-sourced
+# ``ready.geometry`` block (sample_rate / channels / chunk_rate_hz /
+# duration_s); these constants remain for the ACE-only code paths and
+# tooling that predate it.
 SAMPLE_RATE = 48000
 T = 1500  # 60s at 25fps latents
 CROSSFADE_SECONDS = 0.025
@@ -173,6 +178,14 @@ class CommandSpec:
     # only set_knobs and set_prompt_blend are origin-aware).
     origin_sensitive: bool = False
     echo_event: str = ""           # mirror event for EXTERNAL sends
+    # Backend capability this command needs (a Capabilities field name,
+    # acestep.streaming.generator_backend). On a backend whose mask lacks
+    # it, the session rejects the command with the typed ``command_failed``
+    # event instead of applying it (plan §3.4 — loud failure, never a
+    # silent no-op). "" = universal command, every backend honors it.
+    # Drift-guarded: every tagged command must have a matching
+    # @requires_capability gate on its StreamingSession operation.
+    requires: str = ""
     description: str = ""
 
 
@@ -216,6 +229,7 @@ COMMANDS: tuple = (
             FieldSpec("end_sec", "float", nullable=True,
                       description="Loop end in seconds; null/degenerate clears."),
         ),
+        requires="loop_band",
         description="Arm / move / clear the playback loop band.",
     ),
     CommandSpec(
@@ -258,6 +272,7 @@ COMMANDS: tuple = (
         fields=(FieldSpec("value", "int", required=True,
                           description="Target ring depth; clamped to "
                                       "[1, max_pipeline_depth]."),),
+        requires="depth",
         description="Live pipeline_depth retune. Echoed back as depth_applied.",
     ),
     CommandSpec(
@@ -268,11 +283,13 @@ COMMANDS: tuple = (
             FieldSpec("strength", "float",
                       description="Target strength the refit lands at."),
         ),
+        requires="lora",
         description="Enable a LoRA; allocates a lora_str_<id> knob.",
     ),
     CommandSpec(
         "disable_lora",
         fields=(FieldSpec("id", "str", required=True),),
+        requires="lora",
         description="Disable a LoRA and drop its lora_str_<id> knob.",
     ),
     CommandSpec(
@@ -280,6 +297,7 @@ COMMANDS: tuple = (
         fields=(FieldSpec("value", "float", required=True, default=1.0,
                           description="1.0 = full reference, 0.0 = silence "
                                       "baseline. Clamped to [0,1]."),),
+        requires="timbre",
         description="Blend the cached (silence, full) timbre conditioning pair.",
     ),
     CommandSpec(
@@ -287,6 +305,7 @@ COMMANDS: tuple = (
         fields=(FieldSpec("name", "str", default="timbre",
                           description="Label echoed back in timbre_set."),),
         binary=True,
+        requires="timbre",
         description="Upload audio as the timbre reference. " + _PCM_FRAME +
                     " Acked by timbre_set / timbre_failed.",
     ),
@@ -294,11 +313,13 @@ COMMANDS: tuple = (
         "set_timbre_fixture",
         fields=(FieldSpec("name", "str", required=True,
                           description="Fixture name (see /api/fixtures)."),),
+        requires="timbre",
         description="Use a server-side fixture as the timbre reference (no "
                     "upload round-trip).",
     ),
     CommandSpec(
         "clear_timbre_source",
+        requires="timbre",
         description="Drop the timbre override; fall back to self-timbre. Acked "
                     "by timbre_cleared.",
     ),
@@ -307,6 +328,7 @@ COMMANDS: tuple = (
         fields=(FieldSpec("name", "str", default="structure",
                           description="Label echoed back in structure_set."),),
         binary=True,
+        requires="structure",
         description="Upload audio as the structure (semantic-hint) reference. "
                     + _PCM_FRAME + " Acked by structure_set / structure_failed.",
     ),
@@ -314,11 +336,13 @@ COMMANDS: tuple = (
         "set_structure_fixture",
         fields=(FieldSpec("name", "str", required=True,
                           description="Fixture name (see /api/fixtures)."),),
+        requires="structure",
         description="Use a server-side fixture as the structure reference (no "
                     "upload round-trip).",
     ),
     CommandSpec(
         "clear_structure_source",
+        requires="structure",
         description="Drop the structure override; restore the source's own "
                     "context_latent. Acked by structure_cleared.",
     ),
@@ -343,6 +367,7 @@ COMMANDS: tuple = (
         ),
         binary=True,
         binary_optional=True,
+        requires="swap",
         description="Replace the playback source in-flight. A binary PCM frame "
                     "follows UNLESS use_server_source is set. Acked by "
                     "swap_ready (+ binary buffer) / swap_failed.",
@@ -387,6 +412,33 @@ EVENTS: tuple = (
             FieldSpec("session_id", "str",
                       description="Server-minted session id, echoed for "
                                   "client/analytics log correlation."),
+            # Phase-2 contract surface (backend-seam plan §3.1–3.3).
+            # Wire-optional: golden replay transcripts recorded before
+            # Phase 2 lack them, and the client falls back to its
+            # constants / /api/knobs when absent.
+            FieldSpec("geometry", "dict",
+                      description="Backend-declared audio geometry: "
+                                  "{sample_rate, channels, chunk_rate_hz, "
+                                  "duration_s|null}. chunk_rate_hz is the "
+                                  "generation cadence (latent fps for "
+                                  "diffusion, frame rate for AR models); "
+                                  "duration_s null is reserved for endless "
+                                  "streams."),
+            FieldSpec("capabilities", "dict",
+                      description="Backend capability mask: {capability: "
+                                  "bool} over the Capabilities fields "
+                                  "(swap, timbre, structure, lora, ...). "
+                                  "Client panels and MCP tools gate on it; "
+                                  "commands tagged with a matching "
+                                  "`requires` fail with command_failed "
+                                  "when the bit is false."),
+            FieldSpec("knob_manifest", "dict",
+                      description="Per-session knob manifest: the same "
+                                  "{version, knobs} envelope GET /api/knobs "
+                                  "serves, but backend-owned and session-"
+                                  "resolved (SDE mode, enabled lora_str_<id> "
+                                  "knobs). /api/knobs remains the static "
+                                  "pre-session probe."),
         ),
         binary_follow=True,
         description="First JSON after the upload handshake, followed by the "
@@ -514,6 +566,24 @@ EVENTS: tuple = (
                     'emitted when a swap drops a structure override ("dropped '
                     'after swap: ...").',
     ),
+    EventSpec(
+        "command_failed",
+        fields=(
+            FieldSpec("command", "str", required=True,
+                      description="The rejected command's wire name."),
+            FieldSpec("requires", "str", required=True,
+                      description="The Capabilities field the command needs "
+                                  "and the session's backend doesn't "
+                                  "declare."),
+            FieldSpec("error", "str",
+                      description="Human-readable reason."),
+        ),
+        description="A `requires`-tagged command was rejected because the "
+                    "session's backend lacks the capability (loud failure, "
+                    "never a silent no-op). The command was NOT applied. "
+                    "With only the acestep backend registered this fires "
+                    "solely for LoRA commands on a lora-disabled session.",
+    ),
 )
 
 COMMAND_NAMES = frozenset(c.name for c in COMMANDS)
@@ -604,6 +674,8 @@ def _command_catalog_of(specs) -> dict:
         }
         if c.echo_event:
             entry["echo_event"] = c.echo_event
+        if c.requires:
+            entry["requires"] = c.requires
         out[c.name] = entry
     return out
 

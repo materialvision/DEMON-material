@@ -38,8 +38,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import ExitStack
+
+import functools
 import os
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -72,6 +75,7 @@ from acestep.streaming.config import SessionConfig
 from acestep.streaming.encode import blend_for_strength, encode_cond_pair
 from acestep.streaming.events import (
     AudioReady,
+    CommandFailed,
     DepthApplied,
     EventBus,
     LoraCatalogUpdate,
@@ -88,12 +92,15 @@ from acestep.streaming.events import (
     TimbreSet,
 )
 from acestep.streaming.knobs import (
+    KNOB_SCHEMA_VERSION,
     KnobState,
+    catalog_from_specs,
     coerce_knob_values,
     knob_specs,
     lora_strength_spec,
 )
 from acestep.streaming.families import make_backend
+from acestep.streaming.generator_backend import UnsupportedOperation
 from acestep.streaming.pipeline_runner import PipelineRunner
 from acestep.streaming.source import (
     _normalize_time_signature,
@@ -284,6 +291,51 @@ def extract_and_select_upload_stem(
 
 
 # ---------------------------------------------------------------------------
+# Capability gate
+# ---------------------------------------------------------------------------
+
+
+def requires_capability(capability: str, command: str):
+    """Gate a session operation on the backend's capability mask.
+
+    ``capability`` is the :class:`~acestep.streaming.generator_backend.
+    Capabilities` field the operation needs; ``command`` is the wire
+    command name carrying the matching ``requires`` tag in the
+    wire-contract registry (``demos/realtime_motion_graph_web/
+    protocol.py``). The drift guard in ``tests/unit/test_wire_contract``
+    AST-parses these decorators and asserts the mapping matches the
+    registry's tagged commands exactly, so a tagged command can't ship
+    without defined failure behavior (and vice versa).
+
+    On an unsupported backend the wrapped operation does NOT run; the
+    session maps the :class:`UnsupportedOperation` to a typed
+    :class:`CommandFailed` event instead (plan §3.4 — loud failure,
+    never a silent no-op). ``UnsupportedOperation`` raised from inside
+    the operation (a future backend's own control method) maps the
+    same way.
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(self, *args, **kwargs):
+            try:
+                self._require_capability(capability, command)
+                return fn(self, *args, **kwargs)
+            except UnsupportedOperation as exc:
+                logger.warning(
+                    "command_unsupported command={} requires={} backend={}",
+                    command, exc.capability, self.backend.name,
+                )
+                self.bus.publish(CommandFailed(
+                    command=command,
+                    requires=exc.capability,
+                    error=str(exc),
+                ))
+                return None
+        return wrapper
+    return deco
+
+
+# ---------------------------------------------------------------------------
 # StreamingSession
 # ---------------------------------------------------------------------------
 
@@ -398,6 +450,16 @@ class StreamingSession:
         # methods publish; transport adapters subscribe and serialize.
         self.bus = EventBus()
 
+        # The session's GeneratorBackend, selected by SessionConfig.backend
+        # via the family registry. Constructed here (not in run()) so the
+        # contract surface — capabilities()/geometry()/knob_specs() — is
+        # readable for the wire ``ready`` frame and the session snapshot
+        # before the runner starts, and so an unknown family fails at
+        # session create (config-time, per families.make_backend).
+        self.backend = make_backend(
+            getattr(config, "backend", "acestep") or "acestep", self,
+        )
+
         # Cached {name: KnobSpec} map for hot-path validation in set_knobs.
         # knob_specs() rebuilds 34 dataclasses, so we never call it per tick;
         # rebuilt only when the LoRA set changes (see _apply_lora_pending).
@@ -406,9 +468,23 @@ class StreamingSession:
         self._rebuild_knob_specs(self.initial_enable_ids)
 
     def _rebuild_knob_specs(self, lora_ids: list) -> None:
+        # Backend-owned manifest: which specs the LoRA set expands to is
+        # family knowledge behind the seam; the session only tracks the
+        # enabled-id list.
         self._knob_specs_by_name = {
-            s.name: s for s in knob_specs(self.use_sde, loras=list(lora_ids or []))
+            s.name: s for s in self.backend.knob_specs(list(lora_ids or []))
         }
+
+    def _require_capability(self, capability: str, command: str) -> None:
+        """Raise :class:`UnsupportedOperation` when the backend's
+        capability mask doesn't include ``capability``. The single
+        check behind :func:`requires_capability`."""
+        if not getattr(self.backend.capabilities(), capability):
+            raise UnsupportedOperation(
+                capability,
+                f"backend {self.backend.name!r} does not support "
+                f"{command!r} (requires capability {capability!r})",
+            )
 
     def _enabled_lora_ids(self) -> list:
         if not (self.use_lora and self.engine_obj is not None):
@@ -416,6 +492,37 @@ class StreamingSession:
         return [d.id for d in self.engine_obj.list_loras() if d.state == "enabled"]
 
     # ---- Snapshot / catalog helpers -------------------------------------
+
+    def geometry_payload(self) -> dict:
+        """Wire-shaped geometry block (plan §3.2), declared by the
+        backend. Replaces deriving sample rate / latent cadence from
+        client-side constants; ``duration_s`` is null for endless
+        streams (reserved v2 ``append`` shape)."""
+        g = self.backend.geometry()
+        return {
+            "sample_rate": g.sample_rate,
+            "channels": g.channels,
+            "chunk_rate_hz": g.chunk_rate_hz,
+            "duration_s": g.duration_s,
+        }
+
+    def capabilities_payload(self) -> dict:
+        """Wire-shaped capability mask (plan §3.1), declared by the
+        backend. Consumed by client panel gating and the session's own
+        capability gate (:func:`requires_capability`)."""
+        return asdict(self.backend.capabilities())
+
+    def knob_manifest_payload(self) -> dict:
+        """The per-session knob manifest (plan §3.3): the same
+        ``{version, knobs}`` envelope ``GET /api/knobs`` serves, but
+        projected from this session's LIVE spec map — backend-owned,
+        SDE-mode-resolved, including the enabled ``lora_str_<id>``
+        knobs. ``/api/knobs`` stays for the replay server and static
+        tooling; this is the gated per-session truth."""
+        return {
+            "version": KNOB_SCHEMA_VERSION,
+            "knobs": catalog_from_specs(self._knob_specs_by_name.values()),
+        }
 
     def lora_catalog_payload(self) -> list:
         """Wire-shaped LoRA catalog for the active engine. Empty list
@@ -475,6 +582,13 @@ class StreamingSession:
             # schema validation) reproduce the knob set without sniffing
             # knob names out of knob_values.
             "sde": self.use_sde,
+            # Phase-2 contract surface, mirroring the wire ``ready``
+            # frame (plan §3.1–3.3). The manifest here tracks the LIVE
+            # knob universe (runtime LoRA toggles included), unlike the
+            # ready frame's session-start copy.
+            "geometry": self.geometry_payload(),
+            "capabilities": self.capabilities_payload(),
+            "knob_manifest": self.knob_manifest_payload(),
         }
 
     # ---- Runner lifecycle ----------------------------------------------
@@ -507,13 +621,11 @@ class StreamingSession:
         event bus.
         """
         try:
-            # Backend + runner construction stays inside the try so a
-            # setup failure still reaches the finally's close(), but it
-            # is NOT inside the run() swallow-path below: constructor
+            # Runner construction stays inside the try so a setup
+            # failure still reaches the finally's close(), but it is
+            # NOT inside the run() swallow-path below: constructor
             # errors propagate to the caller (warmup must see them).
-            backend = make_backend(
-                getattr(self.config, "backend", "acestep") or "acestep", self,
-            )
+            backend = self.backend
             runner = PipelineRunner(
                 backend, self.audio_eng,
                 state=self.state,
@@ -1214,6 +1326,7 @@ class StreamingSession:
             except Exception:
                 pass
 
+    @requires_capability("loop_band", "loop_band")
     def set_loop_band(
         self,
         start_sec: float | None,
@@ -1333,6 +1446,7 @@ class StreamingSession:
             origin.value, path, method,
         )
 
+    @requires_capability("depth", "set_depth")
     def set_depth(
         self,
         value: int,
@@ -1350,6 +1464,7 @@ class StreamingSession:
             "set_depth_requested origin={} value={}", origin.value, v,
         )
 
+    @requires_capability("lora", "enable_lora")
     def enable_lora(
         self,
         lora_id: str,
@@ -1368,6 +1483,7 @@ class StreamingSession:
             origin.value, lora_id, strength,
         )
 
+    @requires_capability("lora", "disable_lora")
     def disable_lora(
         self,
         lora_id: str,
@@ -1382,6 +1498,7 @@ class StreamingSession:
             origin.value, lora_id,
         )
 
+    @requires_capability("timbre", "set_timbre_strength")
     def set_timbre_strength(
         self,
         value: float,
@@ -1400,6 +1517,7 @@ class StreamingSession:
             origin.value, v,
         )
 
+    @requires_capability("timbre", "set_timbre_source")
     def set_timbre_source(
         self,
         audio: Audio,
@@ -1418,6 +1536,7 @@ class StreamingSession:
                 "source",
             )
 
+    @requires_capability("timbre", "set_timbre_fixture")
     def set_timbre_fixture(
         self,
         name: str,
@@ -1435,6 +1554,7 @@ class StreamingSession:
                 "fixture",
             )
 
+    @requires_capability("timbre", "clear_timbre_source")
     def clear_timbre_source(
         self,
         *,
@@ -1465,6 +1585,7 @@ class StreamingSession:
         self.bus.publish(TimbreCleared())
         logger.info("timbre_cleared origin={}", origin.value)
 
+    @requires_capability("structure", "set_structure_source")
     def set_structure_source(
         self,
         audio: Audio,
@@ -1487,6 +1608,7 @@ class StreamingSession:
                 "source",
             )
 
+    @requires_capability("structure", "set_structure_fixture")
     def set_structure_fixture(
         self,
         name: str,
@@ -1505,6 +1627,7 @@ class StreamingSession:
                 "fixture",
             )
 
+    @requires_capability("structure", "clear_structure_source")
     def clear_structure_source(
         self,
         *,
@@ -1518,6 +1641,7 @@ class StreamingSession:
         self.bus.publish(StructureCleared())
         logger.info("structure_cleared origin={}", origin.value)
 
+    @requires_capability("swap", "swap_source")
     def swap_source(
         self,
         audio: Audio,

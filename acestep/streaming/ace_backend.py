@@ -35,7 +35,11 @@ from acestep.streaming.generator_backend import (
     ProduceMode,
     TickContext,
 )
-from acestep.streaming.knobs import CHANNEL_GROUPS, KEYSTONE_CHANNELS
+from acestep.streaming.knobs import (
+    CHANNEL_GROUPS,
+    KEYSTONE_CHANNELS,
+    knob_specs as registry_knob_specs,
+)
 
 # Audio sample rate the ACE-Step v1.5 family is trained on, and the
 # latent frame count for a 60 s window at the tokenizer's 25 fps. Model
@@ -286,6 +290,15 @@ class ACEStepBackend:
         # No opinion beyond the runner's historical defaults; the
         # SessionConfig lead_* fields keep overriding per session.
         return LeadProfile()
+
+    def knob_specs(self, lora_ids=()) -> list:
+        """The ACE-family manifest: the shared registry's spec list,
+        parameterized by this session's SDE mode and the enabled-LoRA
+        set the session passes in (see the protocol docstring)."""
+        return registry_knob_specs(
+            self.use_sde,
+            loras=list(lora_ids) if self.use_lora else [],
+        )
 
     # ---- public hooks reachable from session ops ---------------------------
 

@@ -32,9 +32,11 @@ from acestep.streaming.generator_backend import TickContext
 # call sites — see tests/, scripts/) so this module stays free of demo
 # imports. ``T`` is the latent frame count for a 60 s window at the
 # tokenizer's 25 fps; both constants are model invariants the runner
-# uses as plain magic numbers. (Phase 2 of the backend-seam plan moves
-# the client-visible copies onto the wire via the geometry block; the
-# runner's pacing math will then read backend.geometry().)
+# uses as plain magic numbers. (Phase 2 of the backend-seam plan put
+# the client-visible truth on the wire — ``ready.geometry``, declared
+# by the backend; these copies remain the runner's internal pacing
+# constants and switch to backend.geometry() only when a non-48k
+# family actually lands behind this loop.)
 SAMPLE_RATE = 48000
 T = 1500
 

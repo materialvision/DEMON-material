@@ -57,6 +57,7 @@ from acestep.streaming.commands import CommandOrigin
 from acestep.streaming.config import SessionConfig
 from acestep.streaming.events import (
     AudioReady,
+    CommandFailed,
     DepthApplied,
     LoraCatalogUpdate,
     ParamsEcho,
@@ -553,6 +554,13 @@ def _handle_client_body(
             _send_json({"type": "lora_catalog", "catalog": event.catalog})
         elif isinstance(event, DepthApplied):
             _send_json({"type": "depth_applied", "value": event.value})
+        elif isinstance(event, CommandFailed):
+            _send_json({
+                "type": "command_failed",
+                "command": event.command,
+                "requires": event.requires,
+                "error": event.error,
+            })
         elif isinstance(event, TimbreSet):
             _send_json({
                 "type": "timbre_set", "name": event.name,
@@ -603,6 +611,13 @@ def _handle_client_body(
         "pipeline_depth": state.current_depth,
         "max_pipeline_depth": streaming.max_pipeline_depth,
         "session_id": session_id,
+        # Phase-2 contract surface, declared by the session's backend
+        # (plan §3.1–3.3). The legacy flat duration/sample_rate/channels
+        # fields above stay as-is for old clients; geometry is the
+        # backend-declared truth new clients read instead of constants.
+        "geometry": streaming.geometry_payload(),
+        "capabilities": streaming.capabilities_payload(),
+        "knob_manifest": streaming.knob_manifest_payload(),
     }))
     ws.send(src_np.astype(np.float16).tobytes())
     if streaming.initial_upload_stems is not None:

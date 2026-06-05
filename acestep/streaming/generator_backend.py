@@ -45,6 +45,12 @@ working code:
   (it owns the device synchronization points); the runner reads
   :attr:`~GeneratorBackend.last_tick_ms` / :attr:`~GeneratorBackend.last_dec_ms`
   only for its latency trace line.
+* :meth:`~GeneratorBackend.knob_specs` takes the session's enabled-LoRA
+  id list instead of the plan's no-arg sketch: the enabled set is
+  session-tracked state (pending initial enables at ``ready`` time,
+  live toggles afterwards) that the backend cannot observe on its own,
+  while WHICH specs that set expands to stays family knowledge behind
+  the seam.
 
 Transport-agnostic: numpy in, numpy out. No demo imports.
 """
@@ -63,6 +69,22 @@ import numpy as np
 #   "skip":     stall deferral — run the prepare path but produce
 #               nothing; the runner gap-fills from cached state.
 ProduceMode = Literal["generate", "reuse", "skip"]
+
+
+class UnsupportedOperation(Exception):
+    """A capability-gated operation was invoked on a backend whose
+    :class:`Capabilities` mask doesn't include it.
+
+    Raised by the session's capability gate (and, for future backends,
+    by backend control methods themselves) and mapped by the session to
+    the typed ``command_failed`` wire event — never a silent no-op
+    (plan §3.4). ``capability`` is the :class:`Capabilities` field name
+    the operation requires.
+    """
+
+    def __init__(self, capability: str, message: str = ""):
+        super().__init__(message or f"requires capability {capability!r}")
+        self.capability = capability
 
 
 @dataclass(frozen=True)
@@ -186,6 +208,20 @@ class GeneratorBackend(Protocol):
     def geometry(self) -> AudioGeometry: ...
 
     def lead_profile(self) -> LeadProfile: ...
+
+    def knob_specs(self, lora_ids=()) -> list:
+        """The backend-owned knob manifest: the list of ``KnobSpec``
+        (:mod:`acestep.streaming.knobs`) this backend exposes for the
+        current session. Family knowledge lives here; the shared
+        registry module stays pure schema/coercion machinery.
+
+        ``lora_ids`` is the session's enabled-LoRA id set (the initial
+        enable set at session start, the live set after runtime
+        toggles) — session-tracked state the backend folds into its
+        per-id strength knobs. Backends without the ``lora``
+        capability ignore it.
+        """
+        ...
 
     # ---- hot loop --------------------------------------------------------
 

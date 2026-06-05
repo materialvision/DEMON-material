@@ -105,6 +105,33 @@ export interface SwapReadyDetail extends SwapReadyEvent {
   interleaved: Float32Array;
 }
 
+/** Backend-declared audio geometry, carried in `ready.geometry` (the
+ *  contract types it as a plain dict; this is the client-side
+ *  refinement). Servers from before the backend-seam contract surface
+ *  omit it — fall back to the legacy flat ready fields / constants. */
+export interface ReadyGeometry {
+  sample_rate: number;
+  channels: number;
+  /** Generation cadence in Hz: latent fps for diffusion backends
+   *  (ACE = 25), frame rate for AR backends. */
+  chunk_rate_hz: number;
+  /** Null is reserved for endless streams (v2 `append` song shape);
+   *  fixed-duration backends always declare a real duration. */
+  duration_s: number | null;
+}
+
+/** Backend capability mask, carried in `ready.capabilities`. Keys are
+ *  the server's Capabilities field names (swap, timbre, structure,
+ *  lora, ...); kept as a record so new capabilities don't need client
+ *  type churn. A missing mask (older server / recorded replay) means
+ *  "ungated" — treat every capability as available. */
+export type CapabilityMask = Record<string, boolean>;
+
+// Legacy constants. Since the Phase-2 contract surface, the declared
+// truth for a session's audio shape is the backend-sourced
+// `ready.geometry` block (see ReadyGeometry / RemoteBackend.geometry);
+// these remain for device-level code (AudioContext creation) and
+// pre-geometry servers.
 export const SAMPLE_RATE = 48000;
 /** 60 s of audio at 25 fps latents. */
 export const T = 1500;

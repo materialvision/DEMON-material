@@ -42,6 +42,31 @@ FAMILIES = {
 }
 
 
+def _acestep_knob_universe():
+    from acestep.streaming.knobs import knob_specs
+
+    # Every spec the family can ever expose: both SDE-mode variants plus
+    # a representative LoRA-strength knob (the per-id specs all come from
+    # lora_strength_spec, so one placeholder id covers the pattern).
+    return (
+        knob_specs(False, loras=["<lora_id>"])
+        + knob_specs(True, loras=["<lora_id>"])
+    )
+
+
+# Per-family knob universes for the cross-backend homonym rule (plan
+# §3.3): the full set of KnobSpecs a family can ever expose, obtainable
+# WITHOUT constructing the (GPU-heavy) backend. The homonym drift guard
+# (tests/unit/test_knob_homonyms.py) runs over these manifests — a knob
+# name shared across families must mean exactly the same thing, or it
+# must be renamed (prefix / group), so the first lazily-reused name
+# can't become a silent semantic fork. Keyed identically to FAMILIES;
+# the guard enforces the keys stay in sync.
+FAMILY_KNOB_UNIVERSES = {
+    "acestep": _acestep_knob_universe,
+}
+
+
 def make_backend(name: str, streaming_session):
     """Build the GeneratorBackend for ``name``.
 

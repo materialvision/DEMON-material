@@ -76,7 +76,8 @@ export type EventName =
   | "timbre_failed"
   | "structure_set"
   | "structure_cleared"
-  | "structure_failed";
+  | "structure_failed"
+  | "command_failed";
 
 export const EVENT_NAMES: readonly EventName[] = [
   "init_ack",
@@ -98,6 +99,7 @@ export const EVENT_NAMES: readonly EventName[] = [
   "structure_set",
   "structure_cleared",
   "structure_failed",
+  "command_failed",
 ] as const;
 
 export type HandshakeCommandName =
@@ -250,6 +252,12 @@ export interface ReadyEvent {
   lora_pending_enable?: unknown[];
   /** Server-minted session id, echoed for client/analytics log correlation. */
   session_id?: string;
+  /** Backend-declared audio geometry: {sample_rate, channels, chunk_rate_hz, duration_s|null}. chunk_rate_hz is the generation cadence (latent fps for diffusion, frame rate for AR models); duration_s null is reserved for endless streams. */
+  geometry?: Record<string, unknown>;
+  /** Backend capability mask: {capability: bool} over the Capabilities fields (swap, timbre, structure, lora, ...). Client panels and MCP tools gate on it; commands tagged with a matching `requires` fail with command_failed when the bit is false. */
+  capabilities?: Record<string, unknown>;
+  /** Per-session knob manifest: the same {version, knobs} envelope GET /api/knobs serves, but backend-owned and session-resolved (SDE mode, enabled lora_str_<id> knobs). /api/knobs remains the static pre-session probe. */
+  knob_manifest?: Record<string, unknown>;
 }
 
 export interface ErrorEvent {
@@ -358,6 +366,16 @@ export interface StructureFailedEvent {
   error?: string;
 }
 
+export interface CommandFailedEvent {
+  type: "command_failed";
+  /** The rejected command's wire name. */
+  command: string;
+  /** The Capabilities field the command needs and the session's backend doesn't declare. */
+  requires: string;
+  /** Human-readable reason. */
+  error?: string;
+}
+
 // ── Session-init config (client → server, sent at handshake) ──
 
 export interface SessionConfigPayload {
@@ -454,7 +472,8 @@ export type WireEvent =
   | TimbreFailedEvent
   | StructureSetEvent
   | StructureClearedEvent
-  | StructureFailedEvent;
+  | StructureFailedEvent
+  | CommandFailedEvent;
 
 export type HandshakeCommand =
   | UploadTrackCommand;
