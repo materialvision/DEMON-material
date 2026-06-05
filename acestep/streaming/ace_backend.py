@@ -9,10 +9,14 @@ the adaptive lead, idle staging, loop-band targeting, crossfading, and
 emission. Zero intended behavior change — the golden harness is the
 acceptance gate.
 
-When SA3 lands, this class generalizes to a ``DiffusionBackend``
-parameterized by a ``ModelAdapter`` + codec (see
-``notes/SA3/CLAUDE_SA3_INTEGRATION_PLAN.md``); the seam above it does
-not move.
+Specializes :class:`~acestep.streaming.diffusion_backend.
+DiffusionBackend` (the shared Tier-1 skeleton): the base owns the
+produce-mode dispatch / renderable-state caching / timing; this class
+owns the ACE knob translation, walk-window source choreography, LoRA
+refit signaling, and windowed VAE rendering. Its Tier-2 adapter is the
+default ``ACEAdapter`` constructed inside the StreamHandle's
+``StreamPipeline``; its codec is the engine ``Session`` (windowed VAE
+decode), passed to the base as ``codec=``.
 """
 
 import os
@@ -27,12 +31,11 @@ from acestep.nodes.types import ChannelGuidanceEntry, Latent
 from acestep.nodes.interpolation import INTERPOLATIONS
 from acestep.nodes.vae_nodes import EmptyLatent, LatentBlend
 
+from acestep.streaming.diffusion_backend import DiffusionBackend
 from acestep.streaming.generator_backend import (
     AudioChunk,
     AudioGeometry,
     Capabilities,
-    LeadProfile,
-    ProduceMode,
     TickContext,
 )
 from acestep.streaming.knobs import (
@@ -118,7 +121,7 @@ def _curve_from_spec(spec, T):
     return None
 
 
-class ACEStepBackend:
+class ACEStepBackend(DiffusionBackend):
     """ACE-Step v1.5 diffusion generation behind the GeneratorBackend seam.
 
     Construction mirrors the pre-seam PipelineRunner argument list; the
@@ -139,6 +142,11 @@ class ACEStepBackend:
         walk_window_s=60.0,
         neg_conditioning=None,
     ):
+        # The family codec is the engine Session: its windowed VAE
+        # decode is what render_window()/render_full() drive. The
+        # Tier-2 adapter is pipeline-owned (default ACEAdapter inside
+        # the StreamHandle's StreamPipeline), so it stays None here.
+        super().__init__(codec=session)
         self.session = session
         self.stream = stream  # StreamHandle
         self.state = state
@@ -193,12 +201,6 @@ class ACEStepBackend:
         # playback lead, so chunk swaps don't glitch.
         self._walk_chunk_prewarm_s = max(self.vae_window, self.decode_span_s) * 0.5
 
-        # Most recent successful generation; feeds gap-fill, DiT-pause
-        # reuse, and stall pre-coverage (has_renderable_state).
-        self._last_result_latent = None
-        # Result of THIS tick's produce (None on skip / mid-flight).
-        self._current_result = None
-
         # Rebuild-signature change detection (steps / LoRA enablement).
         # ``None`` on the first tick just seeds the baseline.
         self._last_rebuild_keys = None
@@ -242,9 +244,9 @@ class ACEStepBackend:
         self._walk_chunk_start_s = 0.0
 
         # Stashed per-produce values for the params echo + trace.
+        # (last_tick_ms / last_dec_ms / the result caches live on the
+        # DiffusionBackend base.)
         self._echo = {}
-        self.last_tick_ms = 0.0
-        self.last_dec_ms = 0.0
         self.last_denoise = 0.0
 
         # Cache silence once; used by the hint-strength blend node.
@@ -285,11 +287,6 @@ class ACEStepBackend:
                 self.stream.source.latent.tensor.shape[1] / 25.0
             ),
         )
-
-    def lead_profile(self) -> LeadProfile:
-        # No opinion beyond the runner's historical defaults; the
-        # SessionConfig lead_* fields keep overriding per session.
-        return LeadProfile()
 
     def knob_specs(self, lora_ids=()) -> list:
         """The ACE-family manifest: the shared registry's spec list,
@@ -533,9 +530,6 @@ class ACEStepBackend:
         self._last_rebuild_keys = rebuild_keys
         return rebuild_changed
 
-    def has_renderable_state(self) -> bool:
-        return self._last_result_latent is not None
-
     def playable_duration_s(self):
         if self._walk_active:
             # The playable buffer length is the song length, not the
@@ -548,7 +542,12 @@ class ACEStepBackend:
             else self.stream.source.latent.tensor.shape[1] / 25.0
         )
 
-    def produce(self, knobs: dict, ctx: TickContext, mode: ProduceMode) -> bool:
+    def _prepare_tick(self, knobs: dict, ctx: TickContext) -> dict:
+        """The ACE knob-translation half of the historical produce():
+        runs on EVERY active tick (shared-curve writes land even on
+        ticks that skip the engine). Returns the prepared state
+        :meth:`_generate` consumes; the mode dispatch / caching /
+        timing skeleton lives on :class:`DiffusionBackend`."""
         raw = knobs
         walk_active = self._walk_active
         full_src_T = self._full_src_T
@@ -732,8 +731,6 @@ class ACEStepBackend:
             pipe.set_shared_curve("velocity_scale", velocity_curve)
             pipe.set_shared_curve("x0_target_strength", x0_str)
 
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
         tick_kwargs = {}
         tick_kwargs["steps"] = int(raw.get("steps_override", 8))
         if walk_active:
@@ -767,57 +764,53 @@ class ACEStepBackend:
             if rcfg_mode in ("full", "initialize") and self.neg_conditioning is not None:
                 tick_kwargs["negative"] = self.neg_conditioning
 
-        if mode == "reuse":
-            # DiT-pause: skip the expensive engine call and reuse the
-            # latent from the most recent active tick. The runner only
-            # selects this mode when a cached latent exists.
-            result_latent = self._last_result_latent
-        elif mode == "skip":
-            # Pre-stall coverage: skip the blocking rebuild/refit
-            # operation for this one iteration. ``None`` routes the
-            # rest of the tick through the runner's gap-fill path — a
-            # far-ahead windowed slice is written from the cached
-            # latent WITHOUT touching ``_latent_history`` /
-            # ``_last_latent`` / ``num_gens`` — and the actual
-            # rebuild/refit runs on the next tick.
-            result_latent = None
-        else:
-            result_latent = self.stream.tick(
-                denoise=denoise,
-                seed=seed,
-                source_latent=(
-                    Latent(tensor=source_lat) if source_lat is not None
-                    else live_src_lat
-                ),
-                x0_target=x0_tgt,
-                x0_target_curve=x0_target_curve,
-                shift=self._current_shift,
-                initial_noise_curve=initial_noise_curve,
-                **tick_kwargs,
-                # DCW (wavelet-domain post-step correction).
-                # Forwarded every tick so toggle / mode / wavelet
-                # changes from the client take effect on the next
-                # slot via pipe.set_dcw(). Default on — matches
-                # upstream v0.1.7.
-                dcw_enabled=bool(raw.get("dcw_enabled", True)),
-                dcw_mode=str(raw.get("dcw_mode", "double")),
-                dcw_scaler=float(raw.get("dcw_scaler", 0.05)),
-                dcw_high_scaler=float(raw.get("dcw_high_scaler", 0.02)),
-                dcw_wavelet=str(raw.get("dcw_wavelet", "haar")),
-                dcw_advanced=_build_dcw_advanced(raw),
-            )
-        # Cache the most recent successful latent so the DiT-pause and
-        # gap-fill paths have something to feed the VAE windowing.
-        if result_latent is not None:
-            self._last_result_latent = result_latent
-        torch.cuda.synchronize()
-        self.last_tick_ms = (time.perf_counter() - t0) * 1000
-        self.last_dec_ms = 0.0
-        self.last_denoise = denoise
+        return {
+            "raw": raw,
+            "denoise": denoise,
+            "seed": seed,
+            "live_src_lat": live_src_lat,
+            "source_lat": source_lat,
+            "x0_tgt": x0_tgt,
+            "x0_target_curve": x0_target_curve,
+            "initial_noise_curve": initial_noise_curve,
+            "tick_kwargs": tick_kwargs,
+            "echo": {
+                "k1": k1, "seed": seed, "feedback": feedback,
+                "fb_depth": fb_depth, "shift_val": shift_val,
+                "hint_str": hint_str,
+            },
+        }
 
-        self._current_result = result_latent
-        is_fresh = result_latent is not None
+    def _generate(self, prep: dict):
+        raw = prep["raw"]
+        source_lat = prep["source_lat"]
+        return self.stream.tick(
+            denoise=prep["denoise"],
+            seed=prep["seed"],
+            source_latent=(
+                Latent(tensor=source_lat) if source_lat is not None
+                else prep["live_src_lat"]
+            ),
+            x0_target=prep["x0_tgt"],
+            x0_target_curve=prep["x0_target_curve"],
+            shift=self._current_shift,
+            initial_noise_curve=prep["initial_noise_curve"],
+            **prep["tick_kwargs"],
+            # DCW (wavelet-domain post-step correction).
+            # Forwarded every tick so toggle / mode / wavelet
+            # changes from the client take effect on the next
+            # slot via pipe.set_dcw(). Default on — matches
+            # upstream v0.1.7.
+            dcw_enabled=bool(raw.get("dcw_enabled", True)),
+            dcw_mode=str(raw.get("dcw_mode", "double")),
+            dcw_scaler=float(raw.get("dcw_scaler", 0.05)),
+            dcw_high_scaler=float(raw.get("dcw_high_scaler", 0.02)),
+            dcw_wavelet=str(raw.get("dcw_wavelet", "haar")),
+            dcw_advanced=_build_dcw_advanced(raw),
+        )
 
+    def _after_produce(self, prep: dict, result_latent, is_fresh: bool) -> None:
+        self.last_denoise = prep["denoise"]
         if is_fresh:
             result = result_latent.tensor
             # Previous fresh latent, for render_full()'s MSE skip
@@ -827,14 +820,8 @@ class ACEStepBackend:
             # appendleft so latent_history[0] is the most recent;
             # tap_idx = depth-1 reads "N ticks back."
             self._latent_history.appendleft(self._last_latent)
-
         # Stash the values the params echo + sampled trace need.
-        self._echo = {
-            "k1": k1, "seed": seed, "feedback": feedback,
-            "fb_depth": fb_depth, "shift_val": shift_val,
-            "hint_str": hint_str,
-        }
-        return is_fresh
+        self._echo = prep["echo"]
 
     def render_window(self, t_start_s: float):
         decode_src = (
@@ -865,12 +852,12 @@ class ACEStepBackend:
                 0.0,
                 min(local_t_start, self.walk_window_s - self.vae_window),
             )
-            audio_out = self.session.decode(
+            audio_out = self.codec.decode(
                 decode_src, t_start=local_t_start, cyclic=False,
             )
             win_offset_samples = int(round(win_start_s * SAMPLE_RATE))
         else:
-            audio_out = self.session.decode(decode_src, t_start=t_start_s, cyclic=True)
+            audio_out = self.codec.decode(decode_src, t_start=t_start_s, cyclic=True)
             win_offset_samples = 0
         torch.cuda.synchronize()
         self.last_dec_ms += (time.perf_counter() - t1) * 1000
@@ -896,7 +883,7 @@ class ACEStepBackend:
         ):
             return None
         t1 = time.perf_counter()
-        audio_out = self.session.decode(result_latent)
+        audio_out = self.codec.decode(result_latent)
         torch.cuda.synchronize()
         self.last_dec_ms += (time.perf_counter() - t1) * 1000
         wav = audio_out.waveform.detach().cpu().float().squeeze(0)

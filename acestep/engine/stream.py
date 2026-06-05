@@ -21,6 +21,7 @@ from loguru import logger
 import torch
 
 from .diffusion import DiffusionConfig, DiffusionEngine
+from .model_adapter import ACEAdapter, ModelAdapter
 from . import ode_steps
 from .dcw import DCWAdvanced, DCWCorrector
 
@@ -67,10 +68,16 @@ class SlotRequest:
     ``primary_step_range``) were added so ``StreamPipeline`` can serve
     as the single diffusion primitive for both streaming and one-shot
     generation (Phase 1 of the diffusion-primitive unification).
+
+    The three ACE-shaped conditioning tensors are Optional since the
+    ModelAdapter seam: non-ACE families carry their conditioning in the
+    opaque ``aux_cond`` bundle instead and declare T via
+    ``latent_frames`` (see :mod:`acestep.engine.model_adapter`). ACE
+    requests keep populating all three exactly as before.
     """
-    encoder_hidden_states: torch.Tensor  # [1, L, D]
-    encoder_attention_mask: torch.Tensor  # [1, L]
-    context_latents: torch.Tensor         # [1, T, D_ctx]
+    encoder_hidden_states: Optional[torch.Tensor] = None  # [1, L, D]
+    encoder_attention_mask: Optional[torch.Tensor] = None  # [1, L]
+    context_latents: Optional[torch.Tensor] = None         # [1, T, D_ctx]
     # Either a single int (same noise for every row in the request's batch)
     # or a list of ints (one seed per row, matching the old
     # _prepare_noise_cpu contract used by DiffusionEngine.generate()).
@@ -131,6 +138,16 @@ class SlotRequest:
     # otherwise a scalar or ``[1, T, 1]`` curve in [0, 1] where 0 keeps
     # raw APG output and 1 fully snaps magnitude back to ``vt_pos``.
     cfg_rescale_curve: "Optional[float | torch.Tensor]" = None
+    # --- Tier 2 (ModelAdapter seam) ---
+    # Opaque per-request conditioning bundle for non-ACE families. The
+    # pipeline never inspects it; only the family's adapter does (one
+    # bundle per request — single-condition v1, per the canonical SA3
+    # plan §5). ACE requests leave it None.
+    aux_cond: Optional[dict] = None
+    # Latent frame count T for families without ``context_latents``
+    # (the historical T source). Ignored when ``context_latents`` is
+    # present — the adapter's ``request_frames`` decides.
+    latent_frames: Optional[int] = None
 
     def all_conditions(self) -> List[SlotCondition]:
         """Return primary + extra conditions as a single ordered list."""
@@ -218,14 +235,29 @@ class StreamPipeline:
 
     def __init__(
         self,
-        engine: DiffusionEngine,
+        engine: Optional[DiffusionEngine],
         config: DiffusionConfig,
         pipeline_depth: Optional[int] = None,
+        adapter: Optional[ModelAdapter] = None,
     ):
+        """``adapter`` selects the model family behind the Tier-2 seam
+        (:mod:`acestep.engine.model_adapter`). ``None`` (every existing
+        call site) builds the default :class:`ACEAdapter` over
+        ``engine``. ``engine`` may be ``None`` only when a non-default
+        adapter owns its model end-to-end (e.g. SA3); the TRT dispatch
+        state below is ACE machinery and stays engine-bound."""
         self.engine = engine
-        self.decoder = engine.decoder
-        self.model = engine.model
+        self.decoder = engine.decoder if engine is not None else None
+        self.model = engine.model if engine is not None else None
         self.config = config
+        self.adapter: ModelAdapter = (
+            adapter if adapter is not None else ACEAdapter(self)
+        )
+        if engine is None and adapter is None:
+            raise ValueError(
+                "StreamPipeline needs a DiffusionEngine for the default "
+                "ACE adapter; pass adapter= for engine-less families"
+            )
 
         # Decouple ring buffer depth from denoising step count.
         # Default: depth = infer_steps (classic StreamDiffusion).
@@ -244,12 +276,14 @@ class StreamPipeline:
 
         # TRT state (mirrors DiffusionEngine pattern). Snapshotted from
         # the engine here, refreshed on profile swaps via the
-        # engine-swap listener registered below.
-        self._trt_ctx = engine._trt_ctx
-        self._trt_stream = engine._trt_stream
-        self._trt_engine = engine._trt_engine
+        # engine-swap listener registered below. Engine-less pipelines
+        # (non-ACE adapters) carry the null snapshot — their adapter
+        # never dispatches TRT through the pipeline.
+        self._trt_ctx = engine._trt_ctx if engine is not None else None
+        self._trt_stream = engine._trt_stream if engine is not None else None
+        self._trt_engine = engine._trt_engine if engine is not None else None
         self._trt_io_dtype = getattr(engine, '_trt_io_dtype', torch.float32)
-        self._trt_input_dtypes = getattr(engine, "_trt_input_dtypes", {})
+        self._trt_input_dtypes = getattr(engine, "_trt_input_dtypes", {}) or {}
         self._trt_output_dtype = getattr(engine, "_trt_output_dtype", self._trt_io_dtype)
 
         # Currently-bound TRT I/O buffers (set by _ensure_trt_bufs to one
@@ -305,7 +339,10 @@ class StreamPipeline:
         # PyTorch path (TRT-only streams). Gated on engine.compile_loops —
         # when the engine was constructed with ``compile_loops=False``,
         # primitives run eagerly (still branch-free, just not compiled).
-        self._compile_loops: bool = getattr(engine, "_compile_loops", True)
+        self._compile_loops: bool = (
+            getattr(engine, "_compile_loops", True) if engine is not None
+            else False  # engine-less families opt into compile later
+        )
         self._compiled_cache: dict[Callable, Callable] = {}
 
         # DCW (Differential Correction in Wavelet domain) — post-step
@@ -383,15 +420,15 @@ class StreamPipeline:
         self._queue.append(request)
 
     def _get_schedule(self, denoise: float) -> torch.Tensor:
-        """Get (cached) timestep schedule for a given denoise value."""
+        """Get (cached) timestep schedule for a given denoise value.
+
+        Schedule construction is family knowledge (ACE flow-matching
+        ``shift`` warp vs SA3 LogSNR warp), so it lives on the adapter;
+        the cache stays here.
+        """
         if denoise not in self._schedule_cache:
-            cfg = DiffusionConfig(
-                infer_steps=self.config.infer_steps,
-                shift=self.config.shift,
-                denoise=denoise,
-            )
-            self._schedule_cache[denoise] = self.engine._build_timestep_schedule(
-                cfg, self._device, self._dtype
+            self._schedule_cache[denoise] = self.adapter.build_schedule(
+                self.config, denoise, self._device, self._dtype
             ).cpu()
         return self._schedule_cache[denoise]
 
@@ -415,9 +452,13 @@ class StreamPipeline:
         Layout matches ComfyUI's RandomNoise node when noise_on_cpu is set:
         generate in [B,D,T] on CPU, then transpose to [B,T,D] and move to
         the pipeline's device/dtype.
+
+        T and the channel count are family knowledge (Tier-2 seam): the
+        historical ``context_latents.shape[-1] // 2`` is the ACE
+        ``src ++ chunk_mask`` convention, now ``adapter.latent_channels``.
         """
-        T = request.context_latents.shape[1]
-        D = request.context_latents.shape[-1] // 2
+        T = self.adapter.request_frames(request)
+        D = self.adapter.latent_channels
         seed = request.seed
 
         cpu = self.config.noise_on_cpu
@@ -452,10 +493,7 @@ class StreamPipeline:
 
     def _init_slot(self, request: SlotRequest) -> _Slot:
         """Create a new slot from a request, initialized at step 0."""
-        self._ensure_device(
-            request.encoder_hidden_states.device,
-            request.encoder_hidden_states.dtype,
-        )
+        self._ensure_device(*self.adapter.request_device_dtype(request))
 
         t_schedule = self._get_schedule(request.denoise)
         noise = self._make_noise(request)
@@ -602,65 +640,12 @@ class StreamPipeline:
         )
         return vs, sdc, onc
 
-    def _decoder_forward(
-        self,
-        xt_batch: torch.Tensor,
-        timestep_list: List[float],
-        enc_list: List[torch.Tensor],
-        mask_list: List[torch.Tensor],
-        ctx_list: List[torch.Tensor],
-    ) -> torch.Tensor:
-        """Run one batched decoder forward pass, dispatching TRT or PyTorch.
-
-        Pads encoder tensors to max sequence length and concats along
-        the batch dim. Callers apply any channel-gain scaling to
-        ``xt_batch`` before this call. List lengths must match
-        ``xt_batch.shape[0]``.
-
-        The TRT engine doesn't consume ``attention_mask`` or
-        ``encoder_attention_mask`` — it handles padding via the
-        zero-value convention on ``encoder_hidden_states``. Those
-        tensors are built only on the PyTorch path.
-        """
-        mL = max(e.shape[1] for e in enc_list)
-        for i, (e, m) in enumerate(zip(enc_list, mask_list)):
-            if e.shape[1] < mL:
-                pad = mL - e.shape[1]
-                enc_list[i] = torch.nn.functional.pad(e, (0, 0, 0, pad))
-                mask_list[i] = torch.nn.functional.pad(m, (0, pad), value=0)
-
-        enc_b = torch.cat(enc_list, dim=0)
-        ctx_b = torch.cat(ctx_list, dim=0)
-
-        if self._trt_engine is not None:
-            return self._trt_forward(
-                xt_batch=xt_batch,
-                timestep_list=timestep_list,
-                enc_batch=enc_b,
-                ctx_batch=ctx_b,
-            )
-
-        t_b = torch.tensor(
-            timestep_list, device=self._device, dtype=self._dtype,
-        )
-        mask_b = torch.cat(mask_list, dim=0)
-        attn_b = torch.ones(
-            xt_batch.shape[0], xt_batch.shape[1],
-            device=self._device, dtype=self._dtype,
-        )
-
-        out = self.decoder(
-            hidden_states=xt_batch,
-            timestep=t_b,
-            timestep_r=t_b,
-            attention_mask=attn_b,
-            encoder_hidden_states=enc_b,
-            encoder_attention_mask=mask_b,
-            context_latents=ctx_b,
-            use_cache=False,
-            past_key_values=None,
-        )
-        return out[0]
+    # The batched decoder forward lives on the family's ModelAdapter
+    # (``self.adapter.batched_forward``) — moved there verbatim from
+    # the old ``_decoder_forward`` so conditioning batching is family
+    # knowledge (Tier-2 seam). The TRT dispatch machinery below stays
+    # pipeline-owned: it is ACE engine state, reached only via the
+    # ACEAdapter (relocating it is Phase-4 acceleration-contract work).
 
     def _trt_forward(
         self,
@@ -860,7 +845,8 @@ class StreamPipeline:
         ode_noise), x0_target blending (scalar or per-frame curve),
         and both ODE and SDE solvers — by composing pure step
         primitives from :mod:`ode_steps`. The TRT backend is selected
-        inside the shared forward-pass helper (:meth:`_decoder_forward`).
+        inside the family adapter's forward
+        (:meth:`acestep.engine.model_adapter.ACEAdapter.batched_forward`).
         """
         tick_start = time.time()
 
@@ -872,13 +858,13 @@ class StreamPipeline:
         # is the most recently submitted request's; older queued ones
         # from before the swap are filtered out alongside the slots.
         if self._queue:
-            target_T = self._queue[-1].context_latents.shape[1]
+            target_T = self.adapter.request_frames(self._queue[-1])
             if any(
-                r.context_latents.shape[1] != target_T for r in self._queue
+                self.adapter.request_frames(r) != target_T for r in self._queue
             ):
                 self._queue = [
                     r for r in self._queue
-                    if r.context_latents.shape[1] == target_T
+                    if self.adapter.request_frames(r) == target_T
                 ]
             for i, slot in enumerate(self._slots):
                 if slot is not None and slot.xt.shape[1] != target_T:
@@ -1024,7 +1010,7 @@ class StreamPipeline:
             xt_b = torch.cat(
                 [xt_decoder_list[si] for si in pair_slot_idx], dim=0,
             )
-            return self._decoder_forward(
+            return self.adapter.batched_forward(
                 xt_batch=xt_b,
                 timestep_list=[
                     slots[si].t_schedule[slots[si].step_idx].item()
@@ -1034,6 +1020,9 @@ class StreamPipeline:
                 mask_list=[c.encoder_attention_mask for c in pair_cond],
                 ctx_list=[
                     slots[si].request.context_latents for si in pair_slot_idx
+                ],
+                aux_list=[
+                    slots[si].request.aux_cond for si in pair_slot_idx
                 ],
             )
 
@@ -1484,7 +1473,10 @@ class StreamPipeline:
         # DCW corrector holds wavelet basis tensors on GPU; drop it.
         self._dcw_corrector = None
         # Detach references to the engine + decoder so DiffusionEngine.close
-        # is the sole owner that decides when those objects go.
+        # is the sole owner that decides when those objects go. The
+        # adapter ref is dropped too (ACEAdapter back-references this
+        # pipeline; breaking the cycle here keeps teardown deterministic).
         self.engine = None
         self.decoder = None
         self.model = None
+        self.adapter = None

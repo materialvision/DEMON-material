@@ -356,8 +356,9 @@ class ModelContext:
             ("acestep.models.modeling_acestep_v15_xl_turbo", "AceStepConditionGenerationModel"),
         # Non-distilled 2B variants (acestep-v15-sft, acestep-v15-base) ship
         # the same modeling file under this auto_map module path. Forward
-        # signature on the inner DiT matches what stream.py:_decoder_forward
-        # calls, so the per-step path works without an adapter.
+        # signature on the inner DiT matches what ACEAdapter.batched_forward
+        # (acestep/engine/model_adapter.py) calls, so the per-step path
+        # works on the stock ACE adapter.
         "modeling_acestep_v15_base.AceStepConditionGenerationModel":
             ("acestep.models.modeling_acestep_v15_base", "AceStepConditionGenerationModel"),
     }
