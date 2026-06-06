@@ -91,6 +91,16 @@ Actions fire when the **generation frontier** crosses their song
 position (not the playhead), so the effect lands inside the compared
 region on any machine regardless of its realtime factor.
 
+The 1s windows straddling an action (±1 window around the recorded
+trigger position) are **masked from the `win_cos_min` gate**: the
+transition is an intentional discontinuity, and exactly where it
+catches a pipeline block boundary is stable within a capture session
+but drifts between sessions, so spectral identity there is not owed.
+The masked windows' worst cosine is still reported
+(`win_cos_min_action` in `compare.json`) so a real glitch at the
+transition remains visible; everything outside the mask is gated as
+usual, and scenarios without actions mask nothing.
+
 When driving a remote pod, set `DEMON_SERVER_GPU` to the pod's card so
 the captured env (and the identity gate) reflects the server GPU rather
 than the harness box's.

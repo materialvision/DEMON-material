@@ -20,7 +20,7 @@ from demos.realtime_motion_graph_web.protocol import (
     SLICE_HDR_FMT,
 )
 from tests.golden.client import GoldenClient
-from tests.golden.compare import audio_metrics
+from tests.golden.compare import action_window_indices, audio_metrics
 
 CHANNELS = 2
 SR = 48000
@@ -163,6 +163,66 @@ def test_audio_metrics_identity_and_perturbation():
     diff = audio_metrics(ref, bad)
     assert diff["mel_l2"] > 0.5
     assert diff["win_cos_min"] < 0.9
+
+
+def test_audio_metrics_action_window_mask():
+    """A divergence confined to an action window must not gate
+    win_cos_min when that window is masked — but it must stay visible in
+    win_cos_min_action, and divergence elsewhere must still gate."""
+    rng = np.random.default_rng(13)
+    ref = rng.standard_normal((SR * 4, CHANNELS)).astype(np.float32) * 0.1
+
+    # Replace only window 1 (the "knob transition") with other content —
+    # cosine is scale-invariant, so a shape change is required.
+    bad = ref.copy()
+    bad[SR:SR * 2] = rng.standard_normal((SR, CHANNELS)).astype(
+        np.float32) * 0.1
+    unmasked = audio_metrics(ref, bad)
+    assert unmasked["win_cos_min"] < 0.995  # would fail the gate
+
+    masked = audio_metrics(ref, bad, action_windows={1})
+    assert masked["win_cos_min"] == 1.0  # gate sees clean windows only
+    assert masked["win_cos_min_action"] == unmasked["win_cos_min"]
+    assert masked["action_windows"] == [1]
+
+    # A glitch OUTSIDE the masked window still gates.
+    bad2 = ref.copy()
+    bad2[SR * 3:SR * 3 + SR // 2] = 0.0
+    still = audio_metrics(ref, bad2, action_windows={1})
+    assert still["win_cos_min"] < 0.9
+
+
+def test_action_window_indices_from_bundle(tmp_path):
+    """Window indices derive from the bundle's recorded actions and
+    canonical region anchor: action at song 12s in a region starting at
+    6s masks windows 5-7 (±1 pad). No actions -> nothing masked."""
+    bundle = tmp_path / "knob_step"
+    bundle.mkdir()
+    (bundle / "metrics.json").write_text(json.dumps({
+        "canonical_region": {"start_s": 6.0, "len_s": 20.0},
+        "actions": [{"kind": "params", "at_s": 12.0, "frontier_s": 12.0}],
+    }), encoding="utf-8")
+    assert action_window_indices(bundle) == {5, 6, 7}
+
+    quiet = tmp_path / "baseline_stream"
+    quiet.mkdir()
+    (quiet / "metrics.json").write_text(json.dumps({
+        "canonical_region": {"start_s": 6.0, "len_s": 20.0},
+        "actions": [],
+    }), encoding="utf-8")
+    assert action_window_indices(quiet) == set()
+
+    # Action right at the region edge: indices clamp at 0.
+    edge = tmp_path / "edge"
+    edge.mkdir()
+    (edge / "metrics.json").write_text(json.dumps({
+        "canonical_region": {"start_s": 6.0},
+        "actions": [{"kind": "params", "frontier_s": 6.2}],
+    }), encoding="utf-8")
+    assert action_window_indices(edge) == {0, 1}
+
+    # Missing metrics.json -> empty, not a crash.
+    assert action_window_indices(tmp_path / "nope") == set()
 
 
 def test_action_audible_bounds():

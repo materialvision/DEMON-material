@@ -32,6 +32,39 @@ from .client import SAMPLE_RATE
 DEFAULT_THRESHOLDS = {"mel_l2": 0.10, "rms_db_diff": 0.5,
                       "win_cos_min": 0.995}
 
+# 1s windows straddling a scenario action are masked from the
+# win_cos_min gate (action window ± this many neighbours). A knob /
+# prompt / swap firing mid-region is an intentional discontinuity, and
+# exactly where it catches a pipeline block boundary is stable within a
+# capture session but drifts between sessions (measured 2026-06-04:
+# knob_step win_cos_min 0.98532 vs the same-build morning ref, cos
+# 1.000000 everywhere outside the transition windows) — spectral
+# identity there is not owed. The masked windows' worst cosine is still
+# reported (win_cos_min_action) so a genuine glitch stays visible.
+ACTION_WINDOW_PAD = 1
+
+
+def action_window_indices(bundle_dir: Path,
+                          pad: int = ACTION_WINDOW_PAD) -> set:
+    """Region-relative 1s-window indices covered by the actions recorded
+    in a bundle's metrics.json, padded ±pad windows. Empty when the
+    bundle has no actions (baseline scenarios: nothing is masked)."""
+    try:
+        meta = json.loads((Path(bundle_dir) / "metrics.json")
+                          .read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return set()
+    start_s = float((meta.get("canonical_region") or {})
+                    .get("start_s", 0.0))
+    idxs: set = set()
+    for act in meta.get("actions") or []:
+        at = act.get("frontier_s", act.get("at_s"))
+        if at is None:
+            continue
+        w = int(at - start_s)
+        idxs.update(range(w - pad, w + pad + 1))
+    return {i for i in idxs if i >= 0}
+
 
 def load_canonical(bundle_dir: Path) -> np.ndarray:
     raw = (Path(bundle_dir) / "canonical.f32.raw").read_bytes()
@@ -58,8 +91,13 @@ def _log_mel(mono: np.ndarray) -> np.ndarray:
     return librosa.power_to_db(mel, ref=np.max)
 
 
-def audio_metrics(ref: np.ndarray, run: np.ndarray) -> dict:
-    """Tier-2 distance metrics between two canonical streams."""
+def audio_metrics(ref: np.ndarray, run: np.ndarray,
+                  action_windows: set | frozenset = frozenset()) -> dict:
+    """Tier-2 distance metrics between two canonical streams.
+
+    ``action_windows``: region-relative 1s-window indices excluded from
+    the ``win_cos_min`` gate (see ``action_window_indices``); their worst
+    cosine is reported separately as ``win_cos_min_action``."""
     n = min(ref.shape[0], run.shape[0])
     a, b = _mono(ref[:n]), _mono(run[:n])
 
@@ -83,14 +121,20 @@ def audio_metrics(ref: np.ndarray, run: np.ndarray) -> dict:
         denom = np.linalg.norm(fa) * np.linalg.norm(fb)
         cos.append(float(np.dot(fa, fb) / denom) if denom > eps else 1.0)
 
+    gated = [c for i, c in enumerate(cos) if i not in action_windows]
+    masked = [c for i, c in enumerate(cos) if i in action_windows]
+
     return {
         "compared_samples": int(n),
         "len_ref": int(ref.shape[0]),
         "len_run": int(run.shape[0]),
         "mel_l2": round(mel_l2, 5),
         "rms_db_diff": round(float(rms_db_diff), 4),
-        "win_cos_min": round(min(cos), 6) if cos else None,
-        "win_cos_mean": round(float(np.mean(cos)), 6) if cos else None,
+        "win_cos_min": round(min(gated), 6) if gated else None,
+        "win_cos_mean": round(float(np.mean(gated)), 6) if gated else None,
+        # informational: never silently drop what was masked
+        "action_windows": sorted(i for i in action_windows if i < len(cos)),
+        "win_cos_min_action": round(min(masked), 6) if masked else None,
     }
 
 
@@ -108,7 +152,11 @@ def compare_bundles(ref_dir: Path, run_dir: Path,
 
     th = dict(DEFAULT_THRESHOLDS)
     th.update(thresholds or {})
-    m = audio_metrics(load_canonical(ref_dir), load_canonical(run_dir))
+    # Union of both bundles' action windows: if the trigger landed on a
+    # window boundary in only one of them, both placements are masked.
+    aw = action_window_indices(ref_dir) | action_window_indices(run_dir)
+    m = audio_metrics(load_canonical(ref_dir), load_canonical(run_dir),
+                      action_windows=aw)
     failures = []
     if m["len_run"] < m["len_ref"]:
         failures.append(f"run shorter than ref ({m['len_run']} < "

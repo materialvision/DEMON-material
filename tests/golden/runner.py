@@ -414,7 +414,7 @@ def _determinism_report(results: list[dict]) -> None:
     metrics + suggested thresholds (observed noise floor x3)."""
     import itertools
 
-    from .compare import audio_metrics, load_canonical
+    from .compare import action_window_indices, audio_metrics, load_canonical
 
     by_name: dict = {}
     for r in results:
@@ -428,13 +428,20 @@ def _determinism_report(results: list[dict]) -> None:
             continue
         worst: dict = {}
         for a, b in itertools.combinations(runs, 2):
+            # Mask action windows here too: suggested thresholds must be
+            # calibrated against the same population the gate scores.
+            aw = (action_window_indices(Path(a["bundle_dir"]))
+                  | action_window_indices(Path(b["bundle_dir"])))
             m = audio_metrics(load_canonical(Path(a["bundle_dir"])),
-                              load_canonical(Path(b["bundle_dir"])))
+                              load_canonical(Path(b["bundle_dir"])),
+                              action_windows=aw)
             worst["mel_l2"] = max(worst.get("mel_l2", 0), m["mel_l2"])
             worst["rms_db_diff"] = max(worst.get("rms_db_diff", 0),
                                        m["rms_db_diff"])
             worst["win_cos_min"] = min(worst.get("win_cos_min", 1.0),
-                                       m["win_cos_min"])
+                                       m["win_cos_min"]
+                                       if m["win_cos_min"] is not None
+                                       else 1.0)
         sug = {
             "mel_l2": round(max(worst["mel_l2"] * 3, 0.01), 4),
             "rms_db_diff": round(max(worst["rms_db_diff"] * 3, 0.1), 3),
