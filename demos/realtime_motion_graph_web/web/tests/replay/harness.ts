@@ -4,7 +4,8 @@
 // Transcripts come from the golden harness (tests/golden/client.py in the
 // repo root): one `transcript.jsonl` + `blobs/` per scenario, cached at
 // `~/.cache/demon/test-refs/<scenario>/` by
-// `.venv/Scripts/python.exe -m tests.golden.refs_store fetch`.
+// `python -m tests.golden.refs_store fetch` (run from the repo root via
+// the repo venv).
 //
 // Each transcript line is {t: <ms>, dir: "send"|"recv", kind: "json"|"bin",
 // ...}; binary frames reference a blob file and carry a `role` tag

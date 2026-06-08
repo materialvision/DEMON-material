@@ -8,9 +8,9 @@
 //   2. `next dev`, with NEXT_PUBLIC_POD_BASE_URL pointed at (1) so the
 //      same-origin /api rewrites land on the replay server
 //
-// Prereqs: refs fetched (`.venv/Scripts/python.exe -m
-// tests.golden.refs_store fetch` from the repo root) and a chromium
-// (`npx playwright install chromium`).
+// Prereqs: refs fetched (`python -m tests.golden.refs_store fetch` from
+// the repo root, via the repo venv) and a chromium (`npx playwright
+// install chromium`).
 
 import * as path from "node:path";
 
@@ -20,7 +20,18 @@ import { defineConfig } from "playwright/test";
 // import.meta) is the portable way to self-locate.
 const webRoot = __dirname;
 const repoRoot = path.resolve(webRoot, "..", "..", "..");
-const python = path.join(repoRoot, ".venv", "Scripts", "python.exe");
+// Locate the repo venv's interpreter: Windows lays it down under
+// Scripts/python.exe, POSIX under bin/python. DEMON_PYTHON overrides
+// both (a system python, conda env, or differently-named venv on CI).
+const isWin = process.platform === "win32";
+const python =
+  process.env.DEMON_PYTHON ??
+  path.join(
+    repoRoot,
+    ".venv",
+    isWin ? "Scripts" : "bin",
+    isWin ? "python.exe" : "python",
+  );
 
 export const E2E_SCENARIO = "swap_fixture";
 const REPLAY_PORT = 18931;

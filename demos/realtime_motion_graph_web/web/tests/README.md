@@ -13,9 +13,10 @@ exact same wire bytes that validated the server also validate the client.
 ## Prerequisites
 
 ```bash
-# from the repo root — pulls transcripts + canonical refs into
-# ~/.cache/demon/test-refs/ (Tier B and C; Tier A needs nothing)
-.venv/Scripts/python.exe -m tests.golden.refs_store fetch
+# from the repo root, via the repo venv — pulls transcripts + canonical
+# refs into ~/.cache/demon/test-refs/ (Tier B and C; Tier A needs none).
+# venv python: .venv/bin/python (POSIX) or .venv/Scripts/python.exe (Windows)
+python -m tests.golden.refs_store fetch
 
 # once, for Tier C
 npx playwright install chromium

@@ -87,6 +87,18 @@ is covered separately by `tests/test_stream.py`. Accordingly:
    `runner --repeat N` prints both the observed floor and suggested
    thresholds (floor x3); put those in `refs.json`.
 
+> **Hardware caveat.** The committed `refs.json` carries the canonical
+> hashes captured on one card (currently an RTX 5090) and, until a
+> variance probe is run, `null` thresholds — so tier 2 falls back to the
+> strict `DEFAULT_THRESHOLDS`. On that same card a healthy run is
+> bit-exact (tier 1) and passes; on a **different** card/driver/engine
+> build a run is legitimately not bit-exact, and the strict fallbacks
+> will flag it. That is by design (fail loud rather than silently pass an
+> uncalibrated comparison), but it means cross-hardware use needs a
+> one-time calibration first: run `runner --repeat N` on the target
+> hardware, paste the suggested thresholds into `refs.json`, and commit.
+> `test_golden.py` prints this hint on any uncalibrated tier-2 failure.
+
 Actions fire when the **generation frontier** crosses their song
 position (not the playhead), so the effect lands inside the compared
 region on any machine regardless of its realtime factor.

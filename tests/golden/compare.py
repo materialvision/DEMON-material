@@ -150,6 +150,12 @@ def compare_bundles(ref_dir: Path, run_dir: Path,
         report.update(tier=1, identical=True, passed=True)
         return report
 
+    # `calibrated` records whether these thresholds came from a
+    # same-build variance probe (runner --repeat) or are the strict
+    # uncalibrated fallbacks. A tier-2 failure against fallbacks on
+    # hardware that differs from the capture box is far more likely
+    # hardware variance than a real regression — callers surface this.
+    calibrated = bool(thresholds)
     th = dict(DEFAULT_THRESHOLDS)
     th.update(thresholds or {})
     # Union of both bundles' action windows: if the trigger landed on a
@@ -170,6 +176,6 @@ def compare_bundles(ref_dir: Path, run_dir: Path,
         failures.append(f"win_cos_min {m['win_cos_min']} < "
                         f"{th['win_cos_min']}")
     report.update(tier=2, identical=False, metrics=m,
-                  thresholds=th, failures=failures,
-                  passed=not failures)
+                  thresholds=th, calibrated=calibrated,
+                  failures=failures, passed=not failures)
     return report

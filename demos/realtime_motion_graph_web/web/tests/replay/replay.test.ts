@@ -13,8 +13,8 @@
 // reference exactly. Any diff is a real client decode/apply regression
 // (float16 conversion, zstd delta path, slice routing, epoch handling).
 //
-// Prereq: `.venv/Scripts/python.exe -m tests.golden.refs_store fetch`
-// (run from the repo root) to populate ~/.cache/demon/test-refs/.
+// Prereq: `python -m tests.golden.refs_store fetch` (run from the repo
+// root via the repo venv) to populate ~/.cache/demon/test-refs/.
 // Scenarios missing from the cache are reported as skipped.
 
 import { describe, expect, it } from "vitest";
@@ -433,8 +433,8 @@ describe("RemoteBackend transcript replay", () => {
     "refs cache present",
     () => {
       throw new Error(
-        "No golden reference bundles cached. Run (from the repo root): " +
-          ".venv/Scripts/python.exe -m tests.golden.refs_store fetch",
+        "No golden reference bundles cached. Run (from the repo root, " +
+          "via the repo venv): python -m tests.golden.refs_store fetch",
       );
     },
   );
