@@ -19,11 +19,14 @@ import {
   SLICE_FLAG_DELTA,
   SLICE_HDR_SIZE,
   type AudioSlice,
+  type CapabilityMask,
   type LoraCatalogEntry,
+  type ReadyGeometry,
   type SessionConfig,
   type StemAssetsMessage,
   type SwapReadyMessage,
 } from "./types/protocol";
+import type { KnobManifestResponse } from "./types/knobs";
 // Outbound command payloads + the inbound event-name union are GENERATED from
 // the backend wire-contract registry (protocol.py) — see
 // types/wireContract.gen.ts. Typing the senders/ladder against them means a
@@ -204,6 +207,20 @@ export class RemoteBackend extends EventTarget {
    *  report their hidden_states batch_max; eager / compile pin to 4.
    *  Null until ready. */
   maxPipelineDepth: number | null = null;
+  /** Backend-declared audio geometry from `ready.geometry`. Null on
+   *  servers (and recorded replays) from before the backend-seam
+   *  contract surface — fall back to the legacy flat ready fields
+   *  (duration/channels/sampleRate above) and client constants. */
+  geometry: ReadyGeometry | null = null;
+  /** Backend capability mask from `ready.capabilities`. Null = older
+   *  server / replay: treat as ungated (everything available). */
+  capabilities: CapabilityMask | null = null;
+  /** Per-session knob manifest from `ready.knob_manifest` — the same
+   *  `{version, knobs}` envelope `GET /api/knobs` serves, but resolved
+   *  for THIS session (SDE mode, enabled `lora_str_<id>` knobs). Null
+   *  on older servers / replays; `/api/knobs` remains the static
+   *  pre-session probe. */
+  knobManifest: KnobManifestResponse | null = null;
   /** Browser-observed WS lifecycle for this concrete connection attempt. */
   wsTrace: WsTrace;
   /** Pod-side session id from the optional init_ack telemetry message. */
@@ -419,6 +436,18 @@ export class RemoteBackend extends EventTarget {
               typeof msg.max_pipeline_depth === "number"
                 ? msg.max_pipeline_depth
                 : null;
+            // Phase-2 contract surface. The generated event types these
+            // as plain dicts; the SDK refines them. All three are
+            // wire-optional (older servers / recorded replay transcripts
+            // omit them) and null means "fall back": legacy flat fields
+            // for geometry, ungated panels for capabilities, /api/knobs
+            // for the manifest.
+            this.geometry =
+              (msg.geometry as ReadyGeometry | undefined) ?? null;
+            this.capabilities =
+              (msg.capabilities as CapabilityMask | undefined) ?? null;
+            this.knobManifest =
+              (msg.knob_manifest as KnobManifestResponse | undefined) ?? null;
             // Scale + depth bounds are exposed as instance fields; the host
             // app mirrors them into its own state from the "ready" event
             // listener (the SDK never writes app stores).
@@ -605,6 +634,23 @@ export class RemoteBackend extends EventTarget {
               }
               break;
             }
+            case "command_failed":
+              // A `requires`-tagged command was rejected because this
+              // session's backend lacks the capability (loud failure, never
+              // a silent no-op — see protocol.py). Surface it as a typed
+              // event so the host app can toast / revert optimistic UI, and
+              // log it so the failure is audible even when nothing listens.
+              // Without this case it would fall through to the generic
+              // `json` event and the rejection would be invisible.
+              console.warn(
+                `[protocol] command_failed: ${msg.command} needs backend ` +
+                  `capability '${msg.requires}'` +
+                  (msg.error ? ` — ${msg.error}` : ""),
+              );
+              this.dispatchEvent(
+                new CustomEvent("command_failed", { detail: msg }),
+              );
+              break;
             default:
               this.dispatchEvent(new CustomEvent("json", { detail: msg }));
           }

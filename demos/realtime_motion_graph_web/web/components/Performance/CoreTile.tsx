@@ -1,5 +1,6 @@
 "use client";
 
+import { useCapability } from "@/hooks/useCapability";
 import { useCustomTracksStore } from "@/store/useCustomTracksStore";
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 
@@ -26,6 +27,13 @@ import { TrackPicker } from "./TrackPicker";
 // SliderTile.tsx stays the single source of truth for graph-lane
 // pills, MIDI map UI, and knob/fader labels.
 export function CoreTile() {
+  // Backend capability gating (ready.capabilities): a backend family
+  // that can't honor swap_source / set_timbre_* / set_structure_*
+  // doesn't get dead pickers. Pre-Phase-2 servers and recorded replays
+  // carry no mask and gate open (see useCapability).
+  const canSwap = useCapability("swap");
+  const canTimbre = useCapability("timbre");
+  const canStructure = useCapability("structure");
   return (
     <div className="knob-tile" data-tile="core">
       <div className="knob-rack" id="sliders">
@@ -46,11 +54,13 @@ export function CoreTile() {
         />
         <SeedKnob />
       </div>
-      <div className="knob-ref-row">
-        <TrackPicker />
-        <RefControl kind="timbre" />
-        <RefControl kind="structure" />
-      </div>
+      {(canSwap || canTimbre || canStructure) && (
+        <div className="knob-ref-row">
+          {canSwap && <TrackPicker />}
+          {canTimbre && <RefControl kind="timbre" />}
+          {canStructure && <RefControl kind="structure" />}
+        </div>
+      )}
       <CoreStems />
     </div>
   );

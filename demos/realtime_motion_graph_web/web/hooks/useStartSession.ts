@@ -189,6 +189,10 @@ function wireRemoteListeners(
     s.setCheckpointScale(remote.checkpointScale);
     s.setPipelineDepth(remote.pipelineDepth);
     s.setMaxPipelineDepth(remote.maxPipelineDepth);
+    // Backend capability mask (null on pre-Phase-2 servers / replays =
+    // ungated). The hand-coded swap/timbre/structure/LoRA panels read
+    // it via useCapability.
+    s.setCapabilities(remote.capabilities);
   });
   remote.addEventListener("depth_applied", (e) => {
     useSessionStore

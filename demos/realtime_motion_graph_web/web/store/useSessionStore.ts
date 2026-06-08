@@ -4,7 +4,7 @@ import { create } from "zustand";
 
 import type { AudioPlayer } from "@demon/client";
 import type { NetworkMonitor } from "@/engine/networkMonitor";
-import type { RemoteBackend, WsTrace } from "@demon/client";
+import type { CapabilityMask, RemoteBackend, WsTrace } from "@demon/client";
 import type { WsReconnector } from "@demon/client";
 
 // Live-session lifecycle state. The non-serializable RemoteBackend +
@@ -49,6 +49,13 @@ interface SessionState {
   /** Server-imposed ceiling on ``pipelineDepth`` — TRT engine batch_max
    *  for TRT decoders, 4 for eager / compile. Null until ready. */
   maxPipelineDepth: number | null;
+  /** Backend capability mask from the WS ``ready`` message. The
+   *  hand-coded panels (track swap, timbre/structure refs, LoRA
+   *  library) gate on it so a backend family that can't honor a
+   *  command doesn't render dead controls. Null until ready — and on
+   *  pre-Phase-2 servers / recorded replays, which means "ungated"
+   *  (see useCapability). */
+  capabilities: CapabilityMask | null;
   /** Latest browser-observed WS trace, including orphan remotes that
    *  failed before setSession() could publish them. */
   lastWsTrace: WsTrace | null;
@@ -65,6 +72,7 @@ interface SessionState {
   setCheckpointScale: (scale: string | null) => void;
   setPipelineDepth: (depth: number | null) => void;
   setMaxPipelineDepth: (max: number | null) => void;
+  setCapabilities: (capabilities: CapabilityMask | null) => void;
   setLastWsTrace: (trace: WsTrace | null) => void;
   setLastBackendSessionId: (id: string | null) => void;
   setLastBackendClientId: (id: string | null) => void;
@@ -82,6 +90,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   checkpointScale: null,
   pipelineDepth: null,
   maxPipelineDepth: null,
+  capabilities: null,
   lastWsTrace: null,
   lastBackendSessionId: null,
   lastBackendClientId: null,
@@ -94,6 +103,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   setCheckpointScale: (scale) => set({ checkpointScale: scale }),
   setPipelineDepth: (depth) => set({ pipelineDepth: depth }),
   setMaxPipelineDepth: (max) => set({ maxPipelineDepth: max }),
+  setCapabilities: (capabilities) => set({ capabilities }),
   setLastWsTrace: (trace) => set({ lastWsTrace: trace }),
   setLastBackendSessionId: (id) => set({ lastBackendSessionId: id }),
   setLastBackendClientId: (id) => set({ lastBackendClientId: id }),
@@ -113,6 +123,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       reconnector: null,
       pipelineDepth: null,
       maxPipelineDepth: null,
+      // Capability mask is per-session truth (the next session may pick
+      // a different backend family), unlike checkpointScale below.
+      capabilities: null,
       lastWsTrace: null,
       lastBackendSessionId: null,
       lastBackendClientId: null,

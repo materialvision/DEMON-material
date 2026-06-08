@@ -225,8 +225,18 @@ def knob_catalog(sde: bool, loras=None) -> dict:
     ``/api/knobs`` manifest, so every frontend builds against one
     backend-owned contract instead of re-declaring the knob set.
     """
+    return catalog_from_specs(knob_specs(sde, loras))
+
+
+def catalog_from_specs(specs) -> dict:
+    """Project an arbitrary :class:`KnobSpec` list into the catalog
+    shape (the same projection :func:`knob_catalog` serves). Used by
+    the per-session manifest in the wire ``ready`` frame, whose spec
+    list is backend-owned (``GeneratorBackend.knob_specs``) rather
+    than re-derived from this module's registry parameters.
+    """
     out: dict = {}
-    for spec in knob_specs(sde, loras):
+    for spec in specs:
         entry: dict = {
             "type": spec.type,
             "default": spec.default,

@@ -551,6 +551,71 @@ def test_catalog_projection_shapes():
     assert evts["timbre_cleared"]["fields"] == {}
 
 
+def _session_capability_gates() -> dict:
+    """Map ``command name -> capability`` from the
+    ``@requires_capability("<cap>", "<command>")`` decorators on
+    StreamingSession's operations. Source-parsed (session.py imports
+    torch); the registry's ``requires`` tags must match this mapping
+    exactly, so a tagged command can't ship without a session-side
+    gate and a gate can't exist for an untagged command."""
+    src = (
+        Path(__file__).resolve().parents[2]
+        / "acestep" / "streaming" / "session.py"
+    ).read_text(encoding="utf-8")
+    out: dict = {}
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for dec in node.decorator_list:
+            if (isinstance(dec, ast.Call)
+                    and isinstance(dec.func, ast.Name)
+                    and dec.func.id == "requires_capability"
+                    and len(dec.args) == 2
+                    and all(isinstance(a, ast.Constant) for a in dec.args)):
+                cap, cmd = dec.args[0].value, dec.args[1].value
+                assert cmd not in out, f"duplicate gate for {cmd!r}"
+                out[cmd] = cap
+    return out
+
+
+def test_requires_tags_have_defined_failure_behavior():
+    # Plan §3.4: every `requires`-tagged command must have defined
+    # failure behavior. Concretely: (a) the tag names a real
+    # Capabilities field; (b) the typed command_failed event is
+    # registered with the fields the session's CommandFailed event
+    # carries; (c) the session gates exactly the tagged command set via
+    # @requires_capability, mapping each command to the same capability
+    # the registry declares.
+    from dataclasses import fields as dc_fields
+
+    from acestep.streaming.generator_backend import Capabilities
+
+    cap_names = {f.name for f in dc_fields(Capabilities)}
+    tagged = {
+        name: spec["requires"]
+        for name, spec in command_catalog().items()
+        if "requires" in spec
+    }
+    assert tagged, "no requires-tagged commands — registry drifted?"
+    bogus = {c: r for c, r in tagged.items() if r not in cap_names}
+    assert not bogus, f"requires tags naming unknown capabilities: {bogus}"
+
+    assert "command_failed" in EVENT_NAMES
+    cf_fields = set(event_catalog()["command_failed"]["fields"])
+    assert cf_fields == {"command", "requires", "error"}
+
+    gates = _session_capability_gates()
+    assert gates == tagged, (
+        f"session capability gates and registry requires tags drifted:\n"
+        f"  gated but untagged: "
+        f"{sorted(set(gates) - set(tagged))}\n"
+        f"  tagged but ungated: "
+        f"{sorted(set(tagged) - set(gates))}\n"
+        f"  capability mismatches: "
+        f"{ {c: (gates[c], tagged[c]) for c in set(gates) & set(tagged) if gates[c] != tagged[c]} }"
+    )
+
+
 def test_origin_sensitive_matches_session_semantics():
     # origin_sensitive means "an EXTERNAL (MCP) send is echoed via echo_event
     # instead of applied". StreamingSession implements that for exactly two

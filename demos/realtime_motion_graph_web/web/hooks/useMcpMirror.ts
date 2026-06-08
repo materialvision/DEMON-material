@@ -171,6 +171,7 @@ export function useMcpMirror() {
           fixture_name?: string;
           interleaved: Float32Array;
           channels: number;
+          sample_rate: number;
           key?: string;
           time_signature?: string;
         }>).detail;
@@ -187,7 +188,9 @@ export function useMcpMirror() {
         useCustomTracksStore.getState().add(detail.fixture_name, {
           interleaved: detail.interleaved,
           channels,
-          sampleRate: 48000,
+          // swap_ready declares the buffer's rate on the wire — don't
+          // re-derive it from the client-side constant.
+          sampleRate: detail.sample_rate,
           frames: detail.interleaved.length / channels,
         });
 
