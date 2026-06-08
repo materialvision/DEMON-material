@@ -620,6 +620,28 @@ def main():
                 control_host, control_port, exc,
             )
 
+    # Pre-flight: clear any user uploads left behind in
+    # MODELS_DIR/user_uploads/ before we start accepting traffic. The
+    # rtmg backend is one-session-per-pod, but pods are rented from a
+    # pool and reused across users — without this, a fresh process
+    # boot on a recycled pod would expose the previous renter's
+    # uploads to the next renter via /api/user_uploads (and let them
+    # play the audio via /user_uploads/<name>). Also matters for the
+    # baked :warm image, which captures /workspace/demon_models — any
+    # uploads sitting in the bake host's user_uploads_dir at bake
+    # time would otherwise ship into every fresh pod. The per-session
+    # wipe in ws_adapter.handle_client covers consecutive sessions on
+    # a single process; this one covers cold boot. Skipped in
+    # --no-backend (no sessions ever land).
+    if not no_backend:
+        from acestep.user_uploads import wipe_user_uploads
+        try:
+            wiped = wipe_user_uploads()
+            if wiped:
+                logger.info("user_uploads_wiped_at_startup entries={}", wiped)
+        except Exception as exc:
+            logger.warning("user_uploads_wipe_at_startup_failed error={}", exc)
+
     logger.info("server_starting port={}", port)
     srv = ws_serve(
         ws_handler,
