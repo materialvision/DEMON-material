@@ -8,7 +8,7 @@ import { useLoraStore } from "@/store/useLoraStore";
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
 import { isRcfgMode, isTimeSignature } from "@/types/engine";
-import type { LoraCatalogEntry } from "@/types/protocol";
+import type { LoraCatalogEntry } from "@demon/client";
 
 // Mirror state changes driven by the onboard MCP control bus back into
 // the front-end stores so the user can see Claude's edits land in the

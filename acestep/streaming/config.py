@@ -1,9 +1,10 @@
 """Typed init-time configuration for :class:`StreamingSession`.
 
-Field names mirror the wire config keys (see
-``demos/realtime_motion_graph_web/web/types/protocol.ts``
-``SessionConfig``) so the adapter's :meth:`SessionConfig.from_dict`
-parse is a simple known-key filter.
+Field names ARE the wire config keys: the session-init contract
+(``config_catalog`` in ``demos/realtime_motion_graph_web/protocol.py``
+and the generated TS ``SessionConfigPayload``) is derived from this
+dataclass, and the adapter's :meth:`SessionConfig.from_dict` parse is a
+simple known-key filter.
 
 Transport-agnostic: no torch, no acestep imports.
 """

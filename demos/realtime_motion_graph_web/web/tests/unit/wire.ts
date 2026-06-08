@@ -1,7 +1,7 @@
 // Wire-frame builders for unit tests: synthesize the server's binary
 // frames (initial buffer, RAW/DELTA slices) without a recording.
 // Framing must match demos/realtime_motion_graph_web/protocol.py
-// (SLICE_HDR_FMT "<BIIHffI") and types/protocol.ts SLICE_HDR_SIZE.
+// (SLICE_HDR_FMT "<BIIHffI") and sdk/types/protocol.ts SLICE_HDR_SIZE.
 
 import * as zlib from "node:zlib";
 
@@ -15,7 +15,7 @@ import {
   SLICE_FLAG_DELTA,
   SLICE_FLAG_RAW,
   SLICE_HDR_SIZE,
-} from "@/types/protocol";
+} from "@demon/client";
 
 /** float32 -> float16 bits via the native Float16Array (Node >= 23). */
 export function f32ToF16Bits(values: Float32Array): Uint16Array {

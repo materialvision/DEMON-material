@@ -11,6 +11,7 @@ import { useSessionStore } from "@/store/useSessionStore";
 import { CollapsibleTile } from "./CollapsibleTile";
 import { CoreTile } from "./CoreTile";
 import { DrawerHelpBar } from "./DrawerHelpBar";
+import { DynamicKnobPanel } from "./DynamicKnobPanel";
 import { DrawerTabs, useDrawerTab, type DrawerTab } from "./DrawerTabs";
 import { LibraryTile } from "./LibraryTile";
 import { LiteControls } from "./LiteControls";
@@ -288,6 +289,8 @@ function renderTabBody(tab: DrawerTab, savedTab?: ReactNode, spread = false) {
       return <ModTile />;
     case "voice":
       return <VoiceTile />;
+    case "auto":
+      return <DynamicKnobPanel />;
     case "styles":
       // Tabbed view: each panel sits under its own collapsed accordion
       // so the operator expands only what they're working on. Spread

@@ -1,4 +1,4 @@
-// Replay harness for driving the REAL `RemoteBackend` (engine/protocol.ts)
+// Replay harness for driving the REAL `RemoteBackend` (sdk/protocol.ts)
 // from recorded golden-session transcripts — no GPU, no server, no network.
 //
 // Transcripts come from the golden harness (tests/golden/client.py in the
@@ -234,7 +234,7 @@ export function installFakeWebSocket(): () => void {
 
 // ── client-mirror buffer reconstruction ────────────────────────────────
 
-import type { AudioSlice, SwapReadyDetail } from "@/types/protocol";
+import type { AudioSlice, SwapReadyDetail } from "@demon/client";
 
 /** Reconstructs the song buffer the way the app's slice listener +
  *  AudioPlayer do (useStartSession.wireRemoteListeners): RAW slices

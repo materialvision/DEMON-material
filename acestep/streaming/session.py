@@ -87,7 +87,12 @@ from acestep.streaming.events import (
     TimbreFailed,
     TimbreSet,
 )
-from acestep.streaming.knobs import KnobDef, KnobState, build_banks
+from acestep.streaming.knobs import (
+    KnobState,
+    coerce_knob_values,
+    knob_specs,
+    lora_strength_spec,
+)
 from acestep.streaming.pipeline_runner import PipelineRunner
 from acestep.streaming.source import (
     _normalize_time_signature,
@@ -392,6 +397,23 @@ class StreamingSession:
         # methods publish; transport adapters subscribe and serialize.
         self.bus = EventBus()
 
+        # Cached {name: KnobSpec} map for hot-path validation in set_knobs.
+        # knob_specs() rebuilds 34 dataclasses, so we never call it per tick;
+        # rebuilt only when the LoRA set changes (see _apply_lora_pending).
+        # Reassigned wholesale (atomic ref swap), so set_knobs can read it
+        # without a lock from the dispatch thread.
+        self._rebuild_knob_specs(self.initial_enable_ids)
+
+    def _rebuild_knob_specs(self, lora_ids: list) -> None:
+        self._knob_specs_by_name = {
+            s.name: s for s in knob_specs(self.use_sde, loras=list(lora_ids or []))
+        }
+
+    def _enabled_lora_ids(self) -> list:
+        if not (self.use_lora and self.engine_obj is not None):
+            return []
+        return [d.id for d in self.engine_obj.list_loras() if d.state == "enabled"]
+
     # ---- Snapshot / catalog helpers -------------------------------------
 
     def lora_catalog_payload(self) -> list:
@@ -446,6 +468,12 @@ class StreamingSession:
             "knob_values": self.virtual_knobs.get_all_values(),
             "channels": state.n_channels,
             "sample_rate": SAMPLE_RATE,
+            # One of the two inputs that determine this session's knob
+            # universe (see knob_specs; the other is the enabled-LoRA set
+            # in lora_catalog). Lets transport adapters (the MCP server's
+            # schema validation) reproduce the knob set without sniffing
+            # knob names out of knob_values.
+            "sde": self.use_sde,
         }
 
     # ---- Runner lifecycle ----------------------------------------------
@@ -594,7 +622,7 @@ class StreamingSession:
         for lid in local_disable:
             try:
                 self.engine_obj.disable_lora(lid)
-                self.virtual_knobs.remove_knob(f"lora_str_{lid}")
+                self.virtual_knobs.remove_knob(lora_strength_spec(lid).name)
                 logger.info("lora_disabled id={}", lid)
             except Exception as e:
                 logger.exception("lora_disable_failed id={} error={}", lid, e)
@@ -606,18 +634,18 @@ class StreamingSession:
                     lid, strength,
                 )
                 # Allocate a knob slot so set_lora_strength can be
-                # driven by the client's params dict. Default the slot
-                # to the strength we just enabled at so the runner's
+                # driven by the client's params dict. The knob's shape
+                # comes from the registry (lora_strength_spec), never
+                # re-declared here; only the default is overridden to
+                # the strength we just enabled at (the spec is a fresh
+                # instance, so mutating it is safe), so the runner's
                 # slider-delta check (set_lora_strength only when the
                 # new value differs by > 0.02) doesn't fire a
                 # redundant refit on tick 1.
-                self.virtual_knobs.add_knob(
-                    f"lora_str_{lid}",
-                    KnobDef(
-                        default=float(strength) if strength is not None else 0.0,
-                        sensitivity=2.0, max_val=2.0,
-                    ),
-                )
+                spec = lora_strength_spec(lid)
+                if strength is not None:
+                    spec.default = float(strength)
+                self.virtual_knobs.add_knob(spec)
             except Exception as e:
                 logger.exception("lora_enable_failed id={} error={}", lid, e)
         # Publish the refreshed catalog. No automatic re-encode here.
@@ -625,6 +653,10 @@ class StreamingSession:
         # promptA/promptB text; the client's visible-prepend logic
         # mutates the prompt on toggle and sends a normal
         # prompt-update message.
+        # The LoRA set changed, so the lora_str_<id> knob universe did too —
+        # refresh the cached validation spec map (atomic ref swap; set_knobs
+        # reads it lock-free from the dispatch thread).
+        self._rebuild_knob_specs(self._enabled_lora_ids())
         self.bus.publish(LoraCatalogUpdate(catalog=self.lora_catalog_payload()))
 
     def _apply_depth_pending(self) -> None:
@@ -1165,8 +1197,13 @@ class StreamingSession:
         if origin is CommandOrigin.EXTERNAL:
             self.bus.publish(ParamsEcho(raw=dict(raw)))
             return
+        # Enforce the knob contract on the load-bearing path: clamp numerics
+        # to [min,max], coerce ints, drop invalid enum/bool values. Unknown
+        # keys (curve specs, the playback clock) pass through untouched.
+        # Silent clamp — never reject a 125 Hz tick over one bad value.
+        clean, _errors = coerce_knob_values(raw, self._knob_specs_by_name)
         with state._lock:
-            self.virtual_knobs.update(raw)
+            self.virtual_knobs.update(clean)
             try:
                 self.audio_eng.position = int(playback_pos * SAMPLE_RATE) % max(
                     1, len(self.audio_eng.current),
@@ -1828,8 +1865,11 @@ class StreamingSession:
 
             k1_name = "sde_amp" if use_sde else "denoise"
             initial_knob_ids = list(initial_enable_ids) if use_lora else []
-            banks = build_banks(use_sde, loras=initial_knob_ids)
-            virtual_knobs = KnobState(banks)
+            # Seeded from the full registry (bank knobs and raw-param knobs
+            # alike), so the session snapshot's knob_values is complete from
+            # t=0 — before the first client param tick and for headless /
+            # MCP-only sessions.
+            virtual_knobs = KnobState(knob_specs(use_sde, loras=initial_knob_ids))
 
             state = SessionState(
                 source=source,

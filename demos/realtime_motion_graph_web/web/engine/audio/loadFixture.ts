@@ -8,9 +8,9 @@
 // existing Play / fixture-swap paths work unchanged when the active
 // fixture is an upload.
 
-import { fetchWithRetry } from "@/engine/fetchWithRetry";
+import { fetchWithRetry } from "@demon/client";
 import { defaultWsUrl, podHttp } from "@/engine/podUrl";
-import { SAMPLE_RATE } from "@/engine/protocol";
+import { SAMPLE_RATE } from "@demon/client";
 import { getApiKey } from "@/engine/rtmgConfig";
 
 export interface DecodedFixture {

@@ -9,9 +9,11 @@ The HTTP side mimics just enough of
 ``demos/realtime_motion_graph_web/server.py`` for the app to come up:
 ``/api/server-info`` (advertising the transcript's fixtures as
 server-side loadable, so the client skips the PCM upload exactly like
-the recording did), ``/api/fixtures``, ``/api/loras`` and
-``/api/user_uploads``. WebSocket upgrades on any path replay the
-transcript.
+the recording did), ``/api/fixtures``, ``/api/loras``,
+``/api/user_uploads``, and the self-describing capability probes
+``/api/knobs`` / ``/api/protocol`` (served from the real registries —
+both are torch-free, so the replay stays CPU-only). WebSocket upgrades
+on any path replay the transcript.
 
 Replay semantics:
 
@@ -117,6 +119,22 @@ def make_process_request(transcript: Transcript):
             return _json_response(transcript.fixtures())
         if path_only in ("/api/loras", "/api/user_uploads", "/api/videos"):
             return _json_response([])
+        # Capability probes: serve the REAL knob manifest and wire
+        # contract (same modules server.py uses — pure dataclasses /
+        # numpy, no torch) so the app boots against replay exactly as it
+        # does against a live pod and the e2e clean-console bar holds.
+        if path_only == "/api/knobs":
+            from acestep.streaming.knobs import (
+                KNOB_SCHEMA_VERSION, knob_catalog)
+            query = request.path.split("?", 1)[1] if "?" in request.path else ""
+            sde = "sde=1" in query or "sde=true" in query
+            return _json_response({
+                "version": KNOB_SCHEMA_VERSION,
+                "knobs": knob_catalog(sde=sde, loras=[]),
+            })
+        if path_only == "/api/protocol":
+            from demos.realtime_motion_graph_web.protocol import wire_contract
+            return _json_response(wire_contract())
         body = b"not found (replay server)"
         return Response(
             404, "Not Found",

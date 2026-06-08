@@ -7,9 +7,8 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { RemoteBackend } from "@/engine/protocol";
-import type { AudioSlice, SwapReadyDetail } from "@/types/protocol";
-import { SLICE_FLAG_DELTA } from "@/types/protocol";
+import { RemoteBackend, SLICE_FLAG_DELTA } from "@demon/client";
+import type { AudioSlice, SwapReadyDetail } from "@demon/client";
 
 import {
   FakeWebSocket,

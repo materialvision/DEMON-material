@@ -10,10 +10,10 @@
 // app itself uses, so the hooks double as living documentation of the
 // observable session contract.
 
-import { SAMPLE_RATE } from "@/engine/protocol";
+import { SAMPLE_RATE } from "@demon/client";
+import type { AudioSlice } from "@demon/client";
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
-import type { AudioSlice } from "@/types/protocol";
 
 interface SliceRecord {
   /** performance.now() at dispatch. */

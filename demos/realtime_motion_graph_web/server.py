@@ -265,6 +265,55 @@ def _process_request(connection, request):
             body,
         )
 
+    # API: knob manifest — the complete, self-describing knob registry
+    # (acestep.streaming.knobs.knob_catalog) so any frontend can render and
+    # validate controls without re-declaring them. Static schema: the
+    # per-session ``lora_str_<id>`` knobs and live values arrive over the WS
+    # ready frame / MCP list_knobs. ``?sde=1`` returns the SDE-mode core set.
+    # ACAO:* like /api/server-info — the UI fetches this cross-origin (Vercel)
+    # before the WS handshake, and the schema carries nothing sensitive.
+    if path_only == "/api/knobs":
+        from acestep.streaming.knobs import KNOB_SCHEMA_VERSION, knob_catalog
+        query = url.split("?", 1)[1] if "?" in url else ""
+        sde = "sde=1" in query or "sde=true" in query
+        body = json.dumps({
+            "version": KNOB_SCHEMA_VERSION,
+            "knobs": knob_catalog(sde=sde, loras=[]),
+        }).encode()
+        _log_http(remote, 200, "GET", url)
+        return Response(
+            200, "OK",
+            Headers([
+                ("Content-Type", "application/json; charset=utf-8"),
+                ("Content-Length", str(len(body))),
+                ("Access-Control-Allow-Origin", "*"),
+                *_NO_CACHE_HEADERS,
+            ]),
+            body,
+        )
+
+    # API: WebSocket wire contract — the self-describing command/event
+    # vocabulary (demos.realtime_motion_graph_web.protocol.wire_contract) so
+    # a re-skinned frontend or MCP agent can build every control message and
+    # decode every server event without reverse-engineering protocol.ts. The
+    # per-command ``params`` knob payload has its own manifest at /api/knobs.
+    # ACAO:* like /api/knobs — fetched cross-origin before the WS handshake,
+    # carries nothing sensitive.
+    if path_only == "/api/protocol":
+        from .protocol import wire_contract
+        body = json.dumps(wire_contract()).encode()
+        _log_http(remote, 200, "GET", url)
+        return Response(
+            200, "OK",
+            Headers([
+                ("Content-Type", "application/json; charset=utf-8"),
+                ("Content-Length", str(len(body))),
+                ("Access-Control-Allow-Origin", "*"),
+                *_NO_CACHE_HEADERS,
+            ]),
+            body,
+        )
+
     # API: list user uploads sitting in MODELS_DIR/user_uploads/.  Same
     # shape as /api/fixtures so the client can merge both lists into a
     # single picker.

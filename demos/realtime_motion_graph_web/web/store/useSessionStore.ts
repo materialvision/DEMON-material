@@ -2,10 +2,10 @@
 
 import { create } from "zustand";
 
-import type { AudioPlayer } from "@/engine/audio/AudioPlayer";
+import type { AudioPlayer } from "@demon/client";
 import type { NetworkMonitor } from "@/engine/networkMonitor";
-import type { RemoteBackend, WsTrace } from "@/engine/protocol";
-import type { WsReconnector } from "@/engine/wsReconnect";
+import type { RemoteBackend, WsTrace } from "@demon/client";
+import type { WsReconnector } from "@demon/client";
 
 // Live-session lifecycle state. The non-serializable RemoteBackend +
 // AudioPlayer instances live here so React components and hooks can react

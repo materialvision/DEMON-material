@@ -9300,3 +9300,75 @@ body.curve-open #install-video-area #graph {
   opacity: 0.92;
   pointer-events: none;
 }
+
+/* Auto-generated knob panel (DynamicKnobPanel) — the manifest-driven
+   reference surface in the drawer's "Auto" tab. Deliberately plain: it's a
+   template for re-skins, not a designed tile. Slider rows reuse .knob-rack;
+   these rules only cover the group headers and the enum/bool/number
+   fields that have no shipped-tile equivalent. */
+.dyn-knob-note {
+  margin: 0 0 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  opacity: 0.6;
+}
+.dyn-knob-note code {
+  font-size: 10px;
+  opacity: 0.85;
+}
+.dyn-knob-empty {
+  padding: 24px 8px;
+  font-size: 12px;
+  opacity: 0.6;
+  text-align: center;
+}
+.dyn-knob-group {
+  margin-bottom: 16px;
+}
+.dyn-knob-group-label {
+  margin: 0 0 6px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+.dyn-knob-group .knob-rack {
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+}
+.dyn-knob-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+}
+.dyn-knob-field--bool {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.dyn-knob-field-label {
+  opacity: 0.75;
+}
+.dyn-knob-number,
+.dyn-knob-select {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 6px;
+  min-width: 96px;
+}
+.dyn-knob-number:disabled,
+.dyn-knob-select:disabled {
+  opacity: 0.4;
+}
+.dyn-knob-unbound {
+  font-size: 9px;
+  font-style: normal;
+  opacity: 0.4;
+}
+

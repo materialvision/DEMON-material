@@ -9,8 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { AudioPlayer } from "@/engine/audio/AudioPlayer";
-import { SAMPLE_RATE } from "@/engine/protocol";
+import { AudioPlayer, SAMPLE_RATE } from "@demon/client";
 
 // ── minimal AudioContext stub (SP fallback) ────────────────────────────
 

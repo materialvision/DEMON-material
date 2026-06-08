@@ -2,24 +2,25 @@
 
 import { useCallback } from "react";
 
-import { AudioPlayer } from "@/engine/audio/AudioPlayer";
+import { AudioPlayer } from "@demon/client";
 import { listFixtures, loadFixtureAudio, pickDefaultFixture } from "@/engine/audio/loadFixture";
 import { createNetworkMonitor } from "@/engine/networkMonitor";
 import { defaultWsUrl } from "@/engine/podUrl";
-import { RemoteBackend, SAMPLE_RATE, SLICE_FLAG_DELTA } from "@/engine/protocol";
+import { RemoteBackend, SAMPLE_RATE, SLICE_FLAG_DELTA } from "@demon/client";
 import { getApiKey, getClientId } from "@/engine/rtmgConfig";
-import { WsReconnector } from "@/engine/wsReconnect";
+import { WsReconnector } from "@demon/client";
 import {
   applyLoraCapWithServerSync,
   getConfig,
   resolveLoraCapForSource,
 } from "@/lib/config";
+import { wirePromptTransform } from "@/lib/loraTriggers";
 import { useCustomTracksStore } from "@/store/useCustomTracksStore";
 import { useLoraStore } from "@/store/useLoraStore";
 import { usePerformanceStore, type RefSource } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
 import { isTimeSignature } from "@/types/engine";
-import type { AudioSlice, SessionConfig } from "@/types/protocol";
+import type { AudioSlice, SessionConfig, WsTrace } from "@demon/client";
 
 /**
  * Resolve the WS URL for this session. Preference order:
@@ -177,6 +178,39 @@ function wireRemoteListeners(
   remote: RemoteBackend,
   onUnexpectedClose: (e: CloseEvent | { code?: number; reason?: string }) => void,
 ): void {
+  // Mirror engine identity + depth bounds into the session store. These
+  // writes used to live inside RemoteBackend's ready handler; the SDK no
+  // longer touches app stores, so the app subscribes instead. Attached
+  // before connect() on both the initial and reconnect paths, so the
+  // "ready" dispatch (fired once the initial buffer lands, just before
+  // connect() resolves) is never missed.
+  remote.addEventListener("ready", () => {
+    const s = useSessionStore.getState();
+    s.setCheckpointScale(remote.checkpointScale);
+    s.setPipelineDepth(remote.pipelineDepth);
+    s.setMaxPipelineDepth(remote.maxPipelineDepth);
+  });
+  remote.addEventListener("depth_applied", (e) => {
+    useSessionStore
+      .getState()
+      .setPipelineDepth((e as CustomEvent<number>).detail);
+  });
+  // WS startup telemetry. The SDK only observes its own connection
+  // (wsTrace + the optional init_ack echo); persisting the latest trace
+  // for the debug surface is the app's job. Attached before connect()
+  // (both paths), so traces from attempts that fail before setSession()
+  // publishes the remote still land in the store.
+  remote.addEventListener("ws_trace_update", (e) => {
+    useSessionStore
+      .getState()
+      .setLastWsTrace((e as CustomEvent<WsTrace>).detail);
+  });
+  remote.addEventListener("ws_init_ack", () => {
+    const s = useSessionStore.getState();
+    s.setLastBackendSessionId(remote.backendSessionId);
+    s.setLastBackendClientId(remote.backendClientId);
+  });
+
   remote.addEventListener("slice", (e) => {
     const detail = (e as CustomEvent<AudioSlice>).detail;
     const player = useSessionStore.getState().player;
@@ -449,6 +483,7 @@ export function useStartSession() {
         sessionFixture.interleaved,
         sessionFixture.channels,
         config,
+        { promptTransform: wirePromptTransform },
       );
       wireRemoteListeners(remote, (detail) => triggerReconnect(detail));
       try {
@@ -590,6 +625,7 @@ export function useStartSession() {
       resolved.interleaved,
       resolved.channels,
       config,
+      { promptTransform: wirePromptTransform },
     );
     // Wire engine → store. Bind BEFORE connect() so we never miss the first
     // few slices (server can send within milliseconds of "ready").
@@ -610,7 +646,9 @@ export function useStartSession() {
 
     setStatus("connecting", "Starting audio…");
 
-    const player = new AudioPlayer();
+    const player = new AudioPlayer({
+      loudnessConfig: () => getConfig().audio,
+    });
     try {
       await player.init(remote.initialBuffer, remote.channels);
       await player.resume();

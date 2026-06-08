@@ -96,6 +96,14 @@ export const DCW_MODES = ["low", "high", "double", "pix"] as const;
 export const DCW_WAVELETS = ["haar", "db4", "sym8", "db8"] as const;
 export type DcwMode = (typeof DCW_MODES)[number];
 export type DcwWavelet = (typeof DCW_WAVELETS)[number];
+export function isDcwMode(v: unknown): v is DcwMode {
+  return typeof v === "string" && (DCW_MODES as readonly string[]).includes(v);
+}
+export function isDcwWavelet(v: unknown): v is DcwWavelet {
+  return (
+    typeof v === "string" && (DCW_WAVELETS as readonly string[]).includes(v)
+  );
+}
 
 // RCFG (Residual Classifier-Free Guidance) modes. "off" disables APG
 // entirely on the wire (turbo default — no guidance, no extra forwards).
