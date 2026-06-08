@@ -146,6 +146,7 @@ class Capabilities:
     swap: bool = False
     timbre: bool = False
     structure: bool = False
+    write_audio: bool = False
     lora: bool = False
     stems: bool = False
     loop_band: bool = False

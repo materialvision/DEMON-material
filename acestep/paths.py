@@ -730,6 +730,68 @@ def available_windowed_vae_decode_engine(*, dreamvae: bool = False) -> Path | No
     return p if p.exists() else None
 
 
+# ------------------------------------------------------------------
+# Windowed VAE encode — a FIXED 5-second engine (min == opt == max ==
+# 240000 samples = 5 s @ 48 kHz). The runtime-input ("play into the
+# model") path selects it opportunistically, mirroring how the windowed
+# decode engine above is swapped in when ``vae_window > 0``.
+#
+# Each live re-encode feeds this engine exactly 240000 samples (5 s) and
+# keeps the middle frames; the leftover frames on each side are the
+# encoder's receptive-field margin (~7 frames measured; 10 frames /
+# 0.4 s each side is floor-exact — see
+# scripts/experiments/realtime_input/encoder_receptive_field.py). A 5 s
+# window therefore yields 105 usable center frames (4.2 s) per call.
+#
+# Why fixed 5 s rather than a 1 s engine like the decode side:
+#   * sub-5 s encode shapes are a Myelin trap on TRT 10.16 / RTX 5090.
+#     At builder opt level 1 (the documented workaround level for the
+#     ranged 5-60 s encoder) they emit a broken fusion that access-
+#     violates (0xC0000005, hard process crash) at context creation or
+#     the first execute. Opt level 0 builds run but its kernels are
+#     ~7x slower per sample and batching does not amortize it.
+#   * A 5 s window sits inside the shape range where the level-1 build
+#     is proven (the ranged 5-60 s engine runs it daily), so it is the
+#     smallest safe fixed encode profile. Do NOT shrink it below 5 s.
+# See scripts/experiments/realtime_input/build_windowed_encoder.py.
+#
+# The profile is recorded in the engine's .metadata.json, so changing
+# these samples invalidates the sidecar and forces a rebuild.
+# ------------------------------------------------------------------
+
+WINDOWED_VAE_ENCODE_NAME = "vae_encode_fp16_5s_fixed"
+# Fixed audio-sample profile (min == opt == max): 5 s @ 48 kHz.
+WINDOWED_VAE_ENCODE_PROFILE_SAMPLES: tuple[int, int, int] = (240000, 240000, 240000)
+# Encoder receptive-field margin trimmed off each side of a re-encoded
+# window before splicing its center (measured ~7 frames; 10 frames /
+# 0.4 s is floor-exact). A 125-frame (5 s) window therefore yields
+# 125 - 2*10 = 105 usable center frames (4.2 s) per call.
+WINDOWED_VAE_ENCODE_MARGIN_FRAMES: int = 10
+
+
+def windowed_vae_encode_engine_name() -> str:
+    """Engine directory/file stem for the windowed VAE encode engine."""
+    return WINDOWED_VAE_ENCODE_NAME
+
+
+def windowed_vae_encode_engine_path() -> Path:
+    """Path to the windowed VAE encode engine. Pure: does not check
+    existence. Use :func:`available_windowed_vae_encode_engine` for
+    existence-aware lookup."""
+    return trt_engine_path(windowed_vae_encode_engine_name())
+
+
+def available_windowed_vae_encode_engine() -> Path | None:
+    """Return the windowed VAE encode engine path if it is built, else None.
+
+    The real-time-input splice path uses this to opportunistically swap
+    in the small fixed-profile encode engine, falling back silently to
+    whatever ranged ``vae_encode`` engine the caller already loaded.
+    """
+    p = windowed_vae_encode_engine_path()
+    return p if p.exists() else None
+
+
 def looks_like_dreamvae_engine(path: str | Path) -> bool:
     """True when ``path`` points at a dreamvae (distilled) engine.
 

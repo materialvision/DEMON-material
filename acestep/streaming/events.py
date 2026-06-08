@@ -69,6 +69,8 @@ __all__ = [
     "StructureSet",
     "StructureCleared",
     "StructureFailed",
+    "AudioWritten",
+    "AudioWriteFailed",
     "SessionReady",
     "SessionError",
     "SubscriberDropped",
@@ -203,6 +205,9 @@ class SwapReady:
     stems: dict | None = None              # {name: np.ndarray | torch.Tensor}
     stem_source_mode: str | None = None
     stem_error: str | None = None
+    # Canvas generation after this swap (write_audio targets must match;
+    # see SessionState.source_epoch).
+    source_epoch: int = 0
 
 
 @dataclass(frozen=True)
@@ -276,6 +281,25 @@ class StructureCleared:
 
 @dataclass(frozen=True)
 class StructureFailed:
+    error: str
+
+
+@dataclass(frozen=True)
+class AudioWritten:
+    """A ``write_audio`` landed: the span was written onto the session's
+    audio canvas, re-encoded, and committed into the live source latent
+    in place (no song restart). ``start_s`` / ``end_s`` bound the
+    refreshed latent span (the written audio plus the receptive-field
+    margin); ``source_epoch`` is the canvas generation the write applied
+    to (bumped by every source swap)."""
+
+    start_s: float
+    end_s: float
+    source_epoch: int
+
+
+@dataclass(frozen=True)
+class AudioWriteFailed:
     error: str
 
 

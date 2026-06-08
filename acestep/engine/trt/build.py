@@ -783,6 +783,82 @@ def _build_windowed_vae_decode_engine(
     return (label, engine_path, elapsed, "OK")
 
 
+def _build_windowed_vae_encode_engine(
+    *,
+    output_dir: str,
+    onnx_paths: dict[str, str],
+    workspace_gb: float,
+    env: dict,
+    force_rebuild: bool = False,
+) -> tuple[str, str, float, str]:
+    """Build the fixed 5-second windowed VAE *encode* engine (240000 samples).
+
+    The mirror of :func:`_build_windowed_vae_decode_engine` for the
+    real-time-input ("play into the model") path, which selects this
+    engine opportunistically via
+    :func:`acestep.paths.available_windowed_vae_encode_engine`. A fixed
+    5 s profile reserves a small TRT activation workspace vs the ranged
+    5-60 s encode engine while staying inside the shape range where the
+    opt-level-1 build is proven on the 5090 — sub-5 s encode shapes are a
+    Myelin trap (hard crash at level 1, ~7x slower at level 0). See
+    acestep.paths.WINDOWED_VAE_ENCODE_PROFILE_SAMPLES and
+    scripts/experiments/realtime_input/build_windowed_encoder.py.
+
+    The skip gate compares the sidecar ``.metadata.json`` against the
+    current env, so a TRT bump via ``uv sync`` correctly invalidates a
+    stale engine.
+    """
+    from .vae_export import build_vae_encode_engine, VAETRTBuildConfig
+    from acestep.paths import (
+        WINDOWED_VAE_ENCODE_NAME,
+        WINDOWED_VAE_ENCODE_PROFILE_SAMPLES,
+    )
+
+    name = WINDOWED_VAE_ENCODE_NAME
+    engine_dir = os.path.join(output_dir, name)
+    engine_path = os.path.join(engine_dir, f"{name}.engine")
+    label = "VAE encode fixed 5s (240k samples)"
+
+    min_s, opt_s, max_s = WINDOWED_VAE_ENCODE_PROFILE_SAMPLES
+    config = VAETRTBuildConfig(
+        workspace_gb=workspace_gb,
+        encode_min_samples=min_s,
+        encode_opt_samples=opt_s,
+        encode_max_samples=max_s,
+        # Default builder_optimization_level=1: 5 s is inside the shape
+        # range where the level-1 build is proven on the 5090. Do NOT
+        # shrink the window below 5 s — see the module/paths docstrings
+        # for the sub-5 s Myelin trap.
+    )
+
+    expected = _expected_metadata(
+        component="vae_encode_windowed",
+        onnx_path=onnx_paths["vae_encode"],
+        config=config,
+        env=env,
+    )
+
+    if not force_rebuild and os.path.exists(engine_path):
+        matches, reason = _metadata_matches(engine_path, expected)
+        if matches:
+            size_mb = os.path.getsize(engine_path) / 1e6
+            logger.info("SKIP {} ({:.0f} MB, {})", name, size_mb, reason)
+            return (label, engine_path, 0.0, "SKIPPED")
+        logger.info("REBUILD {} ({})", name, reason)
+
+    logger.info("=" * 60)
+    logger.info("VAE TRT BUILD (windowed): {} (min={} opt={} max={} samples)",
+                name, min_s, opt_s, max_s)
+    logger.info("=" * 60)
+
+    t0 = time.time()
+    build_vae_encode_engine(onnx_paths["vae_encode"], engine_path, config=config)
+    _write_metadata(engine_path=engine_path, expected=expected, env=env)
+    elapsed = time.time() - t0
+    logger.info("Built in {:.0f}s", elapsed)
+    return (label, engine_path, elapsed, "OK")
+
+
 def _checkpoint_to_variant(checkpoint: str) -> str:
     """Extract short variant name from checkpoint path.
 
@@ -902,6 +978,7 @@ def _print_matrix(durations, build_vae, build_decoder, output_dir, batch_max,
 
     from acestep.paths import (
         WINDOWED_VAE_DECODE_NAME,
+        WINDOWED_VAE_ENCODE_NAME,
         WINDOWED_DREAMVAE_DECODE_NAME,
     )
     # Defer to TRTBuildConfig.engine_filename so this preview can't
@@ -934,6 +1011,7 @@ def _print_matrix(durations, build_vae, build_decoder, output_dir, batch_max,
     # profile) so they're appended once, outside the duration loop.
     if build_vae:
         jobs.append(("VAE decode fixed 1s (25 fr)", WINDOWED_VAE_DECODE_NAME))
+        jobs.append(("VAE encode fixed 5s (240k samples)", WINDOWED_VAE_ENCODE_NAME))
     if build_dreamvae:
         jobs.append(("DreamVAE decode fixed 1s (25 fr)", WINDOWED_DREAMVAE_DECODE_NAME))
 
@@ -1263,6 +1341,15 @@ def _run_all(args, project_root, onnx_dir, env):
     # Auto-selected by Session when vae_window > 0.
     if build_vae:
         results.append(_build_windowed_vae_decode_engine(
+            output_dir=args.output_dir,
+            onnx_paths=onnx_paths,
+            workspace_gb=args.workspace_gb,
+            env=env,
+            force_rebuild=args.force_rebuild,
+        ))
+        # Windowed VAE encode (single fixed 5 s profile). Selected by the
+        # real-time-input splice path; same duration-independent rationale.
+        results.append(_build_windowed_vae_encode_engine(
             output_dir=args.output_dir,
             onnx_paths=onnx_paths,
             workspace_gb=args.workspace_gb,

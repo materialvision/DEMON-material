@@ -388,6 +388,51 @@ COMMANDS: tuple = (
                     "follows UNLESS use_server_source is set. Acked by "
                     "swap_ready (+ binary buffer) / swap_failed.",
     ),
+    CommandSpec(
+        "write_audio",
+        fields=(
+            FieldSpec("at_s", "float", nullable=True, default=0.0,
+                      description="Where the buffer's first sample lands on the "
+                                  "source, in playback seconds (sample-exact; no "
+                                  "frame or grid alignment required). Default 0. "
+                                  "Audio past the source end is trimmed, never "
+                                  "wrapped."),
+            FieldSpec("mix", "enum", options=("replace", "sum"),
+                      default="replace",
+                      description="replace = overwrite the span (declicked "
+                                  "against the existing audio at the edges); "
+                                  "sum = overdub on top of what's there."),
+            FieldSpec("repeat", "enum", options=("none", "fill"),
+                      default="none",
+                      description="fill = treat the buffer as ONE period of a "
+                                  "loop and lay it across the whole source, "
+                                  "phase-anchored at at_s (sample-exact audio-"
+                                  "domain tiling; any period length works). "
+                                  "Default none = write once."),
+            FieldSpec("source_epoch", "int", nullable=True,
+                      description="The source generation this write targets "
+                                  "(from ready/swap_ready, bumped by every "
+                                  "swap). A mismatch is rejected with "
+                                  "audio_write_failed instead of splicing into "
+                                  "the wrong source. Omit to write against "
+                                  "whatever is live."),
+            FieldSpec("refresh_timbre", "bool",
+                      description="Re-encode the self-timbre conditioning against "
+                                  "the updated source (~+50 ms). Ignored when a "
+                                  "timbre override is active. Default false."),
+        ),
+        binary=True,
+        requires="write_audio",
+        description="Write audio onto the live source in place — the 'play "
+                    "into the model' path, NO song restart / playhead reset / "
+                    "BPM-key detect. The binary PCM frame is ONLY the audio "
+                    "being written (a bar, a chunk, or the whole track): the "
+                    "server keeps a sample-exact mirror of the source audio "
+                    "and pulls all re-encode context from it, so no context "
+                    "margins, window math, or full-loop re-uploads. "
+                    + _PCM_FRAME + " Acked by audio_written / "
+                    "audio_write_failed.",
+    ),
 )
 
 EVENTS: tuple = (
@@ -428,6 +473,11 @@ EVENTS: tuple = (
             FieldSpec("session_id", "str",
                       description="Server-minted session id, echoed for "
                                   "client/analytics log correlation."),
+            FieldSpec("source_epoch", "int",
+                      description="Source generation counter (0 at create, "
+                                  "bumped by every swap). Echo it in "
+                                  "write_audio to pin a write to the source "
+                                  "it was computed against."),
             # Phase-2 contract surface (backend-seam plan §3.1–3.3).
             # Wire-optional: golden replay transcripts recorded before
             # Phase 2 lack them, and the client falls back to its
@@ -531,6 +581,10 @@ EVENTS: tuple = (
             FieldSpec("key", "str", nullable=True),
             FieldSpec("time_signature", "str", nullable=True),
             FieldSpec("fixture_name", "str", nullable=True),
+            FieldSpec("source_epoch", "int",
+                      description="Source generation counter after this swap; "
+                                  "write_audio sends targeting the old source "
+                                  "are rejected."),
         ),
         binary_follow=True,
         description="Swap accepted; a binary float16 replacement buffer follows "
@@ -609,6 +663,23 @@ EVENTS: tuple = (
         description="Failure ack for any set_structure_* path, and the notice "
                     'emitted when a swap drops a structure override ("dropped '
                     'after swap: ...").',
+    ),
+    EventSpec(
+        "audio_written",
+        fields=(FieldSpec("start_s", "float", required=True),
+                FieldSpec("end_s", "float", required=True),
+                FieldSpec("source_epoch", "int", required=True,
+                          description="The source generation the write landed "
+                                      "on (matches ready/swap_ready).")),
+        description="Ack for write_audio: the (start_s, end_s) playback span "
+                    "whose latent was refreshed (the written audio plus the "
+                    "encoder's receptive-field margin).",
+    ),
+    EventSpec(
+        "audio_write_failed",
+        fields=(FieldSpec("error", "str"),),
+        description="Failure ack for write_audio (stale source_epoch, write "
+                    "past the source end, bad mix/repeat, no encode path).",
     ),
     EventSpec(
         "command_failed",

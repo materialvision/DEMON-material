@@ -69,6 +69,7 @@ from acestep.paths import (
     smallest_fitting_profile_duration_s,
 )
 
+from acestep.engine.canvas import SourceCanvas
 from acestep.streaming.audio_engine import AudioEngine
 from acestep.streaming.commands import CommandOrigin
 from acestep.streaming.config import SessionConfig
@@ -76,6 +77,8 @@ from acestep.streaming.encode import blend_for_strength, encode_cond_pair
 from acestep.steering import CapacityError, EmptyError
 from acestep.streaming.events import (
     AudioReady,
+    AudioWriteFailed,
+    AudioWritten,
     CommandFailed,
     DepthApplied,
     EventBus,
@@ -151,7 +154,8 @@ IDLE_PAUSE_S = float(os.environ.get("DEMON_IDLE_PAUSE_S", "20"))
 # Sample-count alignment quantum for the source waveform. The vae_encode
 # graph builds latents in 5-frame groups at 48 kHz / 25 fps; sources
 # must be trimmed to a multiple of this length or the encoder rejects.
-_POOL = 1920 * 5
+_SAMPLES_PER_FRAME = 1920
+_POOL = _SAMPLES_PER_FRAME * 5
 
 
 def _compute_max_pipeline_depth(diffusion_engine) -> int:
@@ -379,6 +383,7 @@ class StreamingSession:
         stream,
         state: SessionState,
         audio_eng: AudioEngine,
+        canvas: SourceCanvas,
         virtual_knobs: KnobState,
         engine_obj,
         profile_mgr: TRTProfileManager | None,
@@ -413,6 +418,10 @@ class StreamingSession:
         self.stream = stream
         self.state = state
         self.audio_eng = audio_eng
+        # Sample-exact audio mirror of the source latent, the substrate
+        # for write_audio. Replaced wholesale (with a source_epoch bump)
+        # by every swap; never mutated by playback.
+        self.canvas = canvas
         self.virtual_knobs = virtual_knobs
         self.engine_obj = engine_obj
         self.profile_mgr = profile_mgr
@@ -958,6 +967,13 @@ class StreamingSession:
                 ))
                 return
 
+            # New-source audio mirror, built unlocked like the rest of
+            # the setup work; swapped in (with the epoch bump) under the
+            # commit lock below.
+            new_canvas = SourceCanvas(
+                new_wf.to(new_source.latent.tensor.device),
+            )
+
             # Commit phase: every state / stream / audio_eng mutation
             # for the swap lands under ``state._lock`` so a concurrent
             # ``set_prompt`` / timbre / structure call can't half-overwrite
@@ -970,6 +986,10 @@ class StreamingSession:
                 self.stream.source = new_source
                 state.source = new_source
                 state.playback_samples = int(new_wf.shape[-1])
+                # Retire the old canvas: a write_audio staged against it
+                # epoch-checks at commit and discards itself.
+                self.canvas = new_canvas
+                state.source_epoch += 1
                 tl = state.timbre_latent
                 refer = tl if tl is not None else new_source.latent
                 state.cond_pair = encode_cond_pair(
@@ -1038,6 +1058,7 @@ class StreamingSession:
                 stems=new_upload_stems,
                 stem_source_mode=new_stem_source_mode if new_upload_stems is not None else None,
                 stem_error=new_stem_error if new_upload_stems is None else None,
+                source_epoch=state.source_epoch,
             ))
             logger.info(
                 "source_swap_complete duration_s={:.1f}",
@@ -1764,6 +1785,151 @@ class StreamingSession:
                 stem_source_mode,
             )
 
+    @requires_capability("write_audio", "write_audio")
+    def write_audio(
+        self,
+        audio: Audio,
+        *,
+        at_s: float = 0.0,
+        mix: str = "replace",
+        repeat: str = "none",
+        source_epoch: int | None = None,
+        refresh_timbre: bool = False,
+        origin: CommandOrigin = CommandOrigin.PRIMARY,
+    ) -> None:
+        """Write audio onto the live source — the "play into the model"
+        path, distinct from :meth:`swap_source`.
+
+        Unlike a swap, this does NOT restart the song, reset the
+        playhead, run BPM/key detection, or re-run ``prepare_source``.
+        The audio lands on the session's :class:`~acestep.engine.canvas.
+        SourceCanvas` (the sample-exact mirror of the source audio) at
+        ``at_s``; the dirty span is re-encoded with true context pulled
+        from the mirror and committed into the live source latent in
+        place, so the edit emerges within a few ticks. Clients ship ONLY
+        the changed audio — no context margins, no frame math, no full-
+        loop re-uploads; placement is plain seconds.
+
+        * ``mix="replace"`` overwrites (declicked against the existing
+          audio); ``mix="sum"`` overdubs on top.
+        * ``repeat="fill"`` treats the buffer as one period of a loop
+          and lays it across the whole canvas, phase-anchored at
+          ``at_s`` — sample-exact in the audio domain, so any bar
+          length works (the 25 fps latent grid never quantizes the
+          period).
+        * ``source_epoch`` (from ``ready`` / ``swap_ready``) pins the
+          write to the canvas generation it was computed against; a
+          mismatch is rejected instead of splicing into the wrong
+          source. Omit to write against whatever is live.
+
+        Locking: the GPU re-encode is STAGED outside ``state._lock``
+        (the runner takes that lock every tick — an encode under it
+        stalls the tick loop) and committed under it as one tensor copy,
+        re-validating the epoch so a concurrent swap discards the stale
+        block instead of racing it.
+
+        The structure (semantic hint) is refreshed from the committed
+        latent (~free); the conditioning's self-timbre reference is
+        refreshed only when ``refresh_timbre`` is set (the expensive
+        optional, ~+50 ms per prompt) and only in self-timbre mode (an
+        explicit timbre override is left untouched).
+        """
+        state = self.state
+        state.last_activity_ts = time.monotonic()
+        logger.info(
+            "write_audio_recv origin={} at_s={} mix={} repeat={} "
+            "source_epoch={} refresh_timbre={} buffer_s={:.2f}",
+            origin.value, at_s, mix, repeat, source_epoch, refresh_timbre,
+            audio.waveform.shape[-1] / SAMPLE_RATE,
+        )
+        try:
+            # Phase 1 (locked, cheap): validate the epoch and land the
+            # audio on the mirror.
+            with state._lock:
+                epoch = state.source_epoch
+                canvas = self.canvas
+                if source_epoch is not None and source_epoch != epoch:
+                    logger.warning(
+                        "write_audio_stale_epoch sent={} current={}",
+                        source_epoch, epoch,
+                    )
+                    self.bus.publish(AudioWriteFailed(error=(
+                        f"stale source_epoch {source_epoch} (current "
+                        f"{epoch}); re-read it from ready/swap_ready"
+                    )))
+                    return
+                f0, f1 = canvas.write(
+                    audio.waveform, at_s=at_s, mix=mix, repeat=repeat,
+                )
+
+            # Phase 2 (unlocked): GPU re-encode of the dirty span, with
+            # context read from the mirror.
+            staged, e0, e1 = self.stream.stage_source_frames(canvas, f0, f1)
+
+            # Phase 3 (locked, one tensor copy): commit unless the
+            # source swapped out from under the encode.
+            with state._lock:
+                if state.source_epoch != epoch:
+                    logger.info("write_audio_discarded reason=source_swapped")
+                    self.bus.publish(AudioWriteFailed(error=(
+                        "source swapped during the write; re-send against "
+                        "the new source_epoch"
+                    )))
+                    return
+                self.stream.commit_source_frames(staged, e0, e1)
+
+            # Structure hint derives from the source latent — refresh it
+            # from the committed result (unlocked GPU read; reference
+            # swapped under the lock). When no structure override is
+            # active, ``state.source`` is the same PreparedSource the
+            # runner reads via ``stream.source.context_latent``; when an
+            # override IS active the runner keeps reading the override
+            # and this only keeps ``state.source`` fresh for a later
+            # clear.
+            ctx = self.session.extract_hints(self.stream.source.latent)
+            with state._lock:
+                if state.source_epoch == epoch:
+                    state.source.context_latent = ctx
+                    r = self.runner_holder[0]
+                    if r is not None:
+                        r.mark_hint_dirty()
+
+            # Self-timbre conditioning anchors on the source latent, so
+            # it goes stale on a write. Refresh only on request and only
+            # when there's no explicit timbre override; encode unlocked
+            # (snapshot in, epoch-checked assign out).
+            if refresh_timbre and state.timbre_latent is None:
+                with state._lock:
+                    prompt_a = state.prompt_text
+                    prompt_b = state.prompt_text_b
+                    bpm, dur = state.bpm, state.duration
+                    key, tsig = state.key, state.time_signature
+                refer = self.stream.source.latent
+                cp = encode_cond_pair(
+                    self.session, prompt_a, refer, bpm, dur, key, tsig,
+                )
+                cp_b = cp if prompt_b == prompt_a else encode_cond_pair(
+                    self.session, prompt_b, refer, bpm, dur, key, tsig,
+                )
+                with state._lock:
+                    if state.source_epoch == epoch:
+                        state.cond_pair = cp
+                        state.cond_pair_b = cp_b
+                        self._refresh_conditioning()
+
+            self.bus.publish(AudioWritten(
+                start_s=e0 / 25.0, end_s=e1 / 25.0, source_epoch=epoch,
+            ))
+            logger.info(
+                "write_audio_applied span_frames=({},{}) span_s=({:.2f},{:.2f})",
+                e0, e1, e0 / 25.0, e1 / 25.0,
+            )
+        except Exception as exc:
+            logger.opt(exception=True).error(
+                "write_audio_failed origin={} error={}", origin.value, exc,
+            )
+            self.bus.publish(AudioWriteFailed(error=str(exc)))
+
     # ---- Constructor ---------------------------------------------------
 
     @classmethod
@@ -2083,6 +2249,14 @@ class StreamingSession:
                 audio_eng.stop,
             )
 
+            # Audio mirror of the source latent (the write_audio
+            # substrate), resident on the latent's device so encode
+            # windows slice without per-write host transfers. ~23 MB
+            # for a 60 s stereo source.
+            canvas = SourceCanvas(
+                waveform.to(source.latent.tensor.device),
+            )
+
             k1_name = "sde_amp" if use_sde else "denoise"
             initial_knob_ids = list(initial_enable_ids) if use_lora else []
             # Seeded from the full registry (bank knobs and raw-param knobs
@@ -2114,6 +2288,7 @@ class StreamingSession:
                 stream=stream,
                 state=state,
                 audio_eng=audio_eng,
+                canvas=canvas,
                 virtual_knobs=virtual_knobs,
                 engine_obj=engine_obj,
                 profile_mgr=profile_mgr,

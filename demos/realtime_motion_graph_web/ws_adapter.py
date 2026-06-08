@@ -57,6 +57,8 @@ from acestep.streaming.commands import CommandOrigin
 from acestep.streaming.config import SessionConfig
 from acestep.streaming.events import (
     AudioReady,
+    AudioWriteFailed,
+    AudioWritten,
     CommandFailed,
     DepthApplied,
     LoraCatalogUpdate,
@@ -536,6 +538,7 @@ def _handle_client_body(
                     "key": event.key,
                     "time_signature": event.time_signature,
                     "fixture_name": event.fixture_name,
+                    "source_epoch": event.source_epoch,
                 }))
                 ws.send(new_src_np.astype(np.float16).tobytes())
                 codec.replace_mirror(new_src_np)
@@ -602,6 +605,14 @@ def _handle_client_body(
             _send_json({"type": "structure_cleared"})
         elif isinstance(event, StructureFailed):
             _send_json({"type": "structure_failed", "error": event.error})
+        elif isinstance(event, AudioWritten):
+            _send_json({
+                "type": "audio_written",
+                "start_s": event.start_s, "end_s": event.end_s,
+                "source_epoch": event.source_epoch,
+            })
+        elif isinstance(event, AudioWriteFailed):
+            _send_json({"type": "audio_write_failed", "error": event.error})
         elif isinstance(event, SubscriberDropped):
             # Terminal notice from the bus: our subscription overflowed
             # and was force-closed. Outbound delivery is dead; the
@@ -634,6 +645,7 @@ def _handle_client_body(
         "pipeline_depth": state.current_depth,
         "max_pipeline_depth": streaming.max_pipeline_depth,
         "session_id": session_id,
+        "source_epoch": state.source_epoch,
         # Phase-2 contract surface, declared by the session's backend
         # (plan §3.1–3.3). The legacy flat duration/sample_rate/channels
         # fields above stay as-is for old clients; geometry is the
@@ -915,6 +927,35 @@ def _handle_client_body(
                     time_signature=data.get("time_signature"),
                     fixture_name=data.get("fixture_name"),
                     stem_source_mode=data.get("stem_source_mode"),
+                    origin=origin,
+                )
+            elif mtype == "write_audio":
+                # "Play into the model": a binary PCM frame (only the
+                # audio being written) always follows. No song restart.
+                try:
+                    audio_msg = recv_audio()
+                except ConnectionClosed:
+                    state.running = False
+                    return
+                try:
+                    wf = _decode_audio_msg(audio_msg)
+                except Exception as exc:
+                    logger.opt(exception=True).error(
+                        "write_audio_decode_failed origin={} error={}",
+                        origin, exc,
+                    )
+                    _send_json({
+                        "type": "audio_write_failed", "error": str(exc),
+                    })
+                    return
+                epoch = data.get("source_epoch")
+                streaming.write_audio(
+                    Audio(waveform=wf, sample_rate=SAMPLE_RATE),
+                    at_s=float(data.get("at_s") or 0.0),
+                    mix=str(data.get("mix") or "replace"),
+                    repeat=str(data.get("repeat") or "none"),
+                    source_epoch=int(epoch) if epoch is not None else None,
+                    refresh_timbre=bool(data.get("refresh_timbre", False)),
                     origin=origin,
                 )
         except ConnectionClosed:
