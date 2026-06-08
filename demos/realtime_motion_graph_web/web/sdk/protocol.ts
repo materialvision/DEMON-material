@@ -634,6 +634,23 @@ export class RemoteBackend extends EventTarget {
               }
               break;
             }
+            case "command_failed":
+              // A `requires`-tagged command was rejected because this
+              // session's backend lacks the capability (loud failure, never
+              // a silent no-op — see protocol.py). Surface it as a typed
+              // event so the host app can toast / revert optimistic UI, and
+              // log it so the failure is audible even when nothing listens.
+              // Without this case it would fall through to the generic
+              // `json` event and the rejection would be invisible.
+              console.warn(
+                `[protocol] command_failed: ${msg.command} needs backend ` +
+                  `capability '${msg.requires}'` +
+                  (msg.error ? ` — ${msg.error}` : ""),
+              );
+              this.dispatchEvent(
+                new CustomEvent("command_failed", { detail: msg }),
+              );
+              break;
             default:
               this.dispatchEvent(new CustomEvent("json", { detail: msg }));
           }

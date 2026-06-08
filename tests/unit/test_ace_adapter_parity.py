@@ -1,25 +1,40 @@
 """ACE drain parity rail, unit tier (backend-seam plan round 3, Phase 3a).
 
 Drains a fixed scenario battery through ``StreamPipeline`` with a
-deterministic mock decoder on CPU and requires the finished latents to
-be BIT-IDENTICAL to the blessed capture in ``tests/unit/data/``,
-generated on the pre-ModelAdapter-seam tree (be4d954). This pins the
-exact behavior the seam relocates — noise generation order and sizing,
-schedule construction, batched-forward assembly (encoder padding /
-concatenation order), the CFG negative pass, and per-slot integration —
-so the ACEAdapter extraction is provably byte-identical without a GPU.
+deterministic mock decoder on CPU and compares the finished latents to
+the blessed capture in ``tests/unit/data/``, generated on the
+pre-ModelAdapter-seam tree (be4d954). This pins the exact behavior the
+seam relocates — noise generation order and sizing, schedule
+construction, batched-forward assembly (encoder padding / concatenation
+order), the CFG negative pass, and per-slot integration — so the
+ACEAdapter extraction is provably faithful without a GPU.
+
+Comparison is two-tier, mirroring the golden harness (``tests/golden``):
+
+* **Tier 1 — identity.** ``torch.equal`` against the blessed capture.
+  Holds on the platform the capture was taken on.
+* **Tier 2 — tolerance.** The blessed ``.pt`` is one concrete float32
+  realization; a different CPU/BLAS build re-rounds the masked
+  reductions and batched forward by up to ~1 ULP, so tier 1 does not
+  hold cross-platform. Tier 2 requires ``torch.allclose`` within a tight
+  tolerance (``PARITY_ATOL`` / ``PARITY_RTOL``) and warns that the run
+  was not bit-exact. A real semantics change — reordered noise draws, an
+  altered schedule, batch/pad/CFG drift — moves results far above this
+  floor and compounds across the drain, so the tolerance still fails
+  loudly on a genuine regression.
 
 The GPU-side rail with real weights is ``scripts/ace_drain_parity.py``;
 the end-to-end gate is the golden harness (``tests/golden``).
 
 Regenerate the blessed capture ONLY when intentionally changing
-semantics::
+semantics (re-blesses to the current platform)::
 
-    .venv/Scripts/python.exe tests/unit/test_ace_adapter_parity.py --capture
+    python tests/unit/test_ace_adapter_parity.py --capture
 """
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import pytest
@@ -29,6 +44,14 @@ from acestep.engine.diffusion import DiffusionConfig, DiffusionEngine
 from acestep.engine.stream import SlotCondition, SlotRequest, StreamPipeline
 
 BLESSED = Path(__file__).parent / "data" / "ace_adapter_parity_blessed.pt"
+
+# Tier-2 cross-platform parity tolerance (see module docstring). ~1 ULP
+# of float32 at magnitude ~1 is 1.2e-7; the observed cross-build floor is
+# ~2.4e-7. These bounds sit a couple orders of magnitude under any real
+# semantics change (which also compounds across the multi-tick drain),
+# so they tolerate BLAS re-rounding without masking a regression.
+PARITY_RTOL = 1e-5
+PARITY_ATOL = 1e-5
 
 T = 40          # latent frames
 D = 64          # ACE latent channels
@@ -248,12 +271,14 @@ def capture() -> None:
 
 
 @pytest.mark.skipif(not BLESSED.exists(), reason="blessed capture missing")
-def test_ace_drain_bit_identical():
+def test_ace_drain_parity():
     blessed = torch.load(BLESSED, weights_only=True)
     live = _scenarios()
     assert set(live) == set(blessed), (
         f"scenario set drifted: {sorted(live)} vs {sorted(blessed)}"
     )
+    worst = 0.0
+    nonexact = 0  # latents that cleared tier 2 but not tier 1
     for name, ref_list in blessed.items():
         got_list = live[name]
         assert len(got_list) == len(ref_list), (
@@ -261,10 +286,27 @@ def test_ace_drain_bit_identical():
         )
         for i, (got, ref) in enumerate(zip(got_list, ref_list)):
             assert got.shape == ref.shape, f"{name}[{i}]: shape drift"
-            assert torch.equal(got, ref), (
-                f"{name}[{i}]: NOT bit-identical "
-                f"(max_diff={(got - ref).abs().max().item():.3e})"
+            if torch.equal(got, ref):
+                continue  # tier 1: bit-identical (capture platform)
+            # Tier 2: tolerate cross-platform float re-rounding, but a
+            # divergence beyond the tight floor is a real semantics change.
+            max_diff = (got - ref).abs().max().item()
+            worst = max(worst, max_diff)
+            nonexact += 1
+            assert torch.allclose(got, ref, rtol=PARITY_RTOL, atol=PARITY_ATOL), (
+                f"{name}[{i}]: diverged beyond cross-platform float tolerance "
+                f"(max_diff={max_diff:.3e}, atol={PARITY_ATOL:.0e}, "
+                f"rtol={PARITY_RTOL:.0e}) — a real semantics change, not "
+                f"BLAS rounding. Inspect the seam; do NOT re-bless to hide it."
             )
+    if nonexact:
+        warnings.warn(
+            f"ACE parity tier 2: {nonexact} latent(s) within tolerance but not "
+            f"bit-identical to the blessed capture (worst max_diff={worst:.3e}, "
+            f"atol={PARITY_ATOL:.0e}). Expected on a CPU/BLAS build other than "
+            f"the capture platform; run with --capture to re-bless here.",
+            stacklevel=2,
+        )
 
 
 if __name__ == "__main__":
