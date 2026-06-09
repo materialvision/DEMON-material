@@ -334,6 +334,26 @@ def _handle_client_body(
         "session_init config_keys={} client_id={}",
         sorted(config_dict.keys()), _client_id,
     )
+
+    # When this main session ends, wipe MODELS_DIR/user_uploads/ so
+    # the next renter on this pod can't list (or replay) what this
+    # user uploaded. Registered AFTER the upload_track early-return
+    # above on purpose: that branch is a separate, short-lived WS
+    # used to PUSH a file into user_uploads/ — wiping on its exit
+    # would delete the upload we just persisted. Only the main
+    # session (this point onward) registers the wipe. Process-boot
+    # also wipes once in server.main() so a crashed-process scenario
+    # is still covered.
+    def _wipe_on_session_end() -> None:
+        from acestep.user_uploads import wipe_user_uploads
+        try:
+            wiped = wipe_user_uploads()
+            if wiped:
+                logger.info("user_uploads_wiped_at_session_end entries={}", wiped)
+        except Exception as exc:
+            logger.warning("user_uploads_wipe_at_session_end_failed error={}", exc)
+
+    ctx_stack.callback(_wipe_on_session_end)
     if config_dict.get("telemetry_version"):
         ws.send(json.dumps({
             "type": "init_ack",
