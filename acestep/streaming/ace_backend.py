@@ -313,6 +313,14 @@ class ACEStepBackend(DiffusionBackend):
         # flips this flag and produce() honors it on the next pass.
         self._hint_dirty = False
 
+        # SDE-curve build cache. The knob-driven curve (amplitude /
+        # periodicity / src_T) is deterministic in its inputs, so it is
+        # only rebuilt when one of them moves. Reusing the same tensor
+        # object also lets StreamPipeline.set_shared_curve skip the
+        # per-tick re-normalize + device re-upload.
+        self._sde_curve_key: tuple | None = None
+        self._sde_curve_val: "torch.Tensor | None" = None
+
     # ---- contract ----------------------------------------------------------
 
     def capabilities(self) -> Capabilities:
@@ -754,15 +762,27 @@ class ACEStepBackend(DiffusionBackend):
             client_sde = _curve_from_spec(raw.get("sde_denoise_curve"), src_T)
             if client_sde is not None:
                 sde_curve = client_sde
+                self._sde_curve_key = None
+                self.state.sde_curve_display = sde_curve.squeeze().numpy()
             else:
                 periodicity = raw.get("periodicity", 0.0)
-                if periodicity > 0.01:
-                    cycles = periodicity * (src_T / 25.0)
-                    t = torch.linspace(0, 1, src_T).unsqueeze(0).unsqueeze(-1)
-                    sde_curve = amplitude * (0.5 + 0.5 * torch.sin(2 * 3.14159 * cycles * t))
+                # Rebuild only when an input actually moves; the curve
+                # is a pure function of (amplitude, periodicity, src_T)
+                # and steady knobs otherwise pay a [1, src_T, 1] build
+                # + display refresh + shared-curve re-upload per tick.
+                key = (amplitude, periodicity, src_T)
+                if key != self._sde_curve_key:
+                    if periodicity > 0.01:
+                        cycles = periodicity * (src_T / 25.0)
+                        t = torch.linspace(0, 1, src_T).unsqueeze(0).unsqueeze(-1)
+                        sde_curve = amplitude * (0.5 + 0.5 * torch.sin(2 * 3.14159 * cycles * t))
+                    else:
+                        sde_curve = torch.full((1, src_T, 1), amplitude, dtype=torch.float32)
+                    self._sde_curve_key = key
+                    self._sde_curve_val = sde_curve
+                    self.state.sde_curve_display = sde_curve.squeeze().numpy()
                 else:
-                    sde_curve = torch.full((1, src_T, 1), amplitude, dtype=torch.float32)
-            self.state.sde_curve_display = sde_curve.squeeze().numpy()
+                    sde_curve = self._sde_curve_val
         else:
             denoise = k1
             self.state.sde_curve_display = None

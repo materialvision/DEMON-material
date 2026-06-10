@@ -180,8 +180,12 @@ def _trt_vae_decode(
             engine_path, tuple(lat.shape),
         )
         raise RuntimeError("TRT VAE decode failed")
-    stream.synchronize()
-
+    # No host sync: the polygraphy stream is a blocking stream w.r.t.
+    # PyTorch's legacy default stream, so the .clone() below is
+    # implicitly ordered after the TRT execution on the GPU. The
+    # caller's eventual D2H (.cpu() at emission) is the natural sync
+    # point; blocking the host here would only serialize CPU prep
+    # against GPU work.
     return audio_buf.clone().to(torch.float32)
 
 

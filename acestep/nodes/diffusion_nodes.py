@@ -669,9 +669,15 @@ class StreamDenoise(BaseNode):
             noise_on_cpu=noise_on_cpu,
             use_cache=use_cache,
         )
+        # queue_cap=1: StreamDenoise submits one request per tick, so
+        # only the freshest queued request is ever worth running. The
+        # historical cap (= depth) let up to depth-1 stale requests sit
+        # ahead of a knob change, adding ~steps/depth ticks of latency
+        # per queue position to per-slot parameters (denoise, seed).
         self._pipeline = StreamPipeline(
             self._engine, config,
             pipeline_depth=depth,
+            queue_cap=1,
         )
         self._last_handle_id = handle_id
         return self._pipeline
