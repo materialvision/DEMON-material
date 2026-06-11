@@ -96,7 +96,7 @@ from acestep.user_uploads import (
     unique_user_upload_name,
 )
 
-from .audio_codec import SliceCodec, send_stem_payload
+from .audio_codec import SliceCodec, chunked_ws_send, send_stem_payload
 from .protocol import COMMAND_NAMES, SAMPLE_RATE, coerce_command_payload
 
 
@@ -515,7 +515,7 @@ def _handle_client_body(
             _ms("first_generated_slice")
         try:
             with send_lock:
-                ws.send(frame)
+                chunked_ws_send(ws, frame)
                 ws.send(json.dumps({
                     "type": "params_update",
                     "params": dict(event.params),
@@ -540,7 +540,7 @@ def _handle_client_body(
                     "fixture_name": event.fixture_name,
                     "source_epoch": event.source_epoch,
                 }))
-                ws.send(new_src_np.astype(np.float16).tobytes())
+                chunked_ws_send(ws, new_src_np.astype(np.float16).tobytes())
                 codec.replace_mirror(new_src_np)
                 if event.stems is not None:
                     send_stem_payload(
@@ -657,7 +657,7 @@ def _handle_client_body(
         # manual_slot_cap / steering_available).
         **streaming.steering_payload(),
     }))
-    ws.send(src_np.astype(np.float16).tobytes())
+    chunked_ws_send(ws, src_np.astype(np.float16).tobytes())
     if streaming.initial_upload_stems is not None:
         send_stem_payload(
             ws,
@@ -751,6 +751,46 @@ def _handle_client_body(
                     "command_payload_coerced origin={} mtype={} errors={}",
                     source, mtype, coerce_errors,
                 )
+
+        def _recv_binary_payload(fail_type: str):
+            """Read the binary frame that must follow ``mtype``.
+
+            Bounded (10 s timeout) and type-checked, so an orphan
+            header can neither block the recv loop forever (wedging
+            the whole session) nor consume the next JSON command as
+            its payload. Both failure modes answer ``fail_type`` and
+            keep the session alive. Returns ``None`` on failure (the
+            caller must bail out); flips ``state.running`` if the
+            connection closed.
+            """
+            try:
+                audio_msg = recv_audio(timeout=10)
+            except TimeoutError:
+                logger.error(
+                    "{}_payload_timeout origin={}", mtype, origin,
+                )
+                _send_json({
+                    "type": fail_type,
+                    "error": "binary payload not received within 10s",
+                })
+                return None
+            except ConnectionClosed:
+                state.running = False
+                return None
+            if not isinstance(audio_msg, (bytes, bytearray)):
+                # Log what got eaten: if it was the next JSON command,
+                # the preview names it so the drop is traceable.
+                logger.error(
+                    "{}_payload_not_binary origin={} got={}",
+                    mtype, origin, repr(audio_msg)[:120],
+                )
+                _send_json({
+                    "type": fail_type,
+                    "error": f"expected binary payload after {mtype}",
+                })
+                return None
+            return audio_msg
+
         try:
             if mtype == "params":
                 try:
@@ -818,10 +858,8 @@ def _handle_client_body(
                 streaming.set_timbre_strength(v, origin=origin)
             elif mtype == "set_timbre_source":
                 name = data.get("name") or "timbre"
-                try:
-                    audio_msg = recv_audio()
-                except ConnectionClosed:
-                    state.running = False
+                audio_msg = _recv_binary_payload("timbre_failed")
+                if audio_msg is None:
                     return
                 logger.debug(
                     "set_timbre_source_bytes_received name={} bytes={}",
@@ -853,10 +891,8 @@ def _handle_client_body(
                 streaming.clear_timbre_source(origin=origin)
             elif mtype == "set_structure_source":
                 name = data.get("name") or "structure"
-                try:
-                    audio_msg = recv_audio()
-                except ConnectionClosed:
-                    state.running = False
+                audio_msg = _recv_binary_payload("structure_failed")
+                if audio_msg is None:
                     return
                 logger.debug(
                     "set_structure_source_bytes_received name={} bytes={}",
@@ -906,10 +942,8 @@ def _handle_client_body(
                         })
                         return
                 else:
-                    try:
-                        audio_msg = recv_audio()
-                    except ConnectionClosed:
-                        state.running = False
+                    audio_msg = _recv_binary_payload("swap_failed")
+                    if audio_msg is None:
                         return
                     try:
                         wf = _decode_audio_msg(audio_msg)
@@ -932,10 +966,8 @@ def _handle_client_body(
             elif mtype == "write_audio":
                 # "Play into the model": a binary PCM frame (only the
                 # audio being written) always follows. No song restart.
-                try:
-                    audio_msg = recv_audio()
-                except ConnectionClosed:
-                    state.running = False
+                audio_msg = _recv_binary_payload("audio_write_failed")
+                if audio_msg is None:
                     return
                 try:
                     wf = _decode_audio_msg(audio_msg)
@@ -997,9 +1029,12 @@ def _handle_client_body(
                     break
                 _audio_buf = caudio if caudio is not None else b""
                 try:
+                    # The thunk accepts ``timeout`` (and ignores it) so it
+                    # matches the ``ws.recv`` signature _recv_binary_payload
+                    # calls with.
                     _dispatch_message(
                         cdata,
-                        lambda _b=_audio_buf: _b,
+                        lambda timeout=None, _b=_audio_buf: _b,
                         "control",
                     )
                 except Exception as exc:
