@@ -105,6 +105,28 @@ class SliceCodec:
         return hdr + compressed
 
 
+def chunked_ws_send(ws, data, _chunk=262144) -> None:
+    """Send a binary payload as a FRAGMENTED message in ~256 KiB pieces.
+
+    websockets-sync holds ``protocol_mutex`` across the whole ``send()``
+    (``send_data`` → ``socket.sendall``), and ``recv_events`` — the thread
+    that reads EVERY inbound frame — needs that same mutex. A single
+    multi-MB sendall therefore freezes all reads until the peer drains it,
+    which deadlocks against a peer that is itself backpressured waiting
+    for us to read (observed live: an 11 MB stem send vs a VST mid
+    ``write_audio`` upload — both sides wedged until keepalive killed the
+    session). An *iterable* payload sends as one fragmented message with
+    the mutex released between fragments, so reads interleave and the
+    deadlock cannot form. Fragmentation is invisible at the message layer
+    (clients reassemble; payload bytes are identical).
+    """
+    if len(data) <= _chunk:
+        ws.send(data)
+        return
+    mv = memoryview(data)
+    ws.send(mv[i:i + _chunk] for i in range(0, len(data), _chunk))
+
+
 def send_stem_payload(
     ws,
     *,
@@ -134,4 +156,4 @@ def send_stem_payload(
     }))
     for name in order:
         arr = stems[name].detach().cpu().numpy().T.astype(np.float16)
-        ws.send(arr.tobytes())
+        chunked_ws_send(ws, arr.tobytes())
