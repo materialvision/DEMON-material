@@ -962,12 +962,10 @@ def extract_upload_stems(
                 log_vram_telemetry("acestep_parked", torch_device)
             model: MelBandRoformer | None = None
             try:
-                model_path = _resolve_model_path()
-                print(f"[Server] Loading Mel-Band RoFormer model on {torch_device}...")
                 load_t0 = time.time()
-                model = load_model(model_path, torch_device)
+                model = _acquire_melband_model(torch_device)
                 log_vram_telemetry("melband_loaded", torch_device)
-                print(f"[Server] Mel-Band RoFormer loaded in {time.time() - load_t0:.1f}s")
+                print(f"[Server] Mel-Band RoFormer on {torch_device} in {time.time() - load_t0:.1f}s")
                 vocals_44k, instruments_44k = separate_stems(
                     model,
                     waveform.detach().cpu().float().unsqueeze(0),
@@ -982,9 +980,7 @@ def extract_upload_stems(
                 # ACE-Step (this finally runs first on block exit), so
                 # the restore lands in the VRAM the separator vacated.
                 if model is not None:
-                    print(f"[Server] Releasing Mel-Band RoFormer model from {torch_device}...")
-                    del model
-                    _collect_device_cache(torch_device)
+                    _release_melband_model(model, torch_device)
                     log_vram_telemetry("melband_released", torch_device)
         if park:
             log_vram_telemetry("acestep_restored", torch_device)
@@ -1029,6 +1025,51 @@ def _fit_stem_waveform(wf: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     elif wf.shape[-1] < target.shape[-1]:
         wf = torch.nn.functional.pad(wf, (0, target.shape[-1] - wf.shape[-1]))
     return torch.nan_to_num(wf)
+
+
+# Keep the separator's weights in system RAM between extractions instead
+# of re-reading the checkpoint from disk every rip (~1.6-2 s per upload).
+# The module lives on CPU between uses and is moved to the device only
+# for the separation window, so the VRAM discipline is unchanged. Set
+# the env var to 0 to reload from disk per rip (frees ~1 GB of RAM).
+MELBAND_RAM_CACHE_ENV = "DEMON_MELBAND_RAM_CACHE"
+_MELBAND_RAM_CACHE: dict[str, MelBandRoformer] = {}
+
+
+def _melband_ram_cache_enabled() -> bool:
+    raw = (os.environ.get(MELBAND_RAM_CACHE_ENV) or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _acquire_melband_model(device: torch.device) -> MelBandRoformer:
+    """Return the separator resident on ``device``.
+
+    Serves from the RAM cache when possible (a CPU→GPU move, ~0.3 s)
+    and falls back to a disk load. Caller must hold ``_INFER_LOCK`` —
+    the cached module is a single shared instance.
+    """
+    model_path = _resolve_model_path()
+    key = str(model_path)
+    model = _MELBAND_RAM_CACHE.get(key) if _melband_ram_cache_enabled() else None
+    if model is None:
+        print(f"[Server] Loading Mel-Band RoFormer model on {device}...")
+        model = load_model(model_path, device)
+        if _melband_ram_cache_enabled():
+            _MELBAND_RAM_CACHE[key] = model
+    else:
+        model.to(device)
+    return model
+
+
+def _release_melband_model(model: MelBandRoformer, device: torch.device) -> None:
+    """Evict the separator from VRAM. The weights move to CPU (where the
+    RAM cache keeps them for the next rip; an uncached instance is
+    garbage-collected from there) and the device cache is drained."""
+    print(f"[Server] Releasing Mel-Band RoFormer model from {device}...")
+    try:
+        model.to("cpu")
+    finally:
+        _collect_device_cache(device)
 
 
 def _resolve_model_path() -> Path:

@@ -52,6 +52,21 @@ while a rip is in flight (never a duplicate separation), and a
 `vocals`/`instruments` swap — where the stem IS the inference source —
 waits for the rip and then loads it from the disk cache.
 
+Phase-1 latency is kept low by four measures:
+
+- librosa's numba-JIT'd beat tracker is warmed at server boot (the
+  cold first call costs ~4 s);
+- BPM/key analysis runs on a centered 60 s window (identical estimates,
+  fraction of the cost on long tracks) and overlaps the GPU source
+  encode on a worker thread;
+- the separator's weights stay in system RAM between rips
+  (`DEMON_MELBAND_RAM_CACHE`, default on; per-rip GPU residency is a
+  ~0.2 s CPU→GPU move instead of a ~2 s disk load — the VRAM discipline
+  is unchanged);
+- the TRT engine files the post-upload swap will need are pulled into
+  the OS page cache in the background during phase 1 (helps
+  cold-page-cache pods; harmless elsewhere).
+
 ## Stem Extraction
 
 Stem extraction is performed with Mel-Band RoFormer through

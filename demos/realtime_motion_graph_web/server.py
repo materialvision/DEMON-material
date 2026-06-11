@@ -725,6 +725,38 @@ def main():
         except Exception as exc:
             logger.warning("user_uploads_wipe_at_startup_failed error={}", exc)
 
+        # Warm librosa's numba-JIT'd beat tracker (and the key detector)
+        # on a tiny clip in the background. Cold, the first upload's BPM
+        # analysis pays ~4 s of one-time JIT compilation; warmed here it
+        # runs in well under a second. Daemon thread: never blocks boot,
+        # and a failure only means the first upload pays the JIT cost as
+        # before.
+        def _warm_audio_analysis_jit() -> None:
+            try:
+                import numpy as np
+
+                import librosa
+                from acestep.audio.key_detection import detect_key
+
+                t0 = time.monotonic()
+                y = np.sin(
+                    np.linspace(0, 2400 * np.pi, 48000 * 3),
+                ).astype(np.float32)
+                librosa.beat.beat_track(y=y, sr=48000)
+                detect_key(y, 48000)
+                logger.info(
+                    "audio_analysis_jit_warmed duration_s={:.1f}",
+                    time.monotonic() - t0,
+                )
+            except Exception as exc:
+                logger.warning("audio_analysis_jit_warm_failed error={}", exc)
+
+        threading.Thread(
+            target=_warm_audio_analysis_jit,
+            name="analysis-jit-warm",
+            daemon=True,
+        ).start()
+
     logger.info("server_starting port={}", port)
     srv = ws_serve(
         ws_handler,

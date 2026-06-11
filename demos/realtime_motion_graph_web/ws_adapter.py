@@ -30,6 +30,7 @@ import queue
 import socket
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
 from websockets.exceptions import ConnectionClosed
@@ -317,13 +318,94 @@ def _truncate_upload_waveform(waveform: torch.Tensor) -> torch.Tensor:
     return truncate_to_pool(waveform[:2, :max_samples])
 
 
+# BPM/key are global track properties; a centered window this long
+# estimates them as well as the full signal (measured identical on
+# 120 s material) at a fraction of the beat-tracker cost, and it caps
+# the analysis latency of 240 s uploads.
+ANALYSIS_WINDOW_S = 60.0
+
+
+def _analysis_window(mono: np.ndarray, sample_rate: int) -> np.ndarray:
+    max_n = int(ANALYSIS_WINDOW_S * sample_rate)
+    if mono.shape[-1] <= max_n:
+        return mono
+    start = (mono.shape[-1] - max_n) // 2
+    return mono[start:start + max_n]
+
+
 def _analyze_upload_waveform(waveform: torch.Tensor) -> tuple[int, str, str]:
     import librosa
 
     mono_np = waveform.mean(dim=0).detach().cpu().numpy()
-    bpm_raw, _ = librosa.beat.beat_track(y=mono_np, sr=SAMPLE_RATE)
+    window = _analysis_window(mono_np, SAMPLE_RATE)
+    bpm_raw, _ = librosa.beat.beat_track(y=window, sr=SAMPLE_RATE)
     bpm = int(round(float(np.asarray(bpm_raw).flat[0])))
-    return bpm, detect_key(mono_np, SAMPLE_RATE), "4"
+    return bpm, detect_key(window, SAMPLE_RATE), "4"
+
+
+# Single worker: uploads are serialized end-to-end anyway; the pool
+# exists so the CPU-bound analysis overlaps the GPU-bound source encode
+# inside one upload's phase 1.
+_UPLOAD_ANALYSIS_POOL = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="upload-analysis",
+)
+
+
+def _read_files_into_page_cache(paths) -> int:
+    """Sequentially read ``paths`` and discard, pulling them into the OS
+    page cache. Returns total bytes read."""
+    total = 0
+    for p in {str(p) for p in paths}:
+        with open(p, "rb") as f:
+            while True:
+                chunk = f.read(1 << 24)
+                if not chunk:
+                    break
+                total += len(chunk)
+    return total
+
+
+def _prewarm_trt_engines_for_duration(
+    duration_s: float,
+    *,
+    checkpoint: str,
+    decoder_backend: str,
+    vae_backend: str,
+):
+    """Best-effort, in the background: page-cache the TRT engine files
+    the post-upload swap will load for ``duration_s``. When the swap
+    crosses profiles (e.g. 60 s session → 120 s upload) the engine load
+    is dominated by a multi-GB disk read; warming it during phase 1
+    makes the swap land seconds sooner. No-op for eager backends or
+    unbuilt engines."""
+    if "tensorrt" not in (decoder_backend, vae_backend):
+        return None
+
+    def _read() -> None:
+        try:
+            from acestep.engine.trt.profile_manager import TRTProfileManager
+
+            mgr = TRTProfileManager(
+                decoder_backend=decoder_backend,
+                vae_backend=vae_backend,
+                checkpoint=(
+                    checkpoint if decoder_backend == "tensorrt"
+                    else "acestep-v15-turbo"
+                ),
+            )
+            paths, picked_dur = mgr.resolve(float(duration_s))
+            total = _read_files_into_page_cache(paths.values())
+            logger.info(
+                "trt_engines_prewarmed duration_s={:.0f} profile_s={:.0f} "
+                "bytes={}",
+                duration_s, picked_dur, total,
+            )
+        except Exception as exc:
+            # Purely opportunistic — a missing engine just means the
+            # swap itself will surface the real, actionable error.
+            logger.info("trt_engine_prewarm_skipped error={}", exc)
+
+    return spawn_thread(_read, name="trt-prewarm")
 
 
 def _send_upload_failure(ws, error: str) -> None:
@@ -405,7 +487,14 @@ def _publish_stems_to_active_session(
         return False
 
 
-def _handle_upload_track(ws, header: dict, *, checkpoint: str) -> None:
+def _handle_upload_track(
+    ws,
+    header: dict,
+    *,
+    checkpoint: str,
+    decoder_backend: str = "tensorrt",
+    vae_backend: str = "tensorrt",
+) -> None:
     requested_name = str(header.get("name") or "upload")
     key_override = header.get("key")
     key_override = key_override.strip() if isinstance(key_override, str) else None
@@ -462,9 +551,19 @@ def _handle_upload_track(ws, header: dict, *, checkpoint: str) -> None:
     name = unique_user_upload_name(requested_name)
     encoder: Session | None = None
     try:
-        bpm, detected_key, detected_time_signature = _analyze_upload_waveform(waveform)
-        key = key_override or detected_key
-        time_signature = time_signature_override or detected_time_signature
+        # CPU analysis (librosa beat tracking + key detection) overlaps
+        # the GPU source encode below; joined before persist.
+        analysis_future = _UPLOAD_ANALYSIS_POOL.submit(
+            _analyze_upload_waveform, waveform,
+        )
+        # Page-cache the engines the post-upload swap will need, while
+        # phase 1 runs (background, best-effort).
+        _prewarm_trt_engines_for_duration(
+            waveform.shape[-1] / SAMPLE_RATE,
+            checkpoint=checkpoint,
+            decoder_backend=decoder_backend,
+            vae_backend=vae_backend,
+        )
         encoder = _upload_encoder_session(checkpoint)
         logger.info(
             "upload_track_process_start name={} samples={} duration_s={:.1f}",
@@ -490,6 +589,11 @@ def _handle_upload_track(ws, header: dict, *, checkpoint: str) -> None:
                 full_source = encoder.prepare_source(
                     Audio(waveform=waveform, sample_rate=SAMPLE_RATE),
                 )
+        bpm, detected_key, detected_time_signature = analysis_future.result(
+            timeout=120.0,
+        )
+        key = key_override or detected_key
+        time_signature = time_signature_override or detected_time_signature
         packet = persist_user_upload_packet(
             name,
             waveform=waveform,
@@ -628,7 +732,12 @@ def _handle_client_body(
     config_dict = json.loads(ws.recv())
     if isinstance(config_dict, dict) and config_dict.get("type") == "upload_track":
         try:
-            _handle_upload_track(ws, config_dict, checkpoint=checkpoint)
+            _handle_upload_track(
+                ws, config_dict,
+                checkpoint=checkpoint,
+                decoder_backend=decoder_backend,
+                vae_backend=vae_backend,
+            )
         finally:
             try:
                 ws.close()
