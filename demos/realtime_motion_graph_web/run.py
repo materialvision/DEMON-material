@@ -29,17 +29,33 @@ import argparse
 import os
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import IO
 
 
 WEB_DIR = Path(__file__).parent / "web"
 ROOT_DIR = Path(__file__).resolve().parents[2]
+
+
+def _harden_stdout() -> None:
+    """On Windows a piped stdout defaults to the legacy code page
+    (cp1252), which can't encode characters the children routinely emit
+    (Next.js's "▲" logo, tqdm's "▎" blocks). An encode error would kill
+    a _tee thread, and with no reader the child blocks on a full pipe
+    and the demo freezes minutes later. Replace unencodable characters
+    instead. stderr already defaults to errors="backslashreplace" and
+    can't raise, so it's left alone.
+    """
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, OSError, ValueError):
+        pass
 
 
 # ANSI dim/colour helpers for prefixing combined output. Falls back to no
@@ -59,7 +75,13 @@ def _tee(stream: IO[bytes], label: str) -> None:
     prefix = _PREFIXES[label]
     for raw in iter(stream.readline, b""):
         line = raw.decode("utf-8", errors="replace").rstrip("\n")
-        print(f"{prefix} {line}", flush=True)
+        # This thread is the child's only stdout reader; if it dies the
+        # child eventually blocks on a full pipe and hangs the demo. No
+        # single line is worth that.
+        try:
+            print(f"{prefix} {line}", flush=True)
+        except Exception:
+            pass
 
 
 def _resolve_npm() -> str:
@@ -95,17 +117,33 @@ def _wait_for_backend(
     port: int,
     proc: subprocess.Popen[bytes],
 ) -> int | None:
+    """Poll the backend until it serves HTTP, or until it exits.
+
+    The probe is a real GET against the multiplexed HTTP side of the
+    port (``/api/server-info``), not a bare TCP connect — a connection
+    that opens and closes without sending a request line makes the
+    websockets server log a full EOFError traceback right after
+    ``server_ready``, which reads like a crash to a fresh user.
+    """
     probe_host = _local_backend_host(host)
+    if ":" in probe_host:  # bare IPv6 literal needs brackets in a URL
+        probe_host = f"[{probe_host}]"
+    url = f"http://{probe_host}:{port}/api/server-info"
     while proc.poll() is None:
         try:
-            with socket.create_connection((probe_host, port), timeout=0.25):
+            with urllib.request.urlopen(url, timeout=2.0):
                 return None
+        except urllib.error.HTTPError:
+            # Any HTTP status means the server is up and parsing
+            # requests; don't spin on a non-200.
+            return None
         except OSError:
             time.sleep(0.25)
     return proc.returncode
 
 
 def main() -> int:
+    _harden_stdout()
     parser = argparse.ArgumentParser(
         description="Run the demo backend + Next.js frontend together.",
         epilog=(

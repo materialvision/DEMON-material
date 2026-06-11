@@ -87,6 +87,7 @@ from acestep.streaming.events import (
     ParamsEcho,
     PromptApplied,
     PromptBlendEcho,
+    SessionError,
     StructureCleared,
     StructureFailed,
     StructureSet,
@@ -687,6 +688,20 @@ class StreamingSession:
                 runner.run()
             except Exception as exc:
                 logger.opt(exception=True).error("pipeline_error error={}", exc)
+                # Surface the failure to transports BEFORE close() tears
+                # the bus down: without this the client sees a frozen UI
+                # (no slices, no error) when generation dies post-ready.
+                # Subscription drainers deliver already-queued events
+                # after bus.close(), so publish-then-close is safe.
+                try:
+                    self.bus.publish(SessionError(
+                        code="pipeline_error",
+                        message=(
+                            f"Generation stopped: {type(exc).__name__}: {exc}"
+                        ),
+                    ))
+                except Exception:
+                    pass
         finally:
             self.close()
 

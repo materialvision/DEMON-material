@@ -66,6 +66,7 @@ from acestep.streaming.events import (
     ParamsEcho,
     PromptApplied,
     PromptBlendEcho,
+    SessionError,
     StructureCleared,
     StructureFailed,
     StructureSet,
@@ -586,6 +587,15 @@ def _handle_client_body(
                 "command": event.command,
                 "requires": event.requires,
                 "error": event.error,
+            })
+        elif isinstance(event, SessionError):
+            # Runtime failure after the ready handshake (e.g. the
+            # pipeline runner died). Reuses the wire `error` event so
+            # the client shows a reason instead of a silently frozen UI.
+            _send_json({
+                "type": "error",
+                "code": event.code,
+                "message": event.message,
             })
         elif isinstance(event, TimbreSet):
             _send_json({
