@@ -239,6 +239,44 @@ def _log_session_vram(stage: str) -> None:
         )
 
 
+def _strip_upload_encoder_generation_stack(session: Session) -> int:
+    """Drop the parts of the upload encoder that uploads never execute.
+
+    The upload path runs exactly three model surfaces: VAE encode,
+    semantic extract (``model.tokenizer`` / ``model.detokenizer``), and
+    the conditioning encoder (``model.encoder``). The DiT *decoder* —
+    the bulk of the checkpoint — is generation-only, and the eager
+    DiffusionEngine + LoRA manager exist only to drive it. Dropping
+    both shrinks the encoder's GPU working set from a full second model
+    copy (~4.7 GB restored per upload on the 2B turbo) to just the
+    conditioning stack (~1.5 GB), which is what keeps phase-1 encodes
+    inside the headroom of a live session running a long (120 s+) TRT
+    profile. Returns the number of decoder parameters dropped.
+    """
+    import gc
+
+    import torch.nn as nn
+
+    handler = session.handler
+    engine = getattr(handler, "_diffusion_engine", None)
+    if engine is not None:
+        try:
+            engine.close()
+        except Exception as exc:
+            logger.warning("upload_encoder_engine_close_failed error={}", exc)
+        handler._diffusion_engine = None
+    dropped = 0
+    model = handler.model
+    decoder = getattr(model, "decoder", None) if model is not None else None
+    if decoder is not None:
+        dropped = sum(p.numel() for p in decoder.parameters())
+        model.decoder = nn.Module()
+    # The weights live in system RAM at this point (the encoder is
+    # built parked); collect so the decoder's CPU copy is returned too.
+    gc.collect()
+    return dropped
+
+
 def _upload_encoder_session(checkpoint: str) -> Session:
     with _UPLOAD_ENCODERS_LOCK:
         session = _UPLOAD_ENCODERS.get(checkpoint)
@@ -258,15 +296,18 @@ def _upload_encoder_session(checkpoint: str) -> Session:
             # ...then flip the context to RESIDENT mode so placement is
             # governed by the persistent-park protocol instead of
             # per-op round trips: _load_model_context lazily restores
-            # exactly the modules an upload touches (the DiT for
-            # semantic extract; the VAE only when no TRT engine fits),
-            # and _offload_upload_encoder parks them again afterwards.
+            # exactly the modules an upload touches (the conditioning
+            # stack for semantic extract; the VAE only when no TRT
+            # engine fits), and _offload_upload_encoder parks them
+            # again afterwards.
             session.handler.offload_to_cpu = False
             session.handler.offload_dit_to_cpu = False
+            dropped = _strip_upload_encoder_generation_stack(session)
             _UPLOAD_ENCODERS[checkpoint] = session
             logger.info(
-                "upload_encoder_loaded checkpoint={} placement=parked",
-                checkpoint,
+                "upload_encoder_loaded checkpoint={} placement=parked "
+                "decoder_params_dropped={}",
+                checkpoint, dropped,
             )
         return session
 
@@ -433,9 +474,22 @@ def _handle_upload_track(ws, header: dict, *, checkpoint: str) -> None:
         # from multiple connections would otherwise drive prepare_source /
         # stem extraction on one Session at once and corrupt its state.
         with _UPLOAD_INFER_LOCK:
-            full_source = encoder.prepare_source(
-                Audio(waveform=waveform, sample_rate=SAMPLE_RATE),
-            )
+            try:
+                full_source = encoder.prepare_source(
+                    Audio(waveform=waveform, sample_rate=SAMPLE_RATE),
+                )
+            except torch.cuda.OutOfMemoryError:
+                # Tight headroom next to a long-profile live session can
+                # leave torch's caching allocator fragmented; hand the
+                # cached pages back and retry once before failing.
+                logger.warning(
+                    "upload_prepare_source_oom_retry name={} duration_s={:.1f}",
+                    name, waveform.shape[-1] / SAMPLE_RATE,
+                )
+                torch.cuda.empty_cache()
+                full_source = encoder.prepare_source(
+                    Audio(waveform=waveform, sample_rate=SAMPLE_RATE),
+                )
         packet = persist_user_upload_packet(
             name,
             waveform=waveform,

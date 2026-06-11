@@ -124,16 +124,22 @@ Beyond the per-separation cycle, two standing policies keep steady-state
 VRAM flat:
 
 - **The shared upload encoder lives on GPU only while an upload is in
-  flight.** It is BUILT with its weights in system RAM
-  (`Session(offload_to_cpu=True, offload_dit_to_cpu=True)`, then flipped
-  to resident mode), so even the first upload never spikes VRAM with a
-  full second model copy. `_handle_upload_track` calls
-  `ModelContext.offload_eager_to_cpu()` when each upload's background
-  rip finishes (persistent park — nothing auto-restores), and
-  `_load_model_context()` lazily restores exactly the modules the next
-  upload touches (`model` for semantic extract; `vae` only when no TRT
-  VAE engine fits). Without this the first upload would permanently pin
-  ~6 GB next to the live streaming session.
+  flight — and carries no generation stack.** It is BUILT with its
+  weights in system RAM (`Session(offload_to_cpu=True,
+  offload_dit_to_cpu=True)`, then flipped to resident mode), so even
+  the first upload never spikes VRAM with a full second model copy.
+  Uploads execute exactly three model surfaces (VAE encode, semantic
+  extract, conditioning encoder), so
+  `_strip_upload_encoder_generation_stack()` drops the DiT *decoder*
+  (~1.6 B params on the 2B turbo) and the eager DiffusionEngine at
+  construction — the per-upload GPU restore is the ~1.3 GB conditioning
+  stack, not a ~4.7 GB model copy, which keeps uploads inside the
+  headroom of a live session running a long (120 s+) TRT profile.
+  `_handle_upload_track` calls `ModelContext.offload_eager_to_cpu()`
+  when each upload's background rip finishes (persistent park — nothing
+  auto-restores), and `_load_model_context()` lazily restores exactly
+  the modules the next upload touches (`model` for semantic extract;
+  `vae` only when no TRT VAE engine fits).
 - **Shape-aware TRT VAE engine selection** (`acestep/nodes/vae_nodes.py`):
   the process-wide TRT VAE cache can hand the upload encoder an engine
   belonging to the live streaming session, whose optimization profile
