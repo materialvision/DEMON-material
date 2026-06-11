@@ -309,7 +309,11 @@ def persist_user_upload_packet(
     created_dir = not written_root.exists()
     try:
         write_track_wav(root, name, waveform=waveform, sample_rate=sample_rate)
-        write_stem_wavs(root, name, stems=stems, sample_rate=sample_rate)
+        # Empty = phase-1 fast ack: the upload path persists the source
+        # first and backfills stems via persist_user_upload_stems when
+        # the background rip completes.
+        if stems:
+            write_stem_wavs(root, name, stems=stems, sample_rate=sample_rate)
         for mode, source in sources.items():
             source_waveform = waveform if mode == "full" else stems[mode]
             json_path, sf_path = sidecar_paths(root, name, mode)
@@ -353,3 +357,61 @@ def persist_user_upload_packet(
         channels=channels,
         sample_rate=int(sample_rate),
     )
+
+
+def persist_user_upload_stems(
+    name: str,
+    *,
+    waveform: "torch.Tensor",
+    stems: dict[str, "torch.Tensor"],
+    sources: dict[str, "PreparedSource"],
+    sample_rate: int,
+    checkpoint: str,
+    bpm: int,
+    key: str,
+    time_signature: str,
+) -> bool:
+    """Phase-2 complement to :func:`persist_user_upload_packet`.
+
+    The upload path acks ``upload_ok`` after writing the source WAV +
+    full sidecar (phase 1) and rips stems on a background thread; this
+    writes the stem WAVs + per-stem sidecars and re-saves the track
+    metadata so its asset manifest advertises them.
+
+    Returns False (writing nothing) when the track dir no longer exists
+    — the session-end wipe (`wipe_user_uploads`) can race a long rip,
+    and recreating a wiped track's stems would leak them to the pod's
+    next renter.
+    """
+    root = user_uploads_dir()
+    if not track_dir(root, name).is_dir():
+        return False
+    write_stem_wavs(root, name, stems=stems, sample_rate=sample_rate)
+    for mode, source in sources.items():
+        source_waveform = stems[mode]
+        json_path, sf_path = sidecar_paths(root, name, mode)
+        save_sidecar_pair(
+            json_path,
+            sf_path,
+            latent=source.latent.tensor,
+            context_latent=source.context_latent.tensor,
+            checkpoint=checkpoint,
+            bpm=bpm,
+            key=key,
+            time_signature=time_signature,
+            duration_s=int(source_waveform.shape[-1]) / int(sample_rate),
+            samples=int(source_waveform.shape[-1]),
+            sample_rate=int(sample_rate),
+            channels=int(source_waveform.shape[0]),
+        )
+    # Re-derive the metadata manifest now that the stem files exist.
+    save_track_metadata(
+        root,
+        name,
+        waveform=waveform,
+        sample_rate=sample_rate,
+        bpm=bpm,
+        key=key,
+        time_signature=time_signature,
+    )
+    return True

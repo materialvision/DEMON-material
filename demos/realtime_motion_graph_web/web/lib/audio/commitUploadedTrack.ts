@@ -5,6 +5,7 @@ import {
   type DecodedFixture,
   type StemSourceMode,
 } from "@/engine/audio/loadFixture";
+import { useCustomTracksStore } from "@/store/useCustomTracksStore";
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
 import type { TimeSignature } from "@/types/engine";
@@ -67,9 +68,17 @@ export async function commitUploadedTrack({
       timeSignature: timeSignatureOverride,
       signal,
     });
-    // The server persisted audio + sidecars + stems to disk before
-    // replying upload_ok, so swaps to this track can load by name.
+    // The server persisted the audio + full-source sidecar before
+    // replying upload_ok, so swaps to this track can load by name
+    // immediately. Stem separation continues on a server background
+    // thread; the pushed stem_assets frame flips the status to "ready"
+    // (or stem_failed to "failed") when it lands.
     addCustomTrack(uploaded.name, decoded, originalFile, sourceMode, true);
+    if (uploaded.stemsPending) {
+      useCustomTracksStore
+        .getState()
+        .setStemStatus(uploaded.name, "processing");
+    }
     const perf = usePerformanceStore.getState();
     if (keyOverride) {
       perf.setPendingKeyOverride(keyOverride);
