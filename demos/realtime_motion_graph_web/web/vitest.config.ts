@@ -8,9 +8,11 @@ const webRoot = path.dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
   resolve: {
     // Mirror tsconfig's aliases so the tests import the REAL app/SDK
-    // modules (sdk/protocol.ts etc.), not copies.
+    // modules (packages/demon-client/protocol.ts etc.), not copies.
     alias: {
-      "@demon/client": path.join(webRoot, "sdk", "index.ts"),
+      "@demon/client": path.join(
+        webRoot, "..", "..", "..", "packages", "demon-client", "index.ts",
+      ),
       "@": webRoot,
     },
   },

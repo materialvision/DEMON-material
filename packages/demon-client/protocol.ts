@@ -60,6 +60,13 @@ export interface RemoteBackendOptions {
    *  the wire. The shipped app injects enabled-LoRA trigger prefixes here;
    *  a bare client can omit it and prompts are sent verbatim. */
   promptTransform?: (tags: string) => string;
+  /** Where to load the slice-decoder worker from. Omit under a bundler
+   *  (Next/Turbopack, esbuild, ...) — the default `new URL(...)` form is
+   *  statically analyzed and the worker ships with the app bundle.
+   *  REQUIRED when consuming the prebuilt dist/ bundle from a no-build
+   *  static page: point it at the sibling `sliceDecoder.worker.js`
+   *  (e.g. "/sdk/sliceDecoder.worker.js"). */
+  sliceWorkerUrl?: string | URL;
 }
 
 // ── float16 → float32 ──────────────────────────────────────────────────
@@ -258,6 +265,7 @@ export class RemoteBackend extends EventTarget {
   private _sliceEpoch = 0;
 
   private _promptTransform: (tags: string) => string;
+  private _sliceWorkerUrl: string | URL | undefined;
 
   constructor(
     url: string,
@@ -287,6 +295,7 @@ export class RemoteBackend extends EventTarget {
       closeReason: "",
     };
     this._promptTransform = opts.promptTransform ?? ((tags) => tags);
+    this._sliceWorkerUrl = opts.sliceWorkerUrl;
     this._initDecoderWorker();
   }
 
@@ -321,10 +330,15 @@ export class RemoteBackend extends EventTarget {
       // `new URL(..., import.meta.url)` at build time. The previous .mjs
       // path was a leftover from when this code shipped as a tsup-built
       // npm package whose dist/ contained a pre-compiled .mjs sibling.
-      const worker = new Worker(
-        new URL("./workers/sliceDecoder.worker.ts", import.meta.url),
-        { type: "module" },
-      );
+      // The literal `new Worker(new URL(...))` form below must stay intact
+      // for that static analysis; sliceWorkerUrl consumers (the prebuilt
+      // dist/ bundle on a no-build page) take the other branch.
+      const worker = this._sliceWorkerUrl !== undefined
+        ? new Worker(this._sliceWorkerUrl, { type: "module" })
+        : new Worker(
+            new URL("./workers/sliceDecoder.worker.ts", import.meta.url),
+            { type: "module" },
+          );
       worker.onmessage = (ev: MessageEvent) => {
         const msg = ev.data;
         if (!msg || typeof msg !== "object") return;

@@ -1,4 +1,4 @@
-// Replay harness for driving the REAL `RemoteBackend` (sdk/protocol.ts)
+// Replay harness for driving the REAL `RemoteBackend` (packages/demon-client/protocol.ts)
 // from recorded golden-session transcripts — no GPU, no server, no network.
 //
 // Transcripts come from the golden harness (tests/golden/client.py in the

@@ -28,7 +28,7 @@
         "./*"
       ],
       "@demon/client": [
-        "./sdk/index.ts"
+        "../../../packages/demon-client/index.ts"
       ]
     }
   },

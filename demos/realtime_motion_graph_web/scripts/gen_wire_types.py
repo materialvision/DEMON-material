@@ -3,9 +3,10 @@
 The single source of truth for the WebSocket vocabulary is
 ``demos/realtime_motion_graph_web/protocol.py`` (:func:`wire_contract`). This
 script projects that contract into committed TypeScript types
-(``web/sdk/types/wireContract.gen.ts``, part of the demon-client SDK) so a
+(``packages/demon-client/types/wireContract.gen.ts``) so a
 re-skinned / vibecoded UI builds against generated, always-in-sync types
-instead of hand-copying message shapes out of ``sdk/protocol.ts``.
+instead of hand-copying message shapes out of
+``packages/demon-client/protocol.ts``.
 
 ``render_wire_types_ts(contract)`` is a pure function of the contract dict, so
 the drift guard (``tests/unit/test_wire_contract.py``) can regenerate in-memory
@@ -185,8 +186,8 @@ def render_wire_types_ts(contract: dict, knob_schema_version: int) -> str:
 
 def output_path() -> Path:
     return (
-        Path(__file__).resolve().parents[1]
-        / "web" / "sdk" / "types" / "wireContract.gen.ts"
+        Path(__file__).resolve().parents[3]
+        / "packages" / "demon-client" / "types" / "wireContract.gen.ts"
     )
 
 

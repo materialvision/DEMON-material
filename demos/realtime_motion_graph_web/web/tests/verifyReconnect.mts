@@ -24,7 +24,7 @@ import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { Socket } from "node:net";
 
-import { WsReconnector } from "../sdk/wsReconnect.ts";
+import { WsReconnector } from "../../../../packages/demon-client/wsReconnect.ts";
 
 // ── Phase 1: unit-test WsReconnector ────────────────────────────────
 

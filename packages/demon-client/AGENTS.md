@@ -2,7 +2,7 @@
 
 You are building a UI against a DEMON realtime-music pod. Everything you
 need is in this directory (`demon-client`) plus two HTTP manifests the
-backend serves. Do not reverse-engineer the demo app in `../` — build
+backend serves. Do not reverse-engineer the demo app in `demos/realtime_motion_graph_web/web/` — build
 from the contract.
 
 ## Step 0: discover, don't hardcode
@@ -75,7 +75,7 @@ server-side.
    **before** `connect()`, and call
    `remote.setSliceEpoch(player.swapCount)` so the fresh epoch counter
    matches the surviving player. `wsReconnect.ts` provides the backoff
-   loop; the demo's `../hooks/useStartSession.ts` is the reference
+   loop; the demo's `demos/realtime_motion_graph_web/web/hooks/useStartSession.ts` is the reference
    orchestration.
 
 ## Echo channels (external control)
@@ -101,11 +101,11 @@ prefixing) and `AudioPlayerOptions.loudnessConfig` / `workletUrl`.
 
 ## Reference implementations in the demo app
 
-- `../components/Performance/DynamicKnobPanel.tsx` — a complete control
+- `demos/realtime_motion_graph_web/web/components/Performance/DynamicKnobPanel.tsx` — a complete control
   surface rendered purely from `/api/knobs`, zero hand-declared knobs.
   This is the pattern to copy for any new UI.
-- `../hooks/useStartSession.ts` — session + reconnect orchestration.
-- `../hooks/useMcpMirror.ts` — echo-channel mirroring.
+- `demos/realtime_motion_graph_web/web/hooks/useStartSession.ts` — session + reconnect orchestration.
+- `demos/realtime_motion_graph_web/web/hooks/useMcpMirror.ts` — echo-channel mirroring.
 
 ## If you edit the SDK itself
 
