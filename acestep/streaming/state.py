@@ -78,6 +78,13 @@ class SessionState:
     prompt_blend: float = 0.0
     timbre_strength: float = 1.0
 
+    # === Canvas generation counter (bumped by every source swap) ===
+    # A ``write_audio`` carrying a ``source_epoch`` is rejected when it
+    # doesn't match, so an edit staged against the old source can never
+    # splice into the new one. The wire echoes the current value in
+    # ``ready`` / ``swap_ready``. 0 at session create.
+    source_epoch: int = 0
+
     # === Interpolation method per live blend path ===
     # Each of the four live blends can walk either a straight average
     # ("linear") or the per-frame geodesic ("slerp"). slerp holds the

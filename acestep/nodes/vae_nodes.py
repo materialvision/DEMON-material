@@ -256,6 +256,75 @@ def _trt_vae_encode(
     return latent
 
 
+def _trt_vae_encode_window(
+    audio_bct: torch.Tensor,
+    engine_path: str,
+    device: torch.device,
+    *,
+    sample: bool = True,
+) -> torch.Tensor:
+    """Encode a fixed window [B, 2, samples] -> latents [B, 64, T] via TRT.
+
+    The windowed analog of :func:`_trt_vae_encode`, used by the
+    real-time-input splice path with the fixed 5 s encode engine. Two
+    deliberate differences from :func:`_trt_vae_encode`:
+
+      * No ``torch.cuda.empty_cache()``. That call exists in the full
+        encode path to release PyTorch's reserved pool before the big
+        ranged engine's ~16 GiB workspace alloc. The fixed 5 s engine
+        reserves a tiny workspace, and emptying the cache on every live
+        splice would thrash the allocator and disturb the concurrent
+        DiT ticks (the realtime probe showed the streaming loop is
+        duty-cycle sensitive).
+      * ``sample`` toggles the ``mean + std*randn`` draw. Default True
+        matches how the playback source latent was created (so a spliced
+        region carries the same sampling statistics as its surroundings).
+        ``sample=False`` returns the deterministic distribution mean, for
+        parity checks / change-detection where sampling noise (rms
+        ~0.022) would mask the signal.
+    """
+    entry = _get_trt_vae(engine_path, device)
+    ctx = entry["context"]
+    stream = _get_trt_stream()
+
+    dtypes = entry["tensor_dtypes"]
+    inp = audio_bct.to(
+        device=device, dtype=dtypes.get("audio", torch.float32)
+    ).contiguous()
+
+    if not ctx.set_input_shape("audio", tuple(inp.shape)):
+        logger.error(
+            "trt_vae_encode_window_rejected_input_shape input_shape={} engine={}",
+            tuple(inp.shape), engine_path,
+        )
+        raise RuntimeError(
+            f"TRT VAE encode rejected input shape: {tuple(inp.shape)}"
+        )
+    if not ctx.set_tensor_address("audio", inp.data_ptr()):
+        raise RuntimeError("TRT VAE encode rejected input address")
+
+    missing = ctx.infer_shapes()
+    if missing:
+        raise RuntimeError(
+            f"TRT VAE encode shapes insufficiently specified: {missing}"
+        )
+
+    out_shape = tuple(ctx.get_tensor_shape("moments"))
+    moments_dtype = dtypes.get("moments", torch.float32)
+    moments_buf = torch.empty(out_shape, dtype=moments_dtype, device=device)
+    if not ctx.set_tensor_address("moments", moments_buf.data_ptr()):
+        raise RuntimeError("TRT VAE encode rejected output address")
+    if not ctx.execute_async_v3(stream.ptr):
+        raise RuntimeError("TRT VAE encode failed")
+    stream.synchronize()
+
+    mean, logvar = moments_buf.float().chunk(2, dim=1)  # [B, 64, T] each
+    if not sample:
+        return mean
+    std = torch.exp(0.5 * logvar)
+    return mean + std * torch.randn_like(mean)
+
+
 def _find_trt_engine(name: str) -> Optional[str]:
     """Search for a TRT engine file.
 

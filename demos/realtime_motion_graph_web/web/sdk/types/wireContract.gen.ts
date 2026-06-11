@@ -38,7 +38,8 @@ export type CommandName =
   | "set_structure_source"
   | "set_structure_fixture"
   | "clear_structure_source"
-  | "swap_source";
+  | "swap_source"
+  | "write_audio";
 
 export const COMMAND_NAMES: readonly CommandName[] = [
   "params",
@@ -59,6 +60,7 @@ export const COMMAND_NAMES: readonly CommandName[] = [
   "set_structure_fixture",
   "clear_structure_source",
   "swap_source",
+  "write_audio",
 ] as const;
 
 export type EventName =
@@ -82,6 +84,8 @@ export type EventName =
   | "structure_set"
   | "structure_cleared"
   | "structure_failed"
+  | "audio_written"
+  | "audio_write_failed"
   | "command_failed";
 
 export const EVENT_NAMES: readonly EventName[] = [
@@ -105,6 +109,8 @@ export const EVENT_NAMES: readonly EventName[] = [
   "structure_set",
   "structure_cleared",
   "structure_failed",
+  "audio_written",
+  "audio_write_failed",
   "command_failed",
 ] as const;
 
@@ -238,6 +244,20 @@ export interface SwapSourceCommand {
   use_server_source?: boolean;
 }
 
+export interface WriteAudioCommand {
+  type: "write_audio";
+  /** Where the buffer's first sample lands on the source, in playback seconds (sample-exact; no frame or grid alignment required). Default 0. Audio past the source end is trimmed, never wrapped. */
+  at_s?: number | null;
+  /** replace = overwrite the span (declicked against the existing audio at the edges); sum = overdub on top of what's there. */
+  mix?: "replace" | "sum";
+  /** fill = treat the buffer as ONE period of a loop and lay it across the whole source, phase-anchored at at_s (sample-exact audio-domain tiling; any period length works). Default none = write once. */
+  repeat?: "none" | "fill";
+  /** The source generation this write targets (from ready/swap_ready, bumped by every swap). A mismatch is rejected with audio_write_failed instead of splicing into the wrong source. Omit to write against whatever is live. */
+  source_epoch?: number | null;
+  /** Re-encode the self-timbre conditioning against the updated source (~+50 ms). Ignored when a timbre override is active. Default false. */
+  refresh_timbre?: boolean;
+}
+
 // ── Event payloads (server → client) ──
 
 export interface InitAckEvent {
@@ -266,6 +286,8 @@ export interface ReadyEvent {
   lora_pending_enable?: unknown[];
   /** Server-minted session id, echoed for client/analytics log correlation. */
   session_id?: string;
+  /** Source generation counter (0 at create, bumped by every swap). Echo it in write_audio to pin a write to the source it was computed against. */
+  source_epoch?: number;
   /** Backend-declared audio geometry: {sample_rate, channels, chunk_rate_hz, duration_s|null}. chunk_rate_hz is the generation cadence (latent fps for diffusion, frame rate for AR models); duration_s null is reserved for endless streams. */
   geometry?: Record<string, unknown>;
   /** Backend capability mask: {capability: bool} over the Capabilities fields (swap, timbre, structure, lora, ...). Client panels and MCP tools gate on it; commands tagged with a matching `requires` fail with command_failed when the bit is false. */
@@ -324,6 +346,8 @@ export interface SwapReadyEvent {
   key?: string | null;
   time_signature?: string | null;
   fixture_name?: string | null;
+  /** Source generation counter after this swap; write_audio sends targeting the old source are rejected. */
+  source_epoch?: number;
 }
 
 export interface SwapFailedEvent {
@@ -389,6 +413,19 @@ export interface StructureClearedEvent {
 
 export interface StructureFailedEvent {
   type: "structure_failed";
+  error?: string;
+}
+
+export interface AudioWrittenEvent {
+  type: "audio_written";
+  start_s: number;
+  end_s: number;
+  /** The source generation the write landed on (matches ready/swap_ready). */
+  source_epoch: number;
+}
+
+export interface AudioWriteFailedEvent {
+  type: "audio_write_failed";
   error?: string;
 }
 
@@ -479,7 +516,8 @@ export type WireCommand =
   | SetStructureSourceCommand
   | SetStructureFixtureCommand
   | ClearStructureSourceCommand
-  | SwapSourceCommand;
+  | SwapSourceCommand
+  | WriteAudioCommand;
 
 export type WireEvent =
   | InitAckEvent
@@ -502,6 +540,8 @@ export type WireEvent =
   | StructureSetEvent
   | StructureClearedEvent
   | StructureFailedEvent
+  | AudioWrittenEvent
+  | AudioWriteFailedEvent
   | CommandFailedEvent;
 
 export type HandshakeCommand =

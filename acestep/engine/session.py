@@ -798,6 +798,137 @@ class StreamHandle:
             t_start=t_start,
         )["audio"]
 
+    def stage_source_frames(
+        self,
+        canvas,
+        f0: int,
+        f1: int,
+        *,
+        sample: bool = True,
+        engine_path: str | None = None,
+    ) -> tuple["torch.Tensor", int, int]:
+        """Re-encode source-latent frames ``[f0, f1)`` from the canvas.
+
+        The engine half of real-time input ("play into the model"): the
+        source latent is the diffusion anchor and :meth:`tick` re-reads
+        ``self.source.latent.tensor`` every call, so re-encoded frames
+        committed in place propagate to the next submission with no
+        rebuild. This method only STAGES — it returns the encoded block
+        without touching the live latent, so the caller can run the GPU
+        encode outside its state lock and commit under it
+        (:meth:`commit_source_frames`), keeping the edit atomic with
+        respect to ticks.
+
+        ``canvas`` is the session's :class:`~acestep.engine.canvas.
+        SourceCanvas` (the audio mirror); encode windows read their
+        receptive-field context from it, so the staged span is extended
+        by the margin on each side and the EXTENDED span ``(e0, e1)`` is
+        returned with the block — committing it refreshes the frames
+        whose receptive field overlapped the edit, leaving no stale
+        border.
+
+        Engine selection is internal: the fixed 5 s windowed encode
+        engine when built, else the resident ranged ``vae_encode``
+        engine; when the session has no TRT VAE (or the canvas is
+        shorter than one window) the whole canvas is re-encoded through
+        :meth:`Session.encode_audio` (eager fallback), so short sources
+        and eager sessions work instead of erroring.
+
+        ``sample=True`` draws ``mean + std*randn`` like the original
+        source encode (a committed span carries the same sampling
+        statistics as its surroundings); ``sample=False`` returns the
+        deterministic mean, for parity checks where sampling noise
+        (rms ~0.022) would mask the signal.
+
+        Returns ``(staged, e0, e1)`` with ``staged`` shaped
+        ``[1, e1-e0, D]`` in the source latent's layout/dtype.
+        """
+        from acestep.paths import (
+            WINDOWED_VAE_ENCODE_PROFILE_SAMPLES,
+            WINDOWED_VAE_ENCODE_MARGIN_FRAMES,
+            available_windowed_vae_encode_engine,
+        )
+        from acestep.nodes.vae_nodes import (
+            _trt_vae_encode_window, _find_best_vae_engine,
+        )
+        from acestep.engine.canvas import SAMPLES_PER_FRAME
+
+        src = self.source.latent.tensor  # [1, T, D]
+        n_frames = int(src.shape[1])
+        dtype = src.dtype
+        device = src.device
+        if canvas.frames != n_frames:
+            raise ValueError(
+                f"canvas/latent geometry mismatch: canvas covers "
+                f"{canvas.frames} frames, source latent has {n_frames} "
+                f"(stale canvas after a swap?)"
+            )
+        if not (0 <= f0 < f1 <= n_frames):
+            raise ValueError(
+                f"stage span [{f0},{f1}) out of bounds for {n_frames} frames"
+            )
+
+        win_frames = WINDOWED_VAE_ENCODE_PROFILE_SAMPLES[1] // SAMPLES_PER_FRAME
+        margin = WINDOWED_VAE_ENCODE_MARGIN_FRAMES
+        # Extend by the receptive-field margin: frames bordering the
+        # edit saw the changed audio inside their receptive field, so
+        # re-encode them too rather than leave a stale ring.
+        e0 = max(0, f0 - margin)
+        e1 = min(n_frames, f1 + margin)
+
+        if engine_path is None:
+            win_engine = available_windowed_vae_encode_engine()
+            if win_engine is not None:
+                engine_path = str(win_engine)
+            else:
+                engine_path = _find_best_vae_engine("vae_encode")
+                if engine_path is not None:
+                    logger.warning(
+                        "write_audio_no_windowed_engine falling back to "
+                        "ranged vae_encode={} (build vae_encode_fp16_5s_fixed "
+                        "with python -m acestep.engine.trt.build --all to "
+                        "reserve less VRAM)", engine_path,
+                    )
+
+        if engine_path is None or canvas.frames < win_frames:
+            # Whole-canvas fallback: no TRT VAE resident (eager session)
+            # or the canvas is shorter than one fixed window. One full
+            # encode through the node path (which routes TRT/eager
+            # itself); slice out the span we need.
+            lat = self.session.encode_audio(
+                Audio(waveform=canvas.wf, sample_rate=48000),
+            )
+            staged = lat.tensor[:, e0:e1, :].to(device=device, dtype=dtype)
+            return staged, e0, e1
+
+        block = canvas.stage_frames(
+            e0, e1,
+            lambda seg: _trt_vae_encode_window(
+                seg, engine_path, device, sample=sample,
+            ),
+            win_frames=win_frames,
+            margin_frames=margin,
+        )
+        return block.transpose(1, 2).to(device=device, dtype=dtype), e0, e1
+
+    def commit_source_frames(
+        self, staged: "torch.Tensor", f0: int, f1: int,
+    ) -> None:
+        """Write a staged block into the live source latent in place.
+
+        One tensor copy, so an edit is all-or-nothing with respect to a
+        concurrent tick reading the latent (unlike encode-and-write-per-
+        window, which a tick could observe half-applied). Call under the
+        session's state lock, after re-validating the source epoch.
+        """
+        src = self.source.latent.tensor
+        if staged.shape[1] != f1 - f0:
+            raise ValueError(
+                f"staged block covers {staged.shape[1]} frames; "
+                f"span [{f0},{f1}) needs {f1 - f0}"
+            )
+        src[:, f0:f1, :] = staged
+
     @property
     def pipeline(self):
         """Raw pipeline (for stats, shared curves, etc.)."""

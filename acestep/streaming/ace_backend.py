@@ -321,6 +321,7 @@ class ACEStepBackend(DiffusionBackend):
             swap=True,
             timbre=True,
             structure=True,
+            write_audio=True,
             lora=self.use_lora,
             stems=True,
             loop_band=True,

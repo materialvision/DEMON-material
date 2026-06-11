@@ -790,6 +790,65 @@ async def swap_to_audio(
 
 
 # ---------------------------------------------------------------------------
+# Tools — real-time input ("play into the model")
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def write_audio(
+    audio_file: str,
+    at_s: float = 0.0,
+    mix: str = "replace",
+    repeat: str = "none",
+    source_epoch: Optional[int] = None,
+    refresh_timbre: bool = False,
+    session_id: Optional[str] = None,
+) -> dict:
+    """Write audio onto the live source in place — the "play into the
+    model" path.
+
+    Unlike swap_to_audio, this does NOT restart the song, reset the
+    playhead, or run BPM/key detection. ``audio_file`` is ONLY the audio
+    being written (a bar, a chunk, or the whole track; resampled to
+    48 kHz): the server keeps a sample-exact mirror of the source audio
+    and pulls all re-encode context from it, then commits the refreshed
+    latent span in place so the edit emerges on the next few ticks.
+
+    * ``at_s`` places the buffer's first sample, in playback seconds
+      (sample-exact; audio past the source end is trimmed).
+    * ``mix="replace"`` overwrites (declicked at the edges);
+      ``mix="sum"`` overdubs on top of the existing audio.
+    * ``repeat="fill"`` treats the buffer as one period of a loop and
+      lays it across the whole source, phase-anchored at ``at_s`` — any
+      period length works (audio-domain tiling, no latent-grid
+      quantization).
+    * ``source_epoch`` (from ready/swap_ready, echoed by audio_written)
+      pins the write to that source generation; a mismatch is rejected
+      instead of splicing into a newly swapped source.
+
+    ``refresh_timbre`` re-encodes the self-timbre conditioning against
+    the updated source (~+50 ms); off by default and ignored when a
+    timbre override is active. Acked by audio_written /
+    audio_write_failed.
+    """
+    waveform = _load_audio(audio_file)
+    msg: dict[str, Any] = {"type": "write_audio"}
+    if at_s:
+        msg["at_s"] = float(at_s)
+    if mix != "replace":
+        msg["mix"] = str(mix)
+    if repeat != "none":
+        msg["repeat"] = str(repeat)
+    if source_epoch is not None:
+        msg["source_epoch"] = int(source_epoch)
+    if refresh_timbre:
+        msg["refresh_timbre"] = True
+    return _send_cmd(
+        session_id, msg, audio=_waveform_to_audio_bytes(waveform),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

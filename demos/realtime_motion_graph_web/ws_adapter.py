@@ -57,6 +57,8 @@ from acestep.streaming.commands import CommandOrigin
 from acestep.streaming.config import SessionConfig
 from acestep.streaming.events import (
     AudioReady,
+    AudioWriteFailed,
+    AudioWritten,
     CommandFailed,
     DepthApplied,
     LoraCatalogUpdate,
@@ -94,7 +96,7 @@ from acestep.user_uploads import (
     unique_user_upload_name,
 )
 
-from .audio_codec import SliceCodec, send_stem_payload
+from .audio_codec import SliceCodec, chunked_ws_send, send_stem_payload
 from .protocol import COMMAND_NAMES, SAMPLE_RATE, coerce_command_payload
 
 
@@ -513,7 +515,7 @@ def _handle_client_body(
             _ms("first_generated_slice")
         try:
             with send_lock:
-                ws.send(frame)
+                chunked_ws_send(ws, frame)
                 ws.send(json.dumps({
                     "type": "params_update",
                     "params": dict(event.params),
@@ -536,8 +538,9 @@ def _handle_client_body(
                     "key": event.key,
                     "time_signature": event.time_signature,
                     "fixture_name": event.fixture_name,
+                    "source_epoch": event.source_epoch,
                 }))
-                ws.send(new_src_np.astype(np.float16).tobytes())
+                chunked_ws_send(ws, new_src_np.astype(np.float16).tobytes())
                 codec.replace_mirror(new_src_np)
                 if event.stems is not None:
                     send_stem_payload(
@@ -602,6 +605,14 @@ def _handle_client_body(
             _send_json({"type": "structure_cleared"})
         elif isinstance(event, StructureFailed):
             _send_json({"type": "structure_failed", "error": event.error})
+        elif isinstance(event, AudioWritten):
+            _send_json({
+                "type": "audio_written",
+                "start_s": event.start_s, "end_s": event.end_s,
+                "source_epoch": event.source_epoch,
+            })
+        elif isinstance(event, AudioWriteFailed):
+            _send_json({"type": "audio_write_failed", "error": event.error})
         elif isinstance(event, SubscriberDropped):
             # Terminal notice from the bus: our subscription overflowed
             # and was force-closed. Outbound delivery is dead; the
@@ -634,6 +645,7 @@ def _handle_client_body(
         "pipeline_depth": state.current_depth,
         "max_pipeline_depth": streaming.max_pipeline_depth,
         "session_id": session_id,
+        "source_epoch": state.source_epoch,
         # Phase-2 contract surface, declared by the session's backend
         # (plan §3.1–3.3). The legacy flat duration/sample_rate/channels
         # fields above stay as-is for old clients; geometry is the
@@ -645,7 +657,7 @@ def _handle_client_body(
         # manual_slot_cap / steering_available).
         **streaming.steering_payload(),
     }))
-    ws.send(src_np.astype(np.float16).tobytes())
+    chunked_ws_send(ws, src_np.astype(np.float16).tobytes())
     if streaming.initial_upload_stems is not None:
         send_stem_payload(
             ws,
@@ -739,6 +751,46 @@ def _handle_client_body(
                     "command_payload_coerced origin={} mtype={} errors={}",
                     source, mtype, coerce_errors,
                 )
+
+        def _recv_binary_payload(fail_type: str):
+            """Read the binary frame that must follow ``mtype``.
+
+            Bounded (10 s timeout) and type-checked, so an orphan
+            header can neither block the recv loop forever (wedging
+            the whole session) nor consume the next JSON command as
+            its payload. Both failure modes answer ``fail_type`` and
+            keep the session alive. Returns ``None`` on failure (the
+            caller must bail out); flips ``state.running`` if the
+            connection closed.
+            """
+            try:
+                audio_msg = recv_audio(timeout=10)
+            except TimeoutError:
+                logger.error(
+                    "{}_payload_timeout origin={}", mtype, origin,
+                )
+                _send_json({
+                    "type": fail_type,
+                    "error": "binary payload not received within 10s",
+                })
+                return None
+            except ConnectionClosed:
+                state.running = False
+                return None
+            if not isinstance(audio_msg, (bytes, bytearray)):
+                # Log what got eaten: if it was the next JSON command,
+                # the preview names it so the drop is traceable.
+                logger.error(
+                    "{}_payload_not_binary origin={} got={}",
+                    mtype, origin, repr(audio_msg)[:120],
+                )
+                _send_json({
+                    "type": fail_type,
+                    "error": f"expected binary payload after {mtype}",
+                })
+                return None
+            return audio_msg
+
         try:
             if mtype == "params":
                 try:
@@ -806,10 +858,8 @@ def _handle_client_body(
                 streaming.set_timbre_strength(v, origin=origin)
             elif mtype == "set_timbre_source":
                 name = data.get("name") or "timbre"
-                try:
-                    audio_msg = recv_audio()
-                except ConnectionClosed:
-                    state.running = False
+                audio_msg = _recv_binary_payload("timbre_failed")
+                if audio_msg is None:
                     return
                 logger.debug(
                     "set_timbre_source_bytes_received name={} bytes={}",
@@ -841,10 +891,8 @@ def _handle_client_body(
                 streaming.clear_timbre_source(origin=origin)
             elif mtype == "set_structure_source":
                 name = data.get("name") or "structure"
-                try:
-                    audio_msg = recv_audio()
-                except ConnectionClosed:
-                    state.running = False
+                audio_msg = _recv_binary_payload("structure_failed")
+                if audio_msg is None:
                     return
                 logger.debug(
                     "set_structure_source_bytes_received name={} bytes={}",
@@ -894,10 +942,8 @@ def _handle_client_body(
                         })
                         return
                 else:
-                    try:
-                        audio_msg = recv_audio()
-                    except ConnectionClosed:
-                        state.running = False
+                    audio_msg = _recv_binary_payload("swap_failed")
+                    if audio_msg is None:
                         return
                     try:
                         wf = _decode_audio_msg(audio_msg)
@@ -915,6 +961,33 @@ def _handle_client_body(
                     time_signature=data.get("time_signature"),
                     fixture_name=data.get("fixture_name"),
                     stem_source_mode=data.get("stem_source_mode"),
+                    origin=origin,
+                )
+            elif mtype == "write_audio":
+                # "Play into the model": a binary PCM frame (only the
+                # audio being written) always follows. No song restart.
+                audio_msg = _recv_binary_payload("audio_write_failed")
+                if audio_msg is None:
+                    return
+                try:
+                    wf = _decode_audio_msg(audio_msg)
+                except Exception as exc:
+                    logger.opt(exception=True).error(
+                        "write_audio_decode_failed origin={} error={}",
+                        origin, exc,
+                    )
+                    _send_json({
+                        "type": "audio_write_failed", "error": str(exc),
+                    })
+                    return
+                epoch = data.get("source_epoch")
+                streaming.write_audio(
+                    Audio(waveform=wf, sample_rate=SAMPLE_RATE),
+                    at_s=float(data.get("at_s") or 0.0),
+                    mix=str(data.get("mix") or "replace"),
+                    repeat=str(data.get("repeat") or "none"),
+                    source_epoch=int(epoch) if epoch is not None else None,
+                    refresh_timbre=bool(data.get("refresh_timbre", False)),
                     origin=origin,
                 )
         except ConnectionClosed:
@@ -956,9 +1029,12 @@ def _handle_client_body(
                     break
                 _audio_buf = caudio if caudio is not None else b""
                 try:
+                    # The thunk accepts ``timeout`` (and ignores it) so it
+                    # matches the ``ws.recv`` signature _recv_binary_payload
+                    # calls with.
                     _dispatch_message(
                         cdata,
-                        lambda _b=_audio_buf: _b,
+                        lambda timeout=None, _b=_audio_buf: _b,
                         "control",
                     )
                 except Exception as exc:
