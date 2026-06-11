@@ -652,6 +652,12 @@ def main():
         # See web/engine/audio/loadFixture.ts.
         max_size=100 * 1024 * 1024,
         process_request=_process_request,
+        # A generation tick or TRT/VAE setup can hold the GIL long enough to
+        # starve the keepalive's recv_events thread past the 20s default, so a
+        # live session gets closed with `1011 keepalive ping timeout`. Widen
+        # the pong deadline to 90s. Trade-off: slower detection of genuinely
+        # dead clients — pair with an app-level idle-session reaper.
+        ping_timeout=90,
     )
     ws_thread = threading.Thread(target=srv.serve_forever, daemon=True)
     ws_thread.start()
