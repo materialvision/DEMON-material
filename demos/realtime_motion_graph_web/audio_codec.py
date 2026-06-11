@@ -105,7 +105,7 @@ class SliceCodec:
         return hdr + compressed
 
 
-def chunked_ws_send(ws, data, _chunk=262144) -> None:
+def chunked_ws_send(ws, data: bytes, chunk_size: int = 262144) -> None:
     """Send a binary payload as a FRAGMENTED message in ~256 KiB pieces.
 
     websockets-sync holds ``protocol_mutex`` across the whole ``send()``
@@ -120,11 +120,11 @@ def chunked_ws_send(ws, data, _chunk=262144) -> None:
     deadlock cannot form. Fragmentation is invisible at the message layer
     (clients reassemble; payload bytes are identical).
     """
-    if len(data) <= _chunk:
+    if len(data) <= chunk_size:
         ws.send(data)
         return
     mv = memoryview(data)
-    ws.send(mv[i:i + _chunk] for i in range(0, len(data), _chunk))
+    ws.send(mv[i:i + chunk_size] for i in range(0, len(data), chunk_size))
 
 
 def send_stem_payload(
