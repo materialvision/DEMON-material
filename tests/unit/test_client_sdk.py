@@ -1,15 +1,15 @@
-"""Boundary guard for the demon-client SDK (web/sdk/).
+"""Boundary guard for the demon-client SDK (packages/demon-client/).
 
-The SDK is the liftable client package: the WebSocket session client, the
+The SDK is the shared client package: the WebSocket session client, the
 slice decoder, the audio player, and the wire-contract/knob types. Its
-promise is that it has NO dependency on the host app, so a new frontend
-can copy or package the directory and build against it. These tests keep
+promise is that it has NO dependency on any host app, so any frontend
+demo (in-repo or external) can import or package it. These tests keep
 that promise true:
 
-* no SDK source may import via the host app's ``@/`` alias (everything
+* no SDK source may import via a host app's ``@/`` alias (everything
   internal is relative; the only bare import is the ``fzstd`` dependency);
-* the worklet asset shipped with the SDK and the copy the demo app serves
-  from ``public/`` must stay byte-identical.
+* the worklet asset shipped with the SDK and the copy the rtmg demo app
+  serves from ``public/`` must stay byte-identical.
 
 Pure source checks: no node, no bundler, no GPU.
 """
@@ -23,7 +23,11 @@ _WEB = (
     / "realtime_motion_graph_web"
     / "web"
 )
-_SDK = _WEB / "sdk"
+_SDK = Path(__file__).resolve().parents[2] / "packages" / "demon-client"
+
+# Directories under the package that hold third-party or generated code,
+# not SDK sources: the boundary guard must not scan them.
+_SKIP_DIRS = {"node_modules", "dist"}
 
 _IMPORT_RE = re.compile(
     r"""(?:from|import)\s+["']([^"']+)["']|require\(\s*["']([^"']+)["']\s*\)"""
@@ -35,7 +39,10 @@ _ALLOWED_BARE_IMPORTS = {"fzstd"}
 
 
 def _sdk_sources():
-    files = sorted(_SDK.rglob("*.ts"))
+    files = sorted(
+        p for p in _SDK.rglob("*.ts")
+        if not (_SKIP_DIRS & set(p.relative_to(_SDK).parts))
+    )
     assert files, f"no SDK sources found under {_SDK}"
     return files
 
@@ -50,7 +57,7 @@ def test_sdk_sources_do_not_import_the_host_app():
                 continue  # relative: stays inside the SDK
             if spec in _ALLOWED_BARE_IMPORTS:
                 continue
-            offenders.setdefault(str(path.relative_to(_WEB)), []).append(spec)
+            offenders.setdefault(str(path.relative_to(_SDK)), []).append(spec)
     assert not offenders, (
         f"SDK sources import outside the package boundary (use relative "
         f"imports, or add a real dependency to _ALLOWED_BARE_IMPORTS): "
@@ -59,15 +66,16 @@ def test_sdk_sources_do_not_import_the_host_app():
 
 
 def test_sdk_worklet_matches_served_copy():
-    # The canonical worklet source ships with the SDK; the demo app serves
-    # a copy from public/ (Next only serves static assets from there).
-    # They must not drift — the worklet's message surface is part of the
-    # AudioPlayer contract.
+    # The canonical worklet source ships with the SDK; the rtmg demo app
+    # serves a copy from public/ (Next only serves static assets from
+    # there). They must not drift — the worklet's message surface is part
+    # of the AudioPlayer contract.
     sdk_copy = (_SDK / "assets" / "audio-worklet.js").read_text(encoding="utf-8")
     served = (_WEB / "public" / "audio-worklet.js").read_text(encoding="utf-8")
     assert sdk_copy.replace("\r\n", "\n") == served.replace("\r\n", "\n"), (
-        "web/sdk/assets/audio-worklet.js and web/public/audio-worklet.js "
-        "have drifted — edit one, copy to the other"
+        "packages/demon-client/assets/audio-worklet.js and the rtmg demo's "
+        "web/public/audio-worklet.js have drifted — edit one, copy to the "
+        "other"
     )
 
 

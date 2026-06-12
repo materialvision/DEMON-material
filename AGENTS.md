@@ -37,8 +37,9 @@ Hard rules:
 
 | Task | Read first |
 |---|---|
-| **Build / re-skin / vibecode a frontend** against a DEMON pod | [`demos/realtime_motion_graph_web/web/sdk/AGENTS.md`](demos/realtime_motion_graph_web/web/sdk/AGENTS.md) — the demon-client SDK recipe: discovery-first workflow, the invariants the manifests can't express, reference implementations. Start there, NOT in the demo app's component code. |
+| **Build / re-skin / vibecode a frontend** against a DEMON pod | [`packages/demon-client/AGENTS.md`](packages/demon-client/AGENTS.md) — the demon-client SDK recipe: discovery-first workflow, the invariants the manifests can't express, reference implementations. Start there, NOT in the demo app's component code. |
 | Work on the bundled web demo app itself | [`demos/realtime_motion_graph_web/README.md`](demos/realtime_motion_graph_web/README.md), then the SDK AGENTS.md above for the protocol layer. |
+| Add a standalone static (no-build) demo | [`demos/arp/README.md`](demos/arp/README.md) — the pattern: a plain directory with a `demo.static.json` mount manifest, served by the backend via `demos/common/static_site.py`, loading the shared SDK bundle from `/sdk/` (built from `packages/demon-client`, see its `build.mjs`). |
 | Drive a live session from an agent (no browser) | The MCP server (`demos/realtime_motion_graph_web/mcp_server.py`): `describe_protocol` / `list_knobs` return the same manifests the HTTP API serves; `set_knob(s)` / `set_prompt` / `swap_to_fixture` / etc. control a running session. |
 | Engine / pipeline / nodes work | [README.md](./README.md) — Session API (`acestep/engine/session.py`), StreamPipeline (`acestep/engine/stream.py`), typed node graph (`acestep/nodes/`). |
 
@@ -53,8 +54,15 @@ Hard rules:
   exactly one registry.
 - **After any registry change, regenerate the TS types:**
   `python demos/realtime_motion_graph_web/scripts/gen_wire_types.py`
-  (output: `web/sdk/types/wireContract.gen.ts`). A stale copy fails the
-  drift-guard tests.
+  (output: `packages/demon-client/types/wireContract.gen.ts`). A stale
+  copy fails the drift-guard tests.
+- **The browser SDK is a shared package.** `packages/demon-client` is
+  the single client implementation: the rtmg Next app imports its TS
+  source via the `@demon/client` tsconfig alias; static demos load the
+  committed `packages/demon-client/dist/` bundle from the backend's
+  `/sdk/` mount. Never copy SDK/worker/worklet code into a demo. After
+  editing SDK source, rebuild the bundle (`npm run build` in the
+  package) so static demos pick the change up.
 - **Tests:** `.venv/Scripts/python.exe -m pytest tests/unit` (the system
   Python lacks the deps; always use the repo venv). The contract drift
   guards live in `tests/unit/test_wire_contract.py` and

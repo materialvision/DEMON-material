@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import type { NextConfig } from "next";
 
 // During development, Next runs on :6660 and the Python engine defaults to :1318.
@@ -22,6 +24,12 @@ function backendHostname(): string | null {
 const devOriginHost = backendHostname();
 
 const nextConfig: NextConfig = {
+  // The @demon/client SDK lives outside this app at packages/demon-client
+  // (tsconfig path alias onto its TS source). Widen Turbopack's project
+  // root to the repo root or it refuses to resolve modules above web/.
+  turbopack: {
+    root: path.join(__dirname, "..", "..", ".."),
+  },
   ...(devOriginHost ? { allowedDevOrigins: [devOriginHost] } : {}),
   async rewrites() {
     return [

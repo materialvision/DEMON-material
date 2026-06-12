@@ -1,4 +1,4 @@
-// Tier A: the hand-rolled float16 -> float32 decoder in sdk/protocol.ts
+// Tier A: the hand-rolled float16 -> float32 decoder in packages/demon-client/protocol.ts
 // (browsers have no native float16; the worker has an identical copy).
 // Node 24 ships native Float16Array, which gives us an exhaustive oracle:
 // every one of the 65536 half-precision bit patterns must decode to the

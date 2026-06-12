@@ -89,13 +89,13 @@ if (typeof window !== "undefined") {
         console.warn(
           `[boot] knob-manifest version mismatch: backend serves v${manifest.version}, ` +
             `client built against v${KNOB_SCHEMA_VERSION} — regenerate ` +
-            "sdk/types/wireContract.gen.ts against this backend.",
+            "packages/demon-client/types/wireContract.gen.ts against this backend.",
         );
       }
     }
     if (contract) {
       useWireContractStore.getState().setContract(contract);
-      // The client's wire types (sdk/types/wireContract.gen.ts) are generated
+      // The client's wire types (packages/demon-client/types/wireContract.gen.ts) are generated
       // from the backend registry at build time; the served contract is the
       // live truth. A version mismatch means this build's senders/ladder may
       // be typed against a stale vocabulary — surface it instead of letting
@@ -104,7 +104,7 @@ if (typeof window !== "undefined") {
         console.warn(
           `[boot] wire-contract version mismatch: backend serves v${contract.version}, ` +
             `client built against v${PROTOCOL_VERSION} — regenerate ` +
-            "sdk/types/wireContract.gen.ts against this backend.",
+            "packages/demon-client/types/wireContract.gen.ts against this backend.",
         );
       }
     }

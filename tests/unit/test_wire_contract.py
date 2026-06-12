@@ -33,6 +33,7 @@ _DEMO = (
     / "demos"
     / "realtime_motion_graph_web"
 )
+_SDK = Path(__file__).resolve().parents[2] / "packages" / "demon-client"
 
 
 def _dispatcher_command_types() -> set:
@@ -76,7 +77,7 @@ def _client_handled_events() -> set:
     (scanned only inside ``switch (msg.type)`` blocks, so an unrelated
     future switch can't inject false positives) plus the init-phase
     ``msg.type === "<x>"`` checks."""
-    src = (_DEMO / "web" / "sdk" / "protocol.ts").read_text(encoding="utf-8")
+    src = (_SDK / "protocol.ts").read_text(encoding="utf-8")
     handled = set(re.findall(r'msg\.type === "([^"]+)"', src))
     for m in re.finditer(r"switch \(msg\.type\)", src):
         block = _balanced_braces(src, src.index("{", m.end()))
@@ -516,19 +517,20 @@ def _load_codegen_module():
 
 
 def test_generated_wire_types_match_contract():
-    # The committed web/types/wireContract.gen.ts must be a byte-for-byte
-    # projection of the live contract. Regenerate with
+    # The committed packages/demon-client/types/wireContract.gen.ts must be
+    # a byte-for-byte projection of the live contract. Regenerate with
     # `python demos/realtime_motion_graph_web/scripts/gen_wire_types.py`.
     from acestep.streaming.knobs import KNOB_SCHEMA_VERSION
 
     gen = _load_codegen_module()
     expected = gen.render_wire_types_ts(wire_contract(), KNOB_SCHEMA_VERSION)
     committed = (
-        _DEMO / "web" / "sdk" / "types" / "wireContract.gen.ts"
+        _SDK / "types" / "wireContract.gen.ts"
     ).read_text(encoding="utf-8")
     # Normalize EOLs: git autocrlf may rewrite the committed file on checkout.
     assert expected.replace("\r\n", "\n") == committed.replace("\r\n", "\n"), (
-        "web/types/wireContract.gen.ts is stale — regenerate with "
+        "packages/demon-client/types/wireContract.gen.ts is stale — "
+        "regenerate with "
         "`python demos/realtime_motion_graph_web/scripts/gen_wire_types.py`"
     )
 

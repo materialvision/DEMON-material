@@ -33,6 +33,13 @@ from acestep.engine.obs import configure as configure_logging, logger
 from acestep.fixtures import KNOWN_FIXTURES, audio_fixture
 from acestep.user_uploads import enumerate_user_uploads, user_upload_audio
 
+from ..common.static_site import (
+    SDK_ROUTE,
+    discover_static_demos,
+    sdk_dist_dir,
+    serve_static_mounts,
+)
+
 # The generative backend is imported lazily inside main(): in --no-backend
 # mode we skip the import entirely so torch and acestep don't load and the
 # GPU stays free for other work while iterating on the front-end.
@@ -40,6 +47,14 @@ from acestep.user_uploads import enumerate_user_uploads, user_upload_audio
 
 VIDEOS_DIR = Path(__file__).parent / "videos"
 _VIDEO_EXTS = {".mp4", ".webm", ".mov"}
+
+# Standalone static demos (each a self-contained page in demos/<name>/
+# with a demo.static.json manifest, e.g. the Arpeggiator -> DEMON demo at
+# /arp) plus the shared demon-client browser bundle they load from /sdk/.
+# Served from this backend so each page and the WS share one origin/port;
+# no Next.js involved. Built at import time so a malformed manifest fails
+# the server at boot instead of 404ing mysteriously.
+_STATIC_MOUNTS = {SDK_ROUTE: sdk_dist_dir(), **discover_static_demos()}
 
 # Set in main() based on --no-backend; read by _process_request when the
 # client polls /api/server-info on startup.
@@ -453,6 +468,12 @@ def _process_request(connection, request):
                 ]),
                 body,
             )
+
+    # Standalone static demos + the shared demon-client bundle (/sdk/).
+    resp = serve_static_mounts(path_only, _STATIC_MOUNTS)
+    if resp is not None:
+        _log_http(remote, resp.status_code, "GET", url)
+        return resp
 
     body = b"404 not found\n"
     _log_http(remote, 404, "GET", url)

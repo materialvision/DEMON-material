@@ -55,6 +55,11 @@ lib64/
 # encoders, etc.) so the React UI source tracks normally.
 !demos/realtime_motion_graph_web/web/lib/
 !demos/realtime_motion_graph_web/web/lib/**
+# Likewise whitelist the committed demon-client browser bundle (consumed
+# by no-build static demos; see packages/demon-client/build.mjs) from the
+# Python "dist/" rule above.
+!packages/demon-client/dist/
+!packages/demon-client/dist/**
 parts/
 sdist/
 var/

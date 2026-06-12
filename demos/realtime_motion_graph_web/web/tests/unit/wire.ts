@@ -1,7 +1,7 @@
 // Wire-frame builders for unit tests: synthesize the server's binary
 // frames (initial buffer, RAW/DELTA slices) without a recording.
 // Framing must match demos/realtime_motion_graph_web/protocol.py
-// (SLICE_HDR_FMT "<BIIHffI") and sdk/types/protocol.ts SLICE_HDR_SIZE.
+// (SLICE_HDR_FMT "<BIIHffI") and packages/demon-client/types/protocol.ts SLICE_HDR_SIZE.
 
 import * as zlib from "node:zlib";
 

@@ -6,10 +6,21 @@ client, the binary slice decoder, realtime audio playback, reconnect
 orchestration, and typed access to the backend's self-describing
 manifests.
 
-Nothing in this directory imports from the host app (drift-guarded by
+Nothing in this directory imports from any host app (drift-guarded by
 `tests/unit/test_client_sdk.py`), so it can be copied or packaged
-standalone. The shipped demo UI in `../` is itself a consumer, imported
-via the `@demon/client` tsconfig alias.
+standalone. Two consumption modes ship in-repo:
+
+- **Bundled apps** — the rtmg demo UI in
+  `demos/realtime_motion_graph_web/web/` imports the TS source via the
+  `@demon/client` tsconfig path alias; its bundler transpiles the SDK
+  and bundles the slice-decoder worker automatically.
+- **Static no-build pages** — `dist/` holds a committed esbuild bundle
+  (`demon-client.js`, `sliceDecoder.worker.js`, `audio-worklet.js`) that
+  the demo backend mounts at `/sdk/`; `demos/arp` is the reference
+  consumer. Pass `RemoteBackendOptions.sliceWorkerUrl` and
+  `AudioPlayerOptions.workletUrl` pointing at the mounted siblings.
+  Regenerate after any SDK change: `npm install && npm run build` here
+  (see `build.mjs`).
 
 Vibecoding a new frontend (or pointing an agent at this SDK)? Start at
 [AGENTS.md](./AGENTS.md) — the imperative recipe: discovery-first
