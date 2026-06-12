@@ -94,12 +94,22 @@ def test_rejects_invalid_routes(tmp_path, route):
         static_site.load_static_demo(demo)
 
 
-def test_rejects_duplicate_routes(tmp_path, monkeypatch):
+def test_rejects_duplicate_routes(tmp_path):
     first = _write_demo(tmp_path, route="/dupe", dirname="first")
     second = _write_demo(tmp_path, route="/dupe", dirname="second")
     second_manifest = second / "demon.demo.json"
 
-    monkeypatch.setattr(static_site, "discover_static_demos", lambda: {})
-
     with pytest.raises(ValueError, match="already claimed"):
         static_site.build_static_mounts([first, second_manifest])
+
+
+def test_mounts_only_sdk_and_explicit_demos(tmp_path):
+    # Demos are external: nothing inside the repo's demos/ tree may mount
+    # implicitly. The table is /sdk plus exactly the --demo paths given.
+    assert set(static_site.build_static_mounts()) == {"/sdk"}
+
+    demo = _write_demo(tmp_path, route="/external")
+    mounts = static_site.build_static_mounts([demo])
+
+    assert set(mounts) == {"/sdk", "/external"}
+    assert mounts["/external"].root == demo.resolve()

@@ -11,7 +11,8 @@ DEMON is a streaming diffusion engine for ACE-Step v1.5. Think StreamDiffusion, 
 You need: an NVIDIA GPU (tested on RTX 3090 / 4090 / 5090), [uv](https://docs.astral.sh/uv/), Node.js 20+ (web demo only), and about 40 GB of free disk.
 
 ```bash
-git clone https://github.com/daydreamlive/DEMON.git && cd DEMON
+git clone https://github.com/daydreamlive/DEMON.git
+cd DEMON
 uv sync
 uv run demon-setup
 ```

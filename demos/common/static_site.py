@@ -12,9 +12,11 @@ accepted::
 
     {"route": "/arp", "entry": "index.html"}
 
-:func:`discover_static_demos` scans ``demos/*`` for manifests and
-returns the mount table; :func:`serve_static_mounts` resolves a request
-path against it. The shared demon-client browser bundle
+Demos are external repos, mounted explicitly via the backend's
+``--demo <path>`` flag: :func:`build_static_mounts` assembles the mount
+table from those paths; :func:`serve_static_mounts` resolves a request
+path against it. Nothing inside the repo's ``demos/`` tree is scanned
+or mounted implicitly. The shared demon-client browser bundle
 (``packages/demon-client/dist``, see its ``build.mjs``) is mounted at
 :data:`SDK_ROUTE` so every static demo loads ONE copy of the SDK /
 slice-decoder worker / audio worklet instead of vendoring its own.
@@ -147,34 +149,17 @@ def _add_mount(
     mounts[mount.route] = mount
 
 
-def discover_static_demos(demos_root: Path | None = None) -> dict[str, StaticMount]:
-    """Scan ``demos/*`` for static demo manifests.
+def build_static_mounts(
+    extra_demos: list[str | Path] | tuple[str | Path, ...] = (),
+) -> dict[str, StaticMount]:
+    """Build the static mount table: /sdk plus the external ``--demo`` paths.
 
     Malformed manifests and reserved/duplicate routes raise immediately:
     a typo'd mount should fail the server at boot, not 404 mysteriously.
     """
-    if demos_root is None:
-        demos_root = _REPO_ROOT / "demos"
-    mounts: dict[str, StaticMount] = {}
-    for demo_dir in sorted(p for p in demos_root.iterdir() if p.is_dir()):
-        try:
-            manifest = _manifest_for_directory(demo_dir)
-        except ValueError:
-            continue
-        mount = load_static_demo(manifest)
-        _add_mount(mounts, mount, manifest)
-    return mounts
-
-
-def build_static_mounts(
-    extra_demos: list[str | Path] | tuple[str | Path, ...] = (),
-) -> dict[str, StaticMount]:
-    """Build the full static mount table, including /sdk and external demos."""
     mounts: dict[str, StaticMount] = {
         SDK_ROUTE: StaticMount(route=SDK_ROUTE, root=sdk_dist_dir()),
     }
-    for mount in discover_static_demos().values():
-        _add_mount(mounts, mount, mount.root)
     for demo in extra_demos:
         mount = load_static_demo(demo)
         _add_mount(mounts, mount, Path(demo))
