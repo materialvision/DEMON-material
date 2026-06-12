@@ -141,8 +141,10 @@ def serve_static_site(path_only: str, route: str, root: Path) -> Response | None
     elif path_only.startswith(route + "/"):
         rel = urllib.parse.unquote(path_only[len(route) + 1:])
         candidate = (root / rel).resolve()
-        # Reject anything that escapes root (symlink/`..` traversal).
-        target = candidate if str(candidate).startswith(str(root)) else None
+        # Reject anything that escapes root (symlink/`..` traversal). A
+        # string-prefix check would also admit sibling dirs sharing the
+        # root's name as a prefix (root "/x/arp" matching "/x/arp_other").
+        target = candidate if candidate.is_relative_to(root) else None
     else:
         return None
     if target is None or not target.is_file():
