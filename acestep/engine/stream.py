@@ -219,6 +219,11 @@ class _Slot:
     # populated on step 0, reused on every subsequent step of this slot.
     initial_noise: Optional[torch.Tensor] = None
     vt_neg_cached: Optional[torch.Tensor] = None
+    # Host-side "is the slot's own x0_target_strength non-zero" flag,
+    # computed once at slot init so the per-step gate doesn't pay a
+    # normalize + .any().item() per slot per tick. Only consulted when
+    # no shared x0_target_strength override is active.
+    x0_strength_active: bool = False
 
 
 class StreamPipeline:
@@ -246,6 +251,7 @@ class StreamPipeline:
         config: DiffusionConfig,
         pipeline_depth: Optional[int] = None,
         adapter: Optional[ModelAdapter] = None,
+        queue_cap: Optional[int] = None,
     ):
         """``adapter`` selects the model family behind the Tier-2 seam
         (:mod:`acestep.engine.model_adapter`). ``None`` (every existing
@@ -273,13 +279,23 @@ class StreamPipeline:
         # Pipeline state
         self._slots: List[Optional[_Slot]] = [None] * self._depth
         self._queue: List[SlotRequest] = []
+        # Max queued requests before the oldest is dropped. ``None``
+        # keeps the historical cap (= depth). Streaming callers that
+        # re-submit every tick should pass 1: only the freshest request
+        # matters, and a deeper queue only adds parameter staleness
+        # (each queue position costs ~steps/depth ticks of latency on
+        # per-slot parameters like denoise/seed).
+        self._queue_cap: Optional[int] = queue_cap
 
         # Cached device/dtype (set on first submit)
         self._device: Optional[torch.device] = None
         self._dtype: Optional[torch.dtype] = None
 
-        # Schedule cache: denoise -> cpu tensor
-        self._schedule_cache: dict[float, torch.Tensor] = {}
+        # Schedule cache: denoise -> cpu tensor. LRU-bounded so a
+        # continuously swept denoise knob (every distinct float is a
+        # key) can't grow it without bound over a long session.
+        self._schedule_cache: "OrderedDict[float, torch.Tensor]" = OrderedDict()
+        self._schedule_cache_max = 256
 
         # TRT state (mirrors DiffusionEngine pattern). Snapshotted from
         # the engine here, refreshed on profile swaps via the
@@ -326,6 +342,17 @@ class StreamPipeline:
         # at the setter so callers can pass scalars without thinking
         # about shape.
         self._shared_curves: dict[str, torch.Tensor] = {}
+        # Last raw value passed to set_shared_curve per name, used to
+        # skip re-normalization when a caller pushes the same scalar /
+        # tensor object every tick (the streaming backend does).
+        self._shared_curves_src: dict[str, object] = {}
+        # Device/dtype-cast copies of _shared_curves entries, refreshed
+        # lazily on first hot-path use after a set. Avoids a small H2D
+        # transfer per slot per tick when shared curves live on CPU.
+        self._shared_curves_dev: dict[str, torch.Tensor] = {}
+        # Host-side "shared x0_target_strength is non-zero" flag,
+        # computed once at the setter instead of per slot per tick.
+        self._shared_x0_active: bool = False
 
         # Channel guidance: a ``[1, T, 64]`` per-channel gain applied to
         # ``xt`` before each forward pass. Lives in its own field rather
@@ -434,13 +461,19 @@ class StreamPipeline:
     def submit(self, request: SlotRequest) -> None:
         """Enqueue a generation request.
 
-        The queue is capped at ``_depth`` items.  When the caller submits
-        faster than the pipeline consumes (always the case when
-        depth < infer_steps), the oldest queued request is dropped so
-        that fresh parameters reach the ring buffer promptly instead of
-        sitting behind an ever-growing backlog of stale requests.
+        The queue is capped at ``queue_cap`` items (default: ``_depth``).
+        When the caller submits faster than the pipeline consumes
+        (always the case when depth < infer_steps), the oldest queued
+        request is dropped so that fresh parameters reach the ring
+        buffer promptly instead of sitting behind an ever-growing
+        backlog of stale requests. Streaming callers that re-submit
+        every tick should construct the pipeline with ``queue_cap=1``
+        so a retiring slot is always refilled with the freshest
+        parameters.
         """
-        if len(self._queue) >= self._depth:
+        cap = self._queue_cap if self._queue_cap is not None else self._depth
+        cap = max(1, cap)
+        while len(self._queue) >= cap:
             self._queue.pop(0)
         self._queue.append(request)
 
@@ -449,13 +482,19 @@ class StreamPipeline:
 
         Schedule construction is family knowledge (ACE flow-matching
         ``shift`` warp vs SA3 LogSNR warp), so it lives on the adapter;
-        the cache stays here.
+        the cache stays here, LRU-bounded by ``_schedule_cache_max``.
         """
-        if denoise not in self._schedule_cache:
-            self._schedule_cache[denoise] = self.adapter.build_schedule(
-                self.config, denoise, self._device, self._dtype
-            ).cpu()
-        return self._schedule_cache[denoise]
+        cached = self._schedule_cache.get(denoise)
+        if cached is not None:
+            self._schedule_cache.move_to_end(denoise)
+            return cached
+        schedule = self.adapter.build_schedule(
+            self.config, denoise, self._device, self._dtype
+        ).cpu()
+        self._schedule_cache[denoise] = schedule
+        while len(self._schedule_cache) > self._schedule_cache_max:
+            self._schedule_cache.popitem(last=False)
+        return schedule
 
     def _ensure_device(self, device: torch.device, dtype: torch.dtype):
         if self._device is None:
@@ -557,11 +596,21 @@ class StreamPipeline:
             noise.clone() if request.rcfg_mode == "self" else None
         )
 
+        # Host-side x0_target_strength activity flag (see _Slot). The
+        # field is scalar-or-curve; .any() matches the historical
+        # tensor gate, bool() matches it for scalars (non-zero = active).
+        strength = request.x0_target_strength
+        if isinstance(strength, torch.Tensor):
+            x0_active = bool(strength.abs().any().item())
+        else:
+            x0_active = bool(strength)
+
         return _Slot(
             request=request, xt=xt,
             t_schedule=t_schedule, step_idx=0,
             momentum_buffer=momentum_buffer,
             initial_noise=initial_noise,
+            x0_strength_active=x0_active,
         )
 
     # ------------------------------------------------------------------
@@ -647,23 +696,53 @@ class StreamPipeline:
         """
         ones_3d, zeros_3d = self._ensure_sentinels()
 
-        eff_vs = self._eff_shared(slot, "velocity_scale")
-        eff_sdc = self._eff_shared(slot, "sde_denoise_curve")
-        eff_onc = self._eff_shared(slot, "ode_noise_curve")
+        vs = self._shared_curve_dev(
+            slot, "velocity_scale", vt.device, vt.dtype,
+        )
+        sdc = self._shared_curve_dev(
+            slot, "sde_denoise_curve", slot.xt.device, slot.xt.dtype,
+        )
+        onc = self._shared_curve_dev(
+            slot, "ode_noise_curve", slot.xt.device, slot.xt.dtype,
+        )
 
-        vs = (
-            eff_vs.to(device=vt.device, dtype=vt.dtype)
-            if eff_vs is not None else ones_3d
-        )
-        sdc = (
-            eff_sdc.to(device=slot.xt.device, dtype=slot.xt.dtype)
-            if eff_sdc is not None else None
-        )
-        onc = (
-            eff_onc.to(device=slot.xt.device, dtype=slot.xt.dtype)
-            if eff_onc is not None else zeros_3d
-        )
+        if vs is None:
+            vs = ones_3d
+        if onc is None:
+            onc = zeros_3d
         return vs, sdc, onc
+
+    def _shared_curve_dev(
+        self,
+        slot: "_Slot",
+        name: str,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Optional[torch.Tensor]:
+        """Device/dtype-resident effective curve for ``name``.
+
+        Same precedence as :meth:`_eff_shared` (shared override first,
+        then slot field), but the shared override's device cast is
+        cached on ``_shared_curves_dev`` so repeated ticks don't pay a
+        per-slot H2D copy for CPU-resident shared curves. The cast is
+        the identical ``.to(device, dtype)`` the hot path used to
+        perform inline, so values are byte-identical.
+        """
+        v = self._shared_curves.get(name)
+        if v is not None:
+            dev = self._shared_curves_dev.get(name)
+            if (
+                dev is None
+                or dev.device != device
+                or dev.dtype != dtype
+            ):
+                dev = v.to(device=device, dtype=dtype)
+                self._shared_curves_dev[name] = dev
+            return dev
+        v = getattr(slot.request, name, None)
+        if v is None:
+            return None
+        return ode_steps.normalize_curve(v).to(device=device, dtype=dtype)
 
     # The batched decoder forward lives on the family's ModelAdapter
     # (``self.adapter.batched_forward``) — moved there verbatim from
@@ -718,9 +797,11 @@ class StreamPipeline:
         else:
             bufs["hidden_states"].copy_(xt_io)
 
-        # timestep: one scalar per row.
-        for i, t in enumerate(timestep_list):
-            bufs["timestep"][i] = t
+        # timestep: one scalar per row, staged on CPU and shipped in a
+        # single H2D copy instead of B per-element writes.
+        bufs["timestep"].copy_(
+            torch.tensor(timestep_list, dtype=bufs["timestep"].dtype)
+        )
 
         # encoder_hidden_states: already padded to max_L + catted by
         # the caller. The engine has no ``encoder_attention_mask``
@@ -753,7 +834,14 @@ class StreamPipeline:
 
         if not ctx.execute_async_v3(self._trt_stream.ptr):
             raise RuntimeError("TRT decoder execution failed")
-        self._trt_stream.synchronize()
+        # No host sync here. The polygraphy stream is created with
+        # cudaStreamCreate (a *blocking* stream w.r.t. the legacy
+        # default stream PyTorch uses), so the ``out.to(...)`` below —
+        # and every subsequent torch op — is implicitly ordered after
+        # the TRT execution on the GPU. Dropping the explicit
+        # synchronize lets the CPU run ahead and enqueue the
+        # integration math for this tick while the engine is still
+        # executing, instead of blocking the host once per forward.
 
         out = self._trt_out_buf
         if pad:
@@ -779,10 +867,21 @@ class StreamPipeline:
         ``buf`` is ``[B, num_layers, hidden_size]``; zeroed first so
         previous-tick content doesn't leak. Rows with no matching shift
         stay zero, which the engine adds as a no-op per layer.
+
+        When no steering configs are active the zero is skipped
+        entirely unless a previous forward actually wrote into the
+        buffer (``_steering_dirty`` on the owning cache entry) — the
+        buffer is allocated zeroed, so the common no-steering case is
+        a no-op instead of a per-forward fill kernel.
         """
-        buf.zero_()
+        bufs = self._trt_bufs
         if not self._steering_by_layer:
+            if bufs is not None and bufs.get("_steering_dirty"):
+                buf.zero_()
+                bufs["_steering_dirty"] = False
             return
+        buf.zero_()
+        wrote = False
         for layer_idx, applies in self._steering_by_layer.items():
             if layer_idx < 0 or layer_idx >= self._steering_num_layers:
                 continue
@@ -792,6 +891,9 @@ class StreamPipeline:
                     continue
                 v = apply.vector.to(device=buf.device, dtype=buf.dtype)
                 buf[mask_rows, layer_idx, :] += apply.scale * v
+                wrote = True
+        if bufs is not None:
+            bufs["_steering_dirty"] = wrote
 
     # ------------------------------------------------------------------
     # TRT buffer management
@@ -941,7 +1043,11 @@ class StreamPipeline:
                 if slot is not None and slot.xt.shape[1] != target_T:
                     self._slots[i] = None
 
-        # Check for finished slot (slot at final step of its schedule)
+        # Check for a leftover finished slot. With same-tick delivery
+        # below this only fires when MORE than one slot finished on a
+        # previous tick (possible when depth >= steps) — the extras
+        # drain here, one per tick, preserving the one-result-per-tick
+        # contract.
         finished = None
         for i, slot in enumerate(self._slots):
             if slot is not None and slot.step_idx >= len(slot.t_schedule) - 1:
@@ -967,6 +1073,22 @@ class StreamPipeline:
 
         indices, slots = zip(*active)
         self._tick_pt(slots, indices)
+
+        # Same-tick delivery: a slot that just reached its final step is
+        # returned NOW rather than parked until the next tick's scan —
+        # one full tick of latency shaved off every generation. Only
+        # when no leftover was already claimed above, so at most one
+        # latent is delivered per tick.
+        if finished is None:
+            for i in indices:
+                slot = self._slots[i]
+                if (
+                    slot is not None
+                    and slot.step_idx >= len(slot.t_schedule) - 1
+                ):
+                    finished = slot.xt
+                    self._slots[i] = None
+                    break
 
         self._last_tick_ms = (time.time() - tick_start) * 1000
         self.ticks += 1
@@ -1219,15 +1341,20 @@ class StreamPipeline:
             # ``x0_target_strength`` path: blend toward a target latent
             # at scalar (or per-frame curve) strength, gated to the
             # refinement half.  Preserving the historical "strength==0
-            # falls through to the fast path" behavior — checks the
-            # effective (shared override or slot field) strength via a
-            # tensor.any() sync, which costs one host-device fence per
-            # slot per step but lets the gate stay tensor-safe.
-            eff_strength = self._eff_shared(slot, "x0_target_strength")
-            strength_active = (
-                eff_strength is not None
-                and bool(eff_strength.abs().any().item())
-            )
+            # falls through to the fast path" behavior. The activity
+            # check is a host-side flag (computed once at the shared
+            # setter / slot init) instead of a per-slot-per-step
+            # tensor.any().item() fence; the effective tensor is only
+            # materialized when the blend actually fires.
+            if "x0_target_strength" in self._shared_curves:
+                strength_active = self._shared_x0_active
+                eff_strength = self._shared_curves["x0_target_strength"]
+            else:
+                strength_active = slot.x0_strength_active
+                eff_strength = (
+                    ode_steps.normalize_curve(req.x0_target_strength)
+                    if strength_active else None
+                )
             scalar_x0_target = (
                 req.x0_target is not None
                 and strength_active
@@ -1404,11 +1531,32 @@ class StreamPipeline:
         always ``[B, T, 1]`` and downstream consumers do not need to
         type-discriminate. Pass ``None`` to revert that name to per-slot
         behavior.
+
+        Re-setting the same scalar value (or the same tensor object)
+        is a no-op — streaming backends push the full knob state every
+        tick, and skipping unchanged values avoids re-normalizing and
+        re-uploading curves whose knobs aren't moving.
         """
         if value is None:
             self._shared_curves.pop(name, None)
+            self._shared_curves_src.pop(name, None)
+            self._shared_curves_dev.pop(name, None)
             return
-        self._shared_curves[name] = ode_steps.normalize_curve(value)
+        prev = self._shared_curves_src.get(name)
+        if isinstance(value, (int, float, bool)):
+            if (
+                isinstance(prev, (int, float, bool))
+                and float(prev) == float(value)
+            ):
+                return
+        elif value is prev:
+            return
+        self._shared_curves_src[name] = value
+        norm = ode_steps.normalize_curve(value)
+        self._shared_curves[name] = norm
+        self._shared_curves_dev.pop(name, None)
+        if name == "x0_target_strength":
+            self._shared_x0_active = bool(norm.abs().any().item())
 
     def _eff_shared(self, slot: "_Slot", name: str):
         """Return shared override for ``name`` if set, else slot's field.
@@ -1625,6 +1773,8 @@ class StreamPipeline:
         self._schedule_cache.clear()
         self._compiled_cache.clear()
         self._shared_curves.clear()
+        self._shared_curves_src.clear()
+        self._shared_curves_dev.clear()
         # DCW corrector holds wavelet basis tensors on GPU; drop it.
         self._dcw_corrector = None
         # Detach references to the engine + decoder so DiffusionEngine.close
