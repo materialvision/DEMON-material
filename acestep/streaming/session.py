@@ -41,6 +41,7 @@ from contextlib import ExitStack
 
 import functools
 import os
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -119,6 +120,8 @@ from acestep.streaming.stems import (
     extract_upload_stems,
     normalize_stem_source_mode,
     resolve_upload_stem_source_mode,
+    stems_pending,
+    wait_for_pending_stems,
 )
 
 
@@ -224,6 +227,7 @@ def extract_and_select_upload_stem(
     source_mode: str | None,
     fixture_name: str | None = None,
     log_context: str = "",
+    should_abort=None,
 ) -> tuple[dict[str, torch.Tensor] | None, str | None, PreparedSource, torch.Tensor]:
     """Run Mel-Band RoFormer and (when requested) substitute the chosen
     stem as the inference source. Returns ``(stems, error, source, wf)``.
@@ -231,6 +235,11 @@ def extract_and_select_upload_stem(
     Reused by initial setup AND by the swap path inside the session, so
     cache lookup / encode fallback / rollback semantics stay in one
     place.
+
+    ``should_abort`` (optional zero-arg callable) lets a stopping
+    session cut the pending-stems wait short (see
+    :func:`wait_for_pending_stems`); the abort maps to a normal
+    stem-extraction error, which the swap path turns into SwapFailed.
     """
     if source_mode is None:
         return None, None, source, waveform
@@ -248,6 +257,55 @@ def extract_and_select_upload_stem(
             )
             if fixture_name else None
         )
+        if upload_stems is None and stems_pending(fixture_name):
+            # The upload path is ripping this track's stems on a
+            # background thread (see ws_adapter._handle_upload_track).
+            if source_mode == "full":
+                # Stems are overlay-only here: proceed WITHOUT them so
+                # the swap (and audio) lands immediately. The client's
+                # overlays arrive via the pushed ``stem_assets`` frame
+                # when the background rip completes.
+                logger.info(
+                    "stems_pending_deferred fixture_name={} context={}",
+                    fixture_name, log_context or None,
+                )
+                return None, None, source, waveform
+            # The selected stem IS the inference source: wait for the
+            # in-flight rip instead of starting a duplicate separation.
+            logger.info(
+                "stems_pending_wait fixture_name={} source_mode={} context={}",
+                fixture_name, source_mode, log_context or None,
+            )
+            finished = wait_for_pending_stems(
+                fixture_name, should_abort=should_abort,
+            )
+            logger.info(
+                "stems_pending_wait_done fixture_name={} finished={}",
+                fixture_name, finished,
+            )
+            if not finished:
+                # Whether the wait was aborted (session stopping) or
+                # timed out (rip slow/hung, still holding _INFER_LOCK),
+                # falling through would start a DUPLICATE inline
+                # separation — first blocking on _INFER_LOCK behind the
+                # very rip we just gave up waiting for. Fail the swap
+                # instead; the client can re-swap once the rip lands.
+                aborted = should_abort is not None and should_abort()
+                return (
+                    None,
+                    (
+                        "session stopping; aborted wait for background stems"
+                        if aborted
+                        else "timed out waiting for the in-flight background stem rip"
+                    ),
+                    source,
+                    waveform,
+                )
+            upload_stems = audio_clip_stems(
+                fixture_name,
+                waveform=waveform,
+                sample_rate=SAMPLE_RATE,
+            )
         if upload_stems is not None:
             logger.info(
                 "stems_cache_hit fixture_name={} source_mode={} context={}",
@@ -258,6 +316,11 @@ def extract_and_select_upload_stem(
                 waveform=waveform,
                 device=session.handler.device,
                 backend_sample_rate=SAMPLE_RATE,
+                # Park this session's eager modules while the RoFormer
+                # runs (restored before the prepare_source below needs
+                # them back). Safe here: at create the runner doesn't
+                # exist yet, and at swap WE ARE the runner thread.
+                model_context=session.handler,
             )
         if source_mode == "full":
             return upload_stems, None, source, waveform
@@ -461,6 +524,12 @@ class StreamingSession:
         # Event bus: typed events the runner thread and operation
         # methods publish; transport adapters subscribe and serialize.
         self.bus = EventBus()
+
+        # Set at the end of close(), after GPU state is released. A
+        # preempting connection (ws_adapter's single-active-session
+        # policy) waits on this before creating its own session so the
+        # two model stacks never need VRAM simultaneously.
+        self.closed = threading.Event()
 
         # The session's GeneratorBackend, selected by SessionConfig.backend
         # via the family registry. Constructed here (not in run()) so the
@@ -728,6 +797,9 @@ class StreamingSession:
             self.session.close()
         except Exception as exc:
             logger.warning("session_close_raised error={}", exc)
+        # Last: signal waiters (preempting connections) that this
+        # session's GPU state is gone.
+        self.closed.set()
 
     def _on_audio_ready(self, wav_np, win_start=None, win_end=None):
         """Runner callback. Mutates ``audio_eng`` for full-buffer
@@ -974,6 +1046,12 @@ class StreamingSession:
                     source_mode=new_stem_source_mode,
                     fixture_name=new_fixture_name,
                     log_context="swap",
+                    # We ARE the runner thread: a preempting connection
+                    # flips running=False and waits only 45 s for
+                    # teardown, so the pending-stems wait (300 s) must
+                    # be interruptible or the preemptor builds a second
+                    # stack next to this still-resident one.
+                    should_abort=lambda: not self.state.running,
                 )
             )
             if new_stem_error is not None and new_stem_source_mode != "full":

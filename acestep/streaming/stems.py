@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import importlib
 import math
@@ -17,9 +18,11 @@ import torch
 import torch.nn.functional as F
 import torchaudio.functional as TAF
 from einops import pack, rearrange, reduce, repeat, unpack
+from loguru import logger
 from torch import nn
 from torch.nn import Module, ModuleList
 
+from acestep.gpu_config import get_vram_telemetry
 from acestep.model_downloader import resolve_melband_roformer_model_path
 
 try:
@@ -741,6 +744,186 @@ STEM_SOURCE_MODES = frozenset({"full", "vocals", "instruments"})
 
 _INFER_LOCK = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# Pending background stem rips
+# ---------------------------------------------------------------------------
+#
+# The demo's upload path acks ``upload_ok`` as soon as the FULL source is
+# encoded and persisted, then rips stems on a background thread so the
+# client can swap (and hear audio) immediately. While a rip is in flight
+# this registry marks the track name so the swap path doesn't start a
+# second separation for the same track:
+#
+#   - mode "full": the swap proceeds WITHOUT stems (overlays arrive via
+#     a pushed ``stem_assets`` frame when the rip lands).
+#   - mode "vocals"/"instruments": the stem IS the inference source, so
+#     the swap waits for the rip to finish and then loads it from disk.
+
+_PENDING_STEMS: dict[str, threading.Event] = {}
+_PENDING_STEMS_LOCK = threading.Lock()
+
+
+def mark_stems_pending(name: str) -> None:
+    """Register ``name`` as having a stem rip in flight."""
+    with _PENDING_STEMS_LOCK:
+        _PENDING_STEMS[name] = threading.Event()
+
+
+def stems_pending(name: object) -> bool:
+    if not isinstance(name, str):
+        return False
+    with _PENDING_STEMS_LOCK:
+        return name in _PENDING_STEMS
+
+
+def finish_stems_pending(name: str) -> None:
+    """Mark the rip complete (success OR failure — callers re-check the
+    disk cache and fall back to an inline rip when the files aren't
+    there). Unblocks every :func:`wait_for_pending_stems` waiter."""
+    with _PENDING_STEMS_LOCK:
+        event = _PENDING_STEMS.pop(name, None)
+    if event is not None:
+        event.set()
+
+
+def wait_for_pending_stems(
+    name: object,
+    timeout: float = 300.0,
+    should_abort=None,
+) -> bool:
+    """Block until the in-flight rip for ``name`` completes. Returns
+    True when no rip is pending or it finished within ``timeout``.
+
+    ``should_abort`` (optional zero-arg callable) is polled about once
+    a second; when it returns True the wait gives up early and returns
+    False. The swap path passes the session's stop flag here so a
+    preempting connection isn't stuck behind this wait: preemption only
+    grants 45 s of teardown (``_PREEMPT_TEARDOWN_TIMEOUT_S``) while this
+    timeout is 300 s — an uninterruptible wait would let the preemptor
+    build a second full model stack next to the still-resident old one,
+    the exact dual-stack OOM the single-session policy exists to
+    prevent. Note the events must NOT simply be set on session close:
+    waiters that wake to a cache miss start a duplicate inline
+    separation, which is worse.
+    """
+    if not isinstance(name, str):
+        return True
+    with _PENDING_STEMS_LOCK:
+        event = _PENDING_STEMS.get(name)
+    if event is None:
+        return True
+    if should_abort is None:
+        return event.wait(timeout=timeout)
+    deadline = time.monotonic() + timeout
+    while True:
+        if should_abort():
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if event.wait(timeout=min(1.0, remaining)):
+            return True
+
+# ---------------------------------------------------------------------------
+# VRAM management for the separator
+# ---------------------------------------------------------------------------
+#
+# The RoFormer loads on top of a resident ACE-Step session (the streaming
+# session at create/swap time, or the shared eager upload-encoder session
+# in the demo's upload path). On VRAM-constrained pods that stack is the
+# memory-pressure spike: before the separator loads we therefore park the
+# ACE-Step context's eager modules on CPU (ModelContext.vram_parked),
+# run separation, release the RoFormer, and only then restore ACE-Step —
+# the separator and the parked models never need VRAM at the same time.
+
+# Parking policy. "always" (default): the resident ACE-Step models
+# vacate VRAM for every separation — the operating principle is that the
+# separator and the eager ACE-Step weights never occupy VRAM at the same
+# time, regardless of how much happens to be free. "auto": park only
+# when claimable VRAM is below the reserve (legacy heuristic, for pods
+# where the ~2×1.5 s park/restore transfer cost matters more than the
+# pressure). "never": load on top (the original behavior).
+MELBAND_VRAM_PARK_ENV = "DEMON_MELBAND_VRAM_PARK"
+MELBAND_PARK_MODES = ("always", "auto", "never")
+DEFAULT_MELBAND_PARK_MODE = "always"
+
+# Free VRAM (GiB) the separator needs before it will load WITHOUT parking
+# the resident ACE-Step models first (consulted in "auto" mode only).
+# Covers fp16 weights plus chunked STFT/transformer activations and the
+# on-device track buffers.
+MELBAND_VRAM_RESERVE_ENV = "DEMON_MELBAND_VRAM_RESERVE_GB"
+DEFAULT_MELBAND_VRAM_RESERVE_GB = 6.0
+
+
+def melband_park_mode() -> str:
+    raw = (os.environ.get(MELBAND_VRAM_PARK_ENV) or "").strip().lower()
+    if not raw:
+        return DEFAULT_MELBAND_PARK_MODE
+    if raw in MELBAND_PARK_MODES:
+        return raw
+    logger.warning(
+        "melband_park_mode_invalid value={!r} fallback={}",
+        raw, DEFAULT_MELBAND_PARK_MODE,
+    )
+    return DEFAULT_MELBAND_PARK_MODE
+
+
+def melband_vram_reserve_gb() -> float:
+    raw = os.environ.get(MELBAND_VRAM_RESERVE_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_MELBAND_VRAM_RESERVE_GB
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning(
+            "melband_vram_reserve_invalid value={!r} fallback={}",
+            raw, DEFAULT_MELBAND_VRAM_RESERVE_GB,
+        )
+        return DEFAULT_MELBAND_VRAM_RESERVE_GB
+
+
+def log_vram_telemetry(phase: str, device: torch.device) -> dict | None:
+    """Log one structured ``stems_vram`` line; returns the snapshot."""
+    telemetry = get_vram_telemetry(device) if device.type == "cuda" else None
+    if telemetry is not None:
+        logger.info(
+            "stems_vram phase={} free_gb={:.2f} available_gb={:.2f} "
+            "allocated_gb={:.2f} reserved_gb={:.2f} total_gb={:.2f}",
+            phase,
+            telemetry["free_gb"],
+            telemetry["available_gb"],
+            telemetry["allocated_gb"],
+            telemetry["reserved_gb"],
+            telemetry["total_gb"],
+        )
+    return telemetry
+
+
+def should_park_for_melband(device: torch.device) -> tuple[bool, float, float]:
+    """Decide whether resident ACE-Step models must vacate VRAM first.
+
+    Returns ``(park, available_gb, reserve_gb)``. Default policy is
+    ALWAYS park on a CUDA device — the separator and the eager ACE-Step
+    weights must never occupy VRAM simultaneously. "auto" parks only
+    when claimable VRAM (driver-free + torch's cached slack) is below
+    the reserve; "never" disables parking. See ``melband_park_mode``.
+    """
+    reserve_gb = melband_vram_reserve_gb()
+    if device.type != "cuda":
+        return False, 0.0, reserve_gb
+    mode = melband_park_mode()
+    if mode == "never":
+        return False, 0.0, reserve_gb
+    telemetry = get_vram_telemetry(device)
+    available_gb = (
+        float(telemetry["available_gb"]) if telemetry is not None else 0.0
+    )
+    if mode == "always":
+        return True, available_gb, reserve_gb
+    if telemetry is None:
+        return False, available_gb, reserve_gb
+    return available_gb < reserve_gb, available_gb, reserve_gb
+
 
 def normalize_stem_source_mode(value: object) -> str | None:
     if not isinstance(value, str):
@@ -768,6 +951,7 @@ def extract_upload_stems(
     waveform: torch.Tensor,
     device: torch.device | str,
     backend_sample_rate: int,
+    model_context=None,
 ) -> dict[str, torch.Tensor]:
     """Use Mel-Band RoFormer for vocal and instrumental separation.
 
@@ -775,30 +959,58 @@ def extract_upload_stems(
     is trained for 44.1 kHz. The separator handles the downsample internally;
     we resample its returned stems back to the backend sample rate before
     sending overlays or preparing a selected stem as the inference source.
+
+    ``model_context`` is the resident ACE-Step
+    :class:`~acestep.engine.model_context.ModelContext` sharing ``device``
+    (``session.handler``). When VRAM is tight (see
+    :func:`should_park_for_melband`) its eager modules are parked on CPU
+    for the duration of separation and restored only after the RoFormer
+    has been released, so the two model stacks never need VRAM
+    simultaneously. ``None`` preserves the legacy load-on-top behavior.
     """
     torch_device = _coerce_device(device)
     t0 = time.time()
     with _INFER_LOCK:
-        model: MelBandRoformer | None = None
-        try:
-            model_path = _resolve_model_path()
-            print(f"[Server] Loading Mel-Band RoFormer model on {torch_device}...")
-            load_t0 = time.time()
-            model = load_model(model_path, torch_device)
-            print(f"[Server] Mel-Band RoFormer loaded in {time.time() - load_t0:.1f}s")
-            vocals_44k, instruments_44k = separate_stems(
-                model,
-                waveform.detach().cpu().float().unsqueeze(0),
-                backend_sample_rate,
-                torch_device,
-            )
-            if torch_device.type == "cuda":
-                torch.cuda.synchronize(torch_device)
-        finally:
-            if model is not None:
-                print(f"[Server] Releasing Mel-Band RoFormer model from {torch_device}...")
-                del model
-                _collect_device_cache(torch_device)
+        park, available_gb, reserve_gb = should_park_for_melband(torch_device)
+        if model_context is None:
+            park = False
+        logger.info(
+            "stems_vram_plan park={} available_gb={:.2f} reserve_gb={:.2f} "
+            "model_context={}",
+            park, available_gb, reserve_gb,
+            "present" if model_context is not None else "absent",
+        )
+        log_vram_telemetry("before_separation", torch_device)
+        park_ctx = (
+            model_context.vram_parked() if park else contextlib.nullcontext()
+        )
+        with park_ctx:
+            if park:
+                log_vram_telemetry("acestep_parked", torch_device)
+            model: MelBandRoformer | None = None
+            try:
+                load_t0 = time.time()
+                model = _acquire_melband_model(torch_device)
+                log_vram_telemetry("melband_loaded", torch_device)
+                print(f"[Server] Mel-Band RoFormer on {torch_device} in {time.time() - load_t0:.1f}s")
+                vocals_44k, instruments_44k = separate_stems(
+                    model,
+                    waveform.detach().cpu().float().unsqueeze(0),
+                    backend_sample_rate,
+                    torch_device,
+                )
+                if torch_device.type == "cuda":
+                    torch.cuda.synchronize(torch_device)
+                log_vram_telemetry("melband_separated", torch_device)
+            finally:
+                # Release the RoFormer BEFORE the park context restores
+                # ACE-Step (this finally runs first on block exit), so
+                # the restore lands in the VRAM the separator vacated.
+                if model is not None:
+                    _release_melband_model(model, torch_device)
+                    log_vram_telemetry("melband_released", torch_device)
+        if park:
+            log_vram_telemetry("acestep_restored", torch_device)
     print(f"[Server] Mel-Band RoFormer stems complete in {time.time() - t0:.1f}s")
 
     vocals = _fit_stem_waveform(
@@ -840,6 +1052,62 @@ def _fit_stem_waveform(wf: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     elif wf.shape[-1] < target.shape[-1]:
         wf = torch.nn.functional.pad(wf, (0, target.shape[-1] - wf.shape[-1]))
     return torch.nan_to_num(wf)
+
+
+# Keep the separator's weights in system RAM between extractions instead
+# of re-reading the checkpoint from disk every rip (~1.6-2 s per upload).
+# The module lives on CPU between uses and is moved to the device only
+# for the separation window, so the VRAM discipline is unchanged. Set
+# the env var to 0 to reload from disk per rip (frees ~1 GB of RAM).
+MELBAND_RAM_CACHE_ENV = "DEMON_MELBAND_RAM_CACHE"
+_MELBAND_RAM_CACHE: dict[str, MelBandRoformer] = {}
+
+
+def _melband_ram_cache_enabled() -> bool:
+    raw = (os.environ.get(MELBAND_RAM_CACHE_ENV) or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _acquire_melband_model(device: torch.device) -> MelBandRoformer:
+    """Return the separator resident on ``device``.
+
+    Serves from the RAM cache when possible (a CPU→GPU move, ~0.3 s)
+    and falls back to a disk load. Caller must hold ``_INFER_LOCK`` —
+    the cached module is a single shared instance.
+    """
+    model_path = _resolve_model_path()
+    key = str(model_path)
+    model = _MELBAND_RAM_CACHE.get(key) if _melband_ram_cache_enabled() else None
+    if model is None:
+        print(f"[Server] Loading Mel-Band RoFormer model on {device}...")
+        model = load_model(model_path, device)
+        if _melband_ram_cache_enabled():
+            _MELBAND_RAM_CACHE[key] = model
+    else:
+        try:
+            model.to(device)
+        except Exception:
+            # A move that dies partway (e.g. CUDA OOM) leaves the cached
+            # instance half-on-GPU, and the caller's cleanup never runs
+            # because it never received the model. Pull it back to CPU
+            # and drain the device cache before surfacing the error.
+            try:
+                model.to("cpu")
+            finally:
+                _collect_device_cache(device)
+            raise
+    return model
+
+
+def _release_melband_model(model: MelBandRoformer, device: torch.device) -> None:
+    """Evict the separator from VRAM. The weights move to CPU (where the
+    RAM cache keeps them for the next rip; an uncached instance is
+    garbage-collected from there) and the device cache is drained."""
+    print(f"[Server] Releasing Mel-Band RoFormer model from {device}...")
+    try:
+        model.to("cpu")
+    finally:
+        _collect_device_cache(device)
 
 
 def _resolve_model_path() -> Path:
