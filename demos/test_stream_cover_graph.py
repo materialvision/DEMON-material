@@ -35,7 +35,13 @@ import soundfile as sf
 from acestep.constants import TASK_INSTRUCTIONS
 from acestep.engine.session import Session
 from acestep.nodes.types import Audio, Latent
-from acestep.paths import checkpoints_dir, project_root, trt_engine_path, select_trt_engines
+from acestep.paths import (
+    WINDOWED_VAE_WINDOW_RANGE_S,
+    checkpoints_dir,
+    project_root,
+    select_trt_engines,
+    trt_engine_path,
+)
 from acestep.fixtures import audio_fixture
 
 PROJECT_ROOT = project_root()
@@ -58,7 +64,7 @@ def _get_arg(name, default=None, cast=str):
     return default
 
 
-vae_window = _get_arg("--vae-window", 0.0, float)
+vae_window = _get_arg("--vae-window", WINDOWED_VAE_WINDOW_RANGE_S[1], float)
 depth = _get_arg("--depth", 8, int)
 use_fast_vae = "--fast-vae" in _args
 use_lora = "--lora" in _args
