@@ -140,6 +140,33 @@ def test_stem_swap_abort_maps_to_error_not_inline_separation(monkeypatch):
     assert out_wf is _WAVEFORM
 
 
+def test_stem_swap_wait_timeout_maps_to_error_not_duplicate_rip(monkeypatch):
+    # Wait timed out with the rip still in flight (and still holding the
+    # separation lock): falling through to an inline separation would
+    # first block on that lock and then separate a second time. Must
+    # fail the swap instead.
+    _forbid_separation(monkeypatch)
+    monkeypatch.setattr(session_mod, "audio_clip_stems", lambda *a, **k: None)
+    monkeypatch.setattr(session_mod, "stems_pending", lambda name: True)
+    monkeypatch.setattr(
+        session_mod, "wait_for_pending_stems",
+        lambda name, should_abort=None, **k: False,  # timeout, no abort
+    )
+
+    source = object()
+    stems, error, out_source, out_wf = extract_and_select_upload_stem(
+        _WAVEFORM,
+        session=_fake_session(),
+        source=source,
+        source_mode="instruments",
+        fixture_name="track.wav",
+    )
+    assert stems is None
+    assert "timed out" in error
+    assert out_source is source
+    assert out_wf is _WAVEFORM
+
+
 def test_cache_hit_skips_wait_and_separation(monkeypatch):
     _forbid_separation(monkeypatch)
     monkeypatch.setattr(session_mod, "audio_clip_stems", lambda *a, **k: _STEMS)

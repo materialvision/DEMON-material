@@ -283,13 +283,21 @@ def extract_and_select_upload_stem(
                 "stems_pending_wait_done fixture_name={} finished={}",
                 fixture_name, finished,
             )
-            if not finished and should_abort is not None and should_abort():
-                # Session is stopping (e.g. preempted): bail out of the
-                # swap instead of falling through to a duplicate inline
-                # separation on a stack that's about to be torn down.
+            if not finished:
+                # Whether the wait was aborted (session stopping) or
+                # timed out (rip slow/hung, still holding _INFER_LOCK),
+                # falling through would start a DUPLICATE inline
+                # separation — first blocking on _INFER_LOCK behind the
+                # very rip we just gave up waiting for. Fail the swap
+                # instead; the client can re-swap once the rip lands.
+                aborted = should_abort is not None and should_abort()
                 return (
                     None,
-                    "session stopping; aborted wait for background stems",
+                    (
+                        "session stopping; aborted wait for background stems"
+                        if aborted
+                        else "timed out waiting for the in-flight background stem rip"
+                    ),
                     source,
                     waveform,
                 )

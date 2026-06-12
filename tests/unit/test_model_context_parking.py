@@ -80,6 +80,11 @@ class _Ctx(ModelContext):
     def _module_on_device(self, module, device) -> bool:
         return module.fake_device == device.type
 
+    def _module_fully_on_device(self, module, device) -> bool:
+        # Fakes have a single placement, so partial residency can't
+        # occur; mirror the any-param predicate.
+        return module.fake_device == device.type
+
     def _get_vae_dtype(self):
         return torch.float32
 
@@ -304,3 +309,24 @@ def test_offload_eager_to_cpu_noop_on_cpu_context():
     ctx = _Ctx(device="cpu")
     assert ctx.offload_eager_to_cpu() == []
     assert ctx.moves == []
+
+
+def test_partial_residency_predicates_disagree_by_design():
+    # A partially moved module (e.g. after a failed restore) must count
+    # as resident for the PARK decision (it holds VRAM — evict it) but
+    # NOT for the restore-skip decision (half a model on GPU is not a
+    # usable model). Exercises the real ModelContext predicates.
+    from types import SimpleNamespace
+
+    ctx = object.__new__(ModelContext)
+    dev = torch.device("cuda")
+
+    def _mixed_params():
+        return iter([
+            SimpleNamespace(device=torch.device("cuda")),
+            SimpleNamespace(device=torch.device("cpu")),
+        ])
+
+    mixed = SimpleNamespace(parameters=_mixed_params)
+    assert ctx._module_on_device(mixed, dev) is True
+    assert ctx._module_fully_on_device(mixed, dev) is False

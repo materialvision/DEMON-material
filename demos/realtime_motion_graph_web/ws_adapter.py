@@ -97,6 +97,7 @@ from acestep.streaming.stems import (
     finish_stems_pending,
     mark_stems_pending,
     stems_pending,
+    wait_for_pending_stems,
 )
 from acestep.user_uploads import (
     UserUploadPacket,
@@ -390,13 +391,14 @@ def _prewarm_trt_engines_for_duration(
     def _read() -> None:
         try:
             from acestep.engine.trt.profile_manager import TRTProfileManager
+            from acestep.paths import _DEFAULT_TRT_CHECKPOINT
 
             mgr = TRTProfileManager(
                 decoder_backend=decoder_backend,
                 vae_backend=vae_backend,
                 checkpoint=(
                     checkpoint if decoder_backend == "tensorrt"
-                    else "acestep-v15-turbo"
+                    else _DEFAULT_TRT_CHECKPOINT
                 ),
             )
             paths, picked_dur = mgr.resolve(float(duration_s))
@@ -578,6 +580,9 @@ def _handle_upload_track(
         # Serialize all GPU work on the shared encoder: concurrent uploads
         # from multiple connections would otherwise drive prepare_source /
         # stem extraction on one Session at once and corrupt its state.
+        # Known cost: a second upload's phase 1 queues here behind the
+        # previous upload's background rip (~10 s+), so the sub-second
+        # upload_ok holds for spaced uploads, not back-to-back ones.
         with _UPLOAD_INFER_LOCK:
             try:
                 full_source = encoder.prepare_source(
@@ -691,7 +696,16 @@ def _handle_upload_track(
         "upload_track_ready name={} bpm={} key={} duration_s={:.1f} stems=background",
         packet.name, packet.bpm, packet.key, packet.duration_s,
     )
-    spawn_thread(_rip_stems_in_background, name=f"stem-rip-{name}")
+    try:
+        spawn_thread(_rip_stems_in_background, name=f"stem-rip-{name}")
+    except BaseException:
+        # Only the rip thread pops the registry entry; if the spawn
+        # itself fails (thread limit, interpreter shutdown) the entry
+        # would leak forever and stall every stem-source swap of this
+        # track. Same discipline as the ack above.
+        finish_stems_pending(name)
+        _offload_upload_encoder(encoder)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -844,6 +858,31 @@ def _handle_client_body(
 
     cfg = SessionConfig.from_dict(config_dict)
     audio_in = Audio(waveform=waveform, sample_rate=SAMPLE_RATE)
+
+    # A stem-source create (vocals/instruments) for a track whose
+    # background rip is still in flight would otherwise wait for the
+    # rip INSIDE StreamingSession.create — while holding
+    # _SESSION_LIFECYCLE_LOCK, which preempting connections acquire
+    # with no timeout. Drain the wait out here, before the lock, so a
+    # slow rip stalls only this connection, never the pod's session
+    # handoff. (The in-create wait still exists as a backstop for a rip
+    # marked between here and create; it now maps a timeout to a fatal
+    # stem error rather than a duplicate separation.)
+    if (
+        cfg.stem_source_mode in ("vocals", "instruments")
+        and stems_pending(fixture_name)
+    ):
+        logger.info(
+            "create_pending_stems_wait fixture_name={} source_mode={}",
+            fixture_name, cfg.stem_source_mode,
+        )
+        finished = wait_for_pending_stems(fixture_name)
+        _ms("pending_stems_wait_done")
+        if not finished:
+            logger.warning(
+                "create_pending_stems_wait_timeout fixture_name={}",
+                fixture_name,
+            )
 
     _ms("resolve_source_start")
     try:

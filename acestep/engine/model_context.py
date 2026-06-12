@@ -593,8 +593,22 @@ class ModelContext:
         return device if device.type in ("cuda", "xpu") else None
 
     def _module_on_device(self, module, device: torch.device) -> bool:
+        """ANY parameter resident — the PARK predicate: a partially
+        moved module still holds VRAM and must be evicted."""
         try:
             return any(
+                p.device.type == device.type for p in module.parameters()
+            )
+        except Exception:
+            return False
+
+    def _module_fully_on_device(self, module, device: torch.device) -> bool:
+        """ALL parameters resident — the RESTORE-skip predicate: a
+        partially moved module (e.g. after a failed restore) must not
+        count as resident, or the lazy restore would skip it and serve
+        a half-CPU model to a GPU consumer."""
+        try:
+            return all(
                 p.device.type == device.type for p in module.parameters()
             )
         except Exception:
@@ -656,7 +670,7 @@ class ModelContext:
         if device is None:
             return
         module = getattr(self, model_name, None)
-        if module is None or self._module_on_device(module, device):
+        if module is None or self._module_fully_on_device(module, device):
             return
         logger.info(
             "vram_restore_on_demand module={} device={}",
@@ -700,7 +714,12 @@ class ModelContext:
         """Inverse of :meth:`offload_eager_to_cpu`: restore every parked
         eager module to the device at once. Returns the restored names.
         No-op in ``offload_to_cpu`` mode (per-op placement owns moves
-        there) and on CPU contexts."""
+        there) and on CPU contexts.
+
+        No production caller yet — kept as the public bulk-restore
+        counterpart to :meth:`offload_eager_to_cpu` (per-module lazy
+        restore via :meth:`_load_model_context` has covered every need
+        so far); exercised by the unit suite."""
         if self.offload_to_cpu:
             return []
         with self._placement_lock:
@@ -710,7 +729,7 @@ class ModelContext:
             names: list = []
             for name in self._PARKABLE_MODULES:
                 module = getattr(self, name, None)
-                if module is None or self._module_on_device(module, device):
+                if module is None or self._module_fully_on_device(module, device):
                     continue
                 names.append(name)
             if (

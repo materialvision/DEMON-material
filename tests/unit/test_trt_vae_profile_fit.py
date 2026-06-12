@@ -107,3 +107,79 @@ def test_unknown_on_trt_api_error(monkeypatch):
         error=RuntimeError("TRT API exploded"),
     ))
     assert vn._trt_vae_profile_fits(_PATH, "audio", (1, 2, 1_000_000)) is None
+
+
+# ---------------------------------------------------------------------------
+# Cold-cache shape rejection → eager fallback (encode node)
+# ---------------------------------------------------------------------------
+#
+# When the engine is NOT cached yet the fit guard returns None ("use
+# TRT"); the engine then loads inside _trt_vae_encode and can still
+# reject the shape. An eager-VAE handler must fall back instead of
+# failing the upload with the original "rejected input shape" error.
+
+
+from contextlib import contextmanager
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+
+def _eager_handler(with_vae=True):
+    @contextmanager
+    def _load_model_context(name):
+        yield
+
+    return SimpleNamespace(
+        vae=object() if with_vae else None,
+        device="cpu",
+        dtype=torch.float32,
+        _load_model_context=_load_model_context,
+        _encode_audio_to_latents=lambda wf: torch.zeros(
+            (1, 8, 64), dtype=torch.float32,
+        ),
+    )
+
+
+def _run_encode_node(monkeypatch, handler, trt_error):
+    monkeypatch.setattr(vn, "_trt_available", lambda: True)
+    monkeypatch.setattr(vn, "_find_best_vae_engine", lambda c: _PATH)
+    monkeypatch.setattr(vn, "_trt_vae_cache", {})  # cold: fit guard → None
+
+    def _reject(*_args, **_kwargs):
+        raise trt_error
+
+    monkeypatch.setattr(vn, "_trt_vae_encode", _reject)
+    node = vn.VAEEncodeAudio()
+    return node.execute(
+        vae=SimpleNamespace(handler=handler),
+        audio=SimpleNamespace(waveform=torch.zeros((2, 480))),
+    )
+
+
+def test_cold_cache_shape_rejection_falls_back_to_eager(monkeypatch):
+    result = _run_encode_node(
+        monkeypatch,
+        _eager_handler(with_vae=True),
+        RuntimeError("TRT VAE encode rejected input shape: (1, 2, 480)"),
+    )
+    assert result["latent"].tensor.shape == (1, 8, 64)  # eager path ran
+
+
+def test_shape_rejection_without_eager_vae_still_raises(monkeypatch):
+    with pytest.raises(RuntimeError, match="rejected input shape"):
+        _run_encode_node(
+            monkeypatch,
+            _eager_handler(with_vae=False),
+            RuntimeError("TRT VAE encode rejected input shape: (1, 2, 480)"),
+        )
+
+
+def test_non_shape_trt_errors_still_raise(monkeypatch):
+    with pytest.raises(RuntimeError, match="TRT VAE encode failed"):
+        _run_encode_node(
+            monkeypatch,
+            _eager_handler(with_vae=True),
+            RuntimeError("TRT VAE encode failed"),
+        )
