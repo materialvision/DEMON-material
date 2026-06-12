@@ -55,6 +55,7 @@ var CROSSFADE_SECONDS = 0.025;
 var SLICE_HDR_SIZE = 23;
 var SLICE_FLAG_RAW = 0;
 var SLICE_FLAG_DELTA = 1;
+var PREEMPTED_CLOSE_CODE = 4001;
 
 // node_modules/fzstd/esm/index.mjs
 var ab = ArrayBuffer;
@@ -1133,6 +1134,14 @@ var RemoteBackend = class extends EventTarget {
               );
               break;
             }
+            case "error":
+              console.error(
+                `[protocol] server error: ${msg.code || "unknown"}` + (msg.message ? ` \u2014 ${msg.message}` : "")
+              );
+              this.dispatchEvent(
+                new CustomEvent("server_error", { detail: msg })
+              );
+              break;
             default:
               this.dispatchEvent(new CustomEvent("json", { detail: msg }));
           }
@@ -1179,7 +1188,9 @@ var RemoteBackend = class extends EventTarget {
       ws.onclose = (e) => {
         if (!this.ready) {
           let msg;
-          if (e.code === 1011) {
+          if (e.code === PREEMPTED_CLOSE_CODE) {
+            msg = "Another connection took over this session.";
+          } else if (e.code === 1011) {
             msg = "Session failed while starting \u2014 refresh the page to retry.";
           } else if (e.code === 1006) {
             msg = "Connection lost \u2014 refresh to retry.";
@@ -2653,6 +2664,7 @@ export {
   CROSSFADE_SECONDS,
   EVENT_NAMES,
   KNOB_SCHEMA_VERSION,
+  PREEMPTED_CLOSE_CODE,
   PROTOCOL_VERSION,
   RemoteBackend,
   SAMPLE_RATE,
