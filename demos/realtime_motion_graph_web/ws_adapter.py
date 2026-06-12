@@ -30,6 +30,7 @@ import queue
 import socket
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
 from websockets.exceptions import ConnectionClosed
@@ -66,6 +67,9 @@ from acestep.streaming.events import (
     ParamsEcho,
     PromptApplied,
     PromptBlendEcho,
+    SessionError,
+    StemAssets,
+    StemFailed,
     StructureCleared,
     StructureFailed,
     StructureSet,
@@ -88,11 +92,18 @@ from acestep.streaming.source import (
     _load_known_fixture_waveform,
     _normalize_time_signature,
 )
-from acestep.streaming.stems import extract_upload_stems
+from acestep.streaming.stems import (
+    extract_upload_stems,
+    finish_stems_pending,
+    mark_stems_pending,
+    stems_pending,
+    wait_for_pending_stems,
+)
 from acestep.user_uploads import (
     UserUploadPacket,
     find_duplicate_upload,
     persist_user_upload_packet,
+    persist_user_upload_stems,
     unique_user_upload_name,
 )
 
@@ -109,9 +120,15 @@ from .protocol import COMMAND_NAMES, SAMPLE_RATE, coerce_command_payload
 # mutable GPU object in the system (every StreamingSession otherwise owns
 # its own Session). The tradeoff is deliberate: encoding uploads needs the
 # VAE encoder, which the streaming TRT path doesn't expose, so we keep a
-# second resident eager copy of the weights rather than rebuild one per
-# upload. Two costs follow from the sharing:
-#   - VRAM: the first upload permanently adds a second model copy.
+# second eager copy of the weights rather than rebuild one per upload.
+# Two costs follow from the sharing:
+#   - VRAM: the eager weights occupy GPU memory WHILE AN UPLOAD IS IN
+#     FLIGHT. Between uploads they are parked in system RAM
+#     (ModelContext.offload_eager_to_cpu in _handle_upload_track's
+#     finally); ModelContext._load_model_context lazily restores exactly
+#     the modules the next upload touches. Without the parking, the
+#     first upload would permanently pin ~6 GB next to the live
+#     streaming session.
 #   - Concurrency: prepare_source / stem extraction are NOT thread-safe on
 #     a shared Session, so _UPLOAD_INFER_LOCK serializes all GPU work on it.
 _UPLOAD_ENCODERS: dict[str, Session] = {}
@@ -119,19 +136,187 @@ _UPLOAD_ENCODERS_LOCK = threading.Lock()
 _UPLOAD_INFER_LOCK = threading.Lock()
 
 
+# ---------------------------------------------------------------------------
+# Single-active-session policy
+# ---------------------------------------------------------------------------
+#
+# The rtmg backend is one-session-per-pod: the TRT VAE cache, the LoRA
+# library, and the GPU budget are all sized for exactly one streaming
+# session. Two concurrent ``StreamingSession.create`` calls stack two
+# full model stacks (OOM on a 24 GB card), and either session's
+# teardown evicts shared TRT VAE cache entries out from under the
+# other — the failure cascade is: dual create → one OOMs → its cleanup
+# evicts the shared engines → the HEALTHY session crashes on its next
+# decode. Doubled connections happen routinely (page reload while the
+# old socket is still draining, dev StrictMode double-mount, a stale
+# tab auto-reconnecting), so the policy is enforced here:
+#
+#   - ``_SESSION_LIFECYCLE_LOCK`` serializes preempt+create: at most one
+#     session is ever being constructed, and construction never overlaps
+#     another session's teardown.
+#   - A new main-session connection PREEMPTS the active session: its
+#     runner is stopped, its WebSocket is closed with
+#     ``PREEMPTED_CLOSE_CODE`` (the client treats that close as final —
+#     no reconnect war between two tabs), and the new connection WAITS
+#     for ``StreamingSession.closed`` so the old stack's VRAM is
+#     actually free before the new stack loads.
+#
+# The ``upload_track`` side-channel WS never touches this policy.
+
+_SESSION_LIFECYCLE_LOCK = threading.Lock()
+_ACTIVE_SLOT_LOCK = threading.Lock()
+_ACTIVE_SESSION: list = [None]  # [_ActiveSession | None]
+
+# 4000-range application close code: "this session was replaced by a
+# newer connection". The web client (web/sdk/protocol.ts +
+# web/hooks/useStartSession.ts) recognizes it and does NOT enter the
+# reconnect loop — reconnecting would just preempt the newer session
+# back and ping-pong the pod through full session rebuilds.
+#
+# DEPLOYMENT ORDERING: server and client must ship together. A client
+# built before this constant existed treats 4001 as an unexpected close
+# and reconnects, recreating the ping-pong. Stale already-open tabs are
+# the residual hazard until refreshed (docs/VOCALSTEM.md § one session
+# per pod).
+PREEMPTED_CLOSE_CODE = 4001
+
+# How long a preempting connection waits for the old session's teardown
+# to release VRAM. Generous: the old runner may be mid stem-extraction
+# (it only observes running=False between pipeline iterations).
+_PREEMPT_TEARDOWN_TIMEOUT_S = 45.0
+
+
+class _ActiveSession:
+    __slots__ = ("session_id", "streaming", "ws")
+
+    def __init__(self, session_id: str, streaming, ws):
+        self.session_id = session_id
+        self.streaming = streaming
+        self.ws = ws
+
+
+def _preempt_active_session(new_session_id: str) -> None:
+    """Stop and drain the currently-active session, if any.
+
+    Caller must hold ``_SESSION_LIFECYCLE_LOCK``. Returns once the old
+    session has released its GPU state (or after a bounded wait with a
+    warning — create proceeds either way; the OOM-retry paths downstream
+    are the backstop)."""
+    with _ACTIVE_SLOT_LOCK:
+        prev = _ACTIVE_SESSION[0]
+    if prev is None:
+        return
+    logger.info(
+        "session_preempt prev={} new={} reason=single_session_policy",
+        prev.session_id, new_session_id,
+    )
+    # Stop the runner; it observes this between pipeline iterations and
+    # exits run() into close().
+    prev.streaming.state.running = False
+    # Close the old socket so its handler unblocks from any recv/send
+    # and the client sees a deliberate, final close (not a 1006 blip).
+    try:
+        prev.ws.close(PREEMPTED_CLOSE_CODE, "preempted by a newer session")
+    except Exception:
+        pass
+    if not prev.streaming.closed.wait(timeout=_PREEMPT_TEARDOWN_TIMEOUT_S):
+        logger.warning(
+            "session_preempt_teardown_timeout prev={} waited_s={}",
+            prev.session_id, _PREEMPT_TEARDOWN_TIMEOUT_S,
+        )
+    else:
+        logger.info("session_preempt_complete prev={}", prev.session_id)
+    with _ACTIVE_SLOT_LOCK:
+        if _ACTIVE_SESSION[0] is prev:
+            _ACTIVE_SESSION[0] = None
+
+
+def _log_session_vram(stage: str) -> None:
+    from acestep.gpu_config import get_vram_telemetry
+
+    telemetry = get_vram_telemetry()
+    if telemetry is not None:
+        logger.info(
+            "session_vram stage={} free_gb={:.2f} available_gb={:.2f} "
+            "allocated_gb={:.2f} reserved_gb={:.2f}",
+            stage,
+            telemetry["free_gb"],
+            telemetry["available_gb"],
+            telemetry["allocated_gb"],
+            telemetry["reserved_gb"],
+        )
+
+
+def _strip_upload_encoder_generation_stack(session: Session) -> int:
+    """Drop the parts of the upload encoder that uploads never execute.
+
+    The upload path runs exactly three model surfaces: VAE encode,
+    semantic extract (``model.tokenizer`` / ``model.detokenizer``), and
+    the conditioning encoder (``model.encoder``). The DiT *decoder* —
+    the bulk of the checkpoint — is generation-only, and the eager
+    DiffusionEngine + LoRA manager exist only to drive it. Dropping
+    both shrinks the encoder's GPU working set from a full second model
+    copy (~4.7 GB restored per upload on the 2B turbo) to just the
+    conditioning stack (~1.5 GB), which is what keeps phase-1 encodes
+    inside the headroom of a live session running a long (120 s+) TRT
+    profile. Returns the number of decoder parameters dropped.
+    """
+    import gc
+
+    import torch.nn as nn
+
+    handler = session.handler
+    engine = getattr(handler, "_diffusion_engine", None)
+    if engine is not None:
+        try:
+            engine.close()
+        except Exception as exc:
+            logger.warning("upload_encoder_engine_close_failed error={}", exc)
+        handler._diffusion_engine = None
+    dropped = 0
+    model = handler.model
+    decoder = getattr(model, "decoder", None) if model is not None else None
+    if decoder is not None:
+        dropped = sum(p.numel() for p in decoder.parameters())
+        model.decoder = nn.Module()
+    # The weights live in system RAM at this point (the encoder is
+    # built parked); collect so the decoder's CPU copy is returned too.
+    gc.collect()
+    return dropped
+
+
 def _upload_encoder_session(checkpoint: str) -> Session:
     with _UPLOAD_ENCODERS_LOCK:
         session = _UPLOAD_ENCODERS.get(checkpoint)
         if session is None:
             logger.info("upload_encoder_load_start checkpoint={}", checkpoint)
+            # Load the eager weights straight to system RAM (offload
+            # flags on) so building the encoder never spikes VRAM next
+            # to the live streaming session...
             session = Session(
                 project_root=str(checkpoints_dir()),
                 config_path=checkpoint,
                 decoder_backend="eager",
                 vae_backend="eager",
+                offload_to_cpu=True,
+                offload_dit_to_cpu=True,
             )
+            # ...then flip the context to RESIDENT mode so placement is
+            # governed by the persistent-park protocol instead of
+            # per-op round trips: _load_model_context lazily restores
+            # exactly the modules an upload touches (the conditioning
+            # stack for semantic extract; the VAE only when no TRT
+            # engine fits), and _offload_upload_encoder parks them
+            # again afterwards.
+            session.handler.offload_to_cpu = False
+            session.handler.offload_dit_to_cpu = False
+            dropped = _strip_upload_encoder_generation_stack(session)
             _UPLOAD_ENCODERS[checkpoint] = session
-            logger.info("upload_encoder_loaded checkpoint={}", checkpoint)
+            logger.info(
+                "upload_encoder_loaded checkpoint={} placement=parked "
+                "decoder_params_dropped={}",
+                checkpoint, dropped,
+            )
         return session
 
 
@@ -140,13 +325,95 @@ def _truncate_upload_waveform(waveform: torch.Tensor) -> torch.Tensor:
     return truncate_to_pool(waveform[:2, :max_samples])
 
 
+# BPM/key are global track properties; a centered window this long
+# estimates them as well as the full signal (measured identical on
+# 120 s material) at a fraction of the beat-tracker cost, and it caps
+# the analysis latency of 240 s uploads.
+ANALYSIS_WINDOW_S = 60.0
+
+
+def _analysis_window(mono: np.ndarray, sample_rate: int) -> np.ndarray:
+    max_n = int(ANALYSIS_WINDOW_S * sample_rate)
+    if mono.shape[-1] <= max_n:
+        return mono
+    start = (mono.shape[-1] - max_n) // 2
+    return mono[start:start + max_n]
+
+
 def _analyze_upload_waveform(waveform: torch.Tensor) -> tuple[int, str, str]:
     import librosa
 
     mono_np = waveform.mean(dim=0).detach().cpu().numpy()
-    bpm_raw, _ = librosa.beat.beat_track(y=mono_np, sr=SAMPLE_RATE)
+    window = _analysis_window(mono_np, SAMPLE_RATE)
+    bpm_raw, _ = librosa.beat.beat_track(y=window, sr=SAMPLE_RATE)
     bpm = int(round(float(np.asarray(bpm_raw).flat[0])))
-    return bpm, detect_key(mono_np, SAMPLE_RATE), "4"
+    return bpm, detect_key(window, SAMPLE_RATE), "4"
+
+
+# Single worker: uploads are serialized end-to-end anyway; the pool
+# exists so the CPU-bound analysis overlaps the GPU-bound source encode
+# inside one upload's phase 1.
+_UPLOAD_ANALYSIS_POOL = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="upload-analysis",
+)
+
+
+def _read_files_into_page_cache(paths) -> int:
+    """Sequentially read ``paths`` and discard, pulling them into the OS
+    page cache. Returns total bytes read."""
+    total = 0
+    for p in {str(p) for p in paths}:
+        with open(p, "rb") as f:
+            while True:
+                chunk = f.read(1 << 24)
+                if not chunk:
+                    break
+                total += len(chunk)
+    return total
+
+
+def _prewarm_trt_engines_for_duration(
+    duration_s: float,
+    *,
+    checkpoint: str,
+    decoder_backend: str,
+    vae_backend: str,
+):
+    """Best-effort, in the background: page-cache the TRT engine files
+    the post-upload swap will load for ``duration_s``. When the swap
+    crosses profiles (e.g. 60 s session → 120 s upload) the engine load
+    is dominated by a multi-GB disk read; warming it during phase 1
+    makes the swap land seconds sooner. No-op for eager backends or
+    unbuilt engines."""
+    if "tensorrt" not in (decoder_backend, vae_backend):
+        return None
+
+    def _read() -> None:
+        try:
+            from acestep.engine.trt.profile_manager import TRTProfileManager
+            from acestep.paths import _DEFAULT_TRT_CHECKPOINT
+
+            mgr = TRTProfileManager(
+                decoder_backend=decoder_backend,
+                vae_backend=vae_backend,
+                checkpoint=(
+                    checkpoint if decoder_backend == "tensorrt"
+                    else _DEFAULT_TRT_CHECKPOINT
+                ),
+            )
+            paths, picked_dur = mgr.resolve(float(duration_s))
+            total = _read_files_into_page_cache(paths.values())
+            logger.info(
+                "trt_engines_prewarmed duration_s={:.0f} profile_s={:.0f} "
+                "bytes={}",
+                duration_s, picked_dur, total,
+            )
+        except Exception as exc:
+            # Purely opportunistic — a missing engine just means the
+            # swap itself will surface the real, actionable error.
+            logger.info("trt_engine_prewarm_skipped error={}", exc)
+
+    return spawn_thread(_read, name="trt-prewarm")
 
 
 def _send_upload_failure(ws, error: str) -> None:
@@ -157,7 +424,9 @@ def _send_upload_failure(ws, error: str) -> None:
         pass
 
 
-def _send_upload_ok(ws, packet: UserUploadPacket) -> None:
+def _send_upload_ok(
+    ws, packet: UserUploadPacket, *, stems_pending: bool = False,
+) -> None:
     ws.send(json.dumps({
         "type": "upload_ok",
         "name": packet.name,
@@ -166,10 +435,74 @@ def _send_upload_ok(ws, packet: UserUploadPacket) -> None:
         "time_signature": packet.time_signature,
         "duration_s": packet.duration_s,
         "samples": packet.samples,
+        "stems_pending": bool(stems_pending),
     }))
 
 
-def _handle_upload_track(ws, header: dict, *, checkpoint: str) -> None:
+def _offload_upload_encoder(encoder: Session | None) -> None:
+    """Park the shared eager encoder's weights in system RAM. The eager
+    weights are only needed while an upload is in flight; between
+    uploads they would pin ~6 GB of VRAM next to the live streaming
+    session. ``ModelContext._load_model_context`` lazily restores
+    exactly the modules the next upload touches."""
+    if encoder is None:
+        return
+    try:
+        parked = encoder.handler.offload_eager_to_cpu()
+        if parked:
+            logger.info("upload_encoder_offloaded modules={}", parked)
+    except Exception as exc:
+        logger.warning("upload_encoder_offload_failed error={}", exc)
+
+
+def _publish_stems_to_active_session(
+    name: str,
+    stems: dict | None,
+    error: str | None = None,
+) -> bool:
+    """Push a late ``stem_assets`` / ``stem_failed`` frame to the live
+    session's client via its event bus (the adapter's subscriber owns
+    the send_lock, so the JSON + binary follow-ups stay atomic with the
+    slice stream). No-op when no session is active — the stems are on
+    disk and the next swap serves them from cache."""
+    with _ACTIVE_SLOT_LOCK:
+        cur = _ACTIVE_SESSION[0]
+    if cur is None:
+        return False
+    try:
+        if stems is not None:
+            first = next(iter(stems.values()))
+            cur.streaming.bus.publish(StemAssets(
+                fixture_name=name,
+                # Empty = "don't touch the client's source-mode pick";
+                # this push is overlay data, not a mode change.
+                source_mode="",
+                sample_rate=SAMPLE_RATE,
+                channels=int(first.shape[0]),
+                frames=int(first.shape[-1]),
+                stems=stems,
+            ))
+        else:
+            cur.streaming.bus.publish(StemFailed(
+                fixture_name=name,
+                error=error or "stem extraction failed",
+            ))
+        return True
+    except Exception as exc:
+        logger.warning(
+            "stem_push_failed name={} error={}", name, exc,
+        )
+        return False
+
+
+def _handle_upload_track(
+    ws,
+    header: dict,
+    *,
+    checkpoint: str,
+    decoder_backend: str = "tensorrt",
+    vae_backend: str = "tensorrt",
+) -> None:
     requested_name = str(header.get("name") or "upload")
     key_override = header.get("key")
     key_override = key_override.strip() if isinstance(key_override, str) else None
@@ -205,16 +538,40 @@ def _handle_upload_track(ws, header: dict, *, checkpoint: str) -> None:
                 "upload_track_dedup requested={} reused={}", requested_name, dup.name,
             )
             try:
-                _send_upload_ok(ws, dup)
+                # A re-upload can land while the original's background
+                # rip is still in flight — surface that so the client
+                # keeps its "separating…" status.
+                _send_upload_ok(ws, dup, stems_pending=stems_pending(dup.name))
             except ConnectionClosed:
                 pass
             return
 
+    # Two-phase upload. Phase 1 (synchronous): analyze + VAE-encode the
+    # FULL source + persist it, then ack ``upload_ok`` — the client can
+    # swap to the track (and hear audio) immediately. Phase 2
+    # (background thread): Mel-Band RoFormer stem rip + per-stem
+    # sidecars, with the ACE-Step encoder parked while the separator
+    # runs; finished stems are pushed to the live session as a late
+    # ``stem_assets`` frame. The swap path coordinates through the
+    # pending-stems registry (see extract_and_select_upload_stem):
+    # mode "full" swaps proceed without stems, stem-source swaps wait
+    # for the rip instead of starting a duplicate separation.
     name = unique_user_upload_name(requested_name)
+    encoder: Session | None = None
     try:
-        bpm, detected_key, detected_time_signature = _analyze_upload_waveform(waveform)
-        key = key_override or detected_key
-        time_signature = time_signature_override or detected_time_signature
+        # CPU analysis (librosa beat tracking + key detection) overlaps
+        # the GPU source encode below; joined before persist.
+        analysis_future = _UPLOAD_ANALYSIS_POOL.submit(
+            _analyze_upload_waveform, waveform,
+        )
+        # Page-cache the engines the post-upload swap will need, while
+        # phase 1 runs (background, best-effort).
+        _prewarm_trt_engines_for_duration(
+            waveform.shape[-1] / SAMPLE_RATE,
+            checkpoint=checkpoint,
+            decoder_backend=decoder_backend,
+            vae_backend=vae_backend,
+        )
         encoder = _upload_encoder_session(checkpoint)
         logger.info(
             "upload_track_process_start name={} samples={} duration_s={:.1f}",
@@ -223,45 +580,132 @@ def _handle_upload_track(ws, header: dict, *, checkpoint: str) -> None:
         # Serialize all GPU work on the shared encoder: concurrent uploads
         # from multiple connections would otherwise drive prepare_source /
         # stem extraction on one Session at once and corrupt its state.
+        # Known cost: a second upload's phase 1 queues here behind the
+        # previous upload's background rip (~10 s+), so the sub-second
+        # upload_ok holds for spaced uploads, not back-to-back ones.
         with _UPLOAD_INFER_LOCK:
-            sources = {
-                "full": encoder.prepare_source(
+            try:
+                full_source = encoder.prepare_source(
                     Audio(waveform=waveform, sample_rate=SAMPLE_RATE),
-                ),
-            }
-            stems = extract_upload_stems(
-                waveform=waveform,
-                device=encoder.handler.device,
-                backend_sample_rate=SAMPLE_RATE,
-            )
-            for mode in ("vocals", "instruments"):
-                sources[mode] = encoder.prepare_source(
-                    Audio(waveform=stems[mode], sample_rate=SAMPLE_RATE),
                 )
+            except torch.cuda.OutOfMemoryError:
+                # Tight headroom next to a long-profile live session can
+                # leave torch's caching allocator fragmented; hand the
+                # cached pages back and retry once before failing.
+                logger.warning(
+                    "upload_prepare_source_oom_retry name={} duration_s={:.1f}",
+                    name, waveform.shape[-1] / SAMPLE_RATE,
+                )
+                torch.cuda.empty_cache()
+                full_source = encoder.prepare_source(
+                    Audio(waveform=waveform, sample_rate=SAMPLE_RATE),
+                )
+        bpm, detected_key, detected_time_signature = analysis_future.result(
+            timeout=120.0,
+        )
+        key = key_override or detected_key
+        time_signature = time_signature_override or detected_time_signature
         packet = persist_user_upload_packet(
             name,
             waveform=waveform,
-            stems=stems,
-            sources=sources,
+            stems={},
+            sources={"full": full_source},
             sample_rate=SAMPLE_RATE,
             checkpoint=checkpoint,
             bpm=bpm,
             key=key,
             time_signature=time_signature,
         )
+        # Mark BEFORE the ack so the client's immediate swap always
+        # observes the in-flight rip.
+        mark_stems_pending(name)
     except Exception as exc:
         logger.exception("upload_track_process_failed name={} error={}", name, exc)
+        _offload_upload_encoder(encoder)
         _send_upload_failure(ws, str(exc))
         return
 
+    def _rip_stems_in_background() -> None:
+        try:
+            with _UPLOAD_INFER_LOCK:
+                try:
+                    stems = extract_upload_stems(
+                        waveform=waveform,
+                        device=encoder.handler.device,
+                        backend_sample_rate=SAMPLE_RATE,
+                        # Park the eager encoder (a full second copy of
+                        # the ACE-Step weights) while the RoFormer runs.
+                        # The live StreamingSession owns its own
+                        # ModelContext and keeps streaming untouched.
+                        model_context=encoder.handler,
+                    )
+                    stem_sources = {
+                        mode: encoder.prepare_source(
+                            Audio(waveform=stems[mode], sample_rate=SAMPLE_RATE),
+                        )
+                        for mode in ("vocals", "instruments")
+                    }
+                finally:
+                    _offload_upload_encoder(encoder)
+            wrote = persist_user_upload_stems(
+                name,
+                waveform=waveform,
+                stems=stems,
+                sources=stem_sources,
+                sample_rate=SAMPLE_RATE,
+                checkpoint=checkpoint,
+                bpm=bpm,
+                key=key,
+                time_signature=time_signature,
+            )
+        except Exception as exc:
+            logger.exception(
+                "upload_stems_background_failed name={} error={}", name, exc,
+            )
+            finish_stems_pending(name)
+            _publish_stems_to_active_session(name, None, error=str(exc))
+            return
+        # Files are on disk BEFORE waiters unblock, so a stem-source
+        # swap that waited finds them in the cache.
+        finish_stems_pending(name)
+        if wrote:
+            logger.info("upload_stems_ready name={}", name)
+            _publish_stems_to_active_session(name, stems)
+        else:
+            # Track dir was wiped (session ended) mid-rip; nothing to
+            # advertise and nothing left on disk.
+            logger.info(
+                "upload_stems_discarded name={} reason=track_wiped", name,
+            )
+
     try:
-        _send_upload_ok(ws, packet)
-    except ConnectionClosed:
-        return
+        _send_upload_ok(ws, packet, stems_pending=True)
+    except Exception as exc:
+        # Client is gone (ConnectionClosed) or the ack failed some other
+        # way — either way the track is persisted, so finish the rip
+        # anyway. This except must stay BROAD: mark_stems_pending(name)
+        # already ran, and only the rip thread below pops the registry
+        # entry. An exception escaping here would leak the entry forever
+        # (every stem-source swap of this track stalls on the 300 s
+        # wait) and leave the upload encoder resident on the GPU.
+        if not isinstance(exc, ConnectionClosed):
+            logger.warning(
+                "upload_ok_send_failed name={} error={}", name, exc,
+            )
     logger.info(
-        "upload_track_ready name={} bpm={} key={} duration_s={:.1f}",
+        "upload_track_ready name={} bpm={} key={} duration_s={:.1f} stems=background",
         packet.name, packet.bpm, packet.key, packet.duration_s,
     )
+    try:
+        spawn_thread(_rip_stems_in_background, name=f"stem-rip-{name}")
+    except BaseException:
+        # Only the rip thread pops the registry entry; if the spawn
+        # itself fails (thread limit, interpreter shutdown) the entry
+        # would leak forever and stall every stem-source swap of this
+        # track. Same discipline as the ack above.
+        finish_stems_pending(name)
+        _offload_upload_encoder(encoder)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +760,12 @@ def _handle_client_body(
     config_dict = json.loads(ws.recv())
     if isinstance(config_dict, dict) and config_dict.get("type") == "upload_track":
         try:
-            _handle_upload_track(ws, config_dict, checkpoint=checkpoint)
+            _handle_upload_track(
+                ws, config_dict,
+                checkpoint=checkpoint,
+                decoder_backend=decoder_backend,
+                vae_backend=vae_backend,
+            )
         finally:
             try:
                 ws.close()
@@ -410,17 +859,51 @@ def _handle_client_body(
     cfg = SessionConfig.from_dict(config_dict)
     audio_in = Audio(waveform=waveform, sample_rate=SAMPLE_RATE)
 
+    # A stem-source create (vocals/instruments) for a track whose
+    # background rip is still in flight would otherwise wait for the
+    # rip INSIDE StreamingSession.create — while holding
+    # _SESSION_LIFECYCLE_LOCK, which preempting connections acquire
+    # with no timeout. Drain the wait out here, before the lock, so a
+    # slow rip stalls only this connection, never the pod's session
+    # handoff. (The in-create wait still exists as a backstop for a rip
+    # marked between here and create; it now maps a timeout to a fatal
+    # stem error rather than a duplicate separation.)
+    if (
+        cfg.stem_source_mode in ("vocals", "instruments")
+        and stems_pending(fixture_name)
+    ):
+        logger.info(
+            "create_pending_stems_wait fixture_name={} source_mode={}",
+            fixture_name, cfg.stem_source_mode,
+        )
+        finished = wait_for_pending_stems(fixture_name)
+        _ms("pending_stems_wait_done")
+        if not finished:
+            logger.warning(
+                "create_pending_stems_wait_timeout fixture_name={}",
+                fixture_name,
+            )
+
     _ms("resolve_source_start")
     try:
-        streaming = StreamingSession.create(
-            audio=audio_in,
-            config=cfg,
-            checkpoint=checkpoint,
-            decoder_backend=decoder_backend,
-            vae_backend=vae_backend,
-            offload_text_encoder=offload_text_encoder,
-            session_id=session_id,
-        )
+        # Single-active-session policy: serialize construction and
+        # preempt whatever session currently owns the GPU. See the
+        # policy comment block at module top.
+        with _SESSION_LIFECYCLE_LOCK:
+            _preempt_active_session(session_id)
+            _log_session_vram("create_start")
+            streaming = StreamingSession.create(
+                audio=audio_in,
+                config=cfg,
+                checkpoint=checkpoint,
+                decoder_backend=decoder_backend,
+                vae_backend=vae_backend,
+                offload_text_encoder=offload_text_encoder,
+                session_id=session_id,
+            )
+            with _ACTIVE_SLOT_LOCK:
+                _ACTIVE_SESSION[0] = _ActiveSession(session_id, streaming, ws)
+            _log_session_vram("create_done")
     except UnsupportedTrtCheckpointError as exc:
         try:
             ws.send(json.dumps({
@@ -467,6 +950,16 @@ def _handle_client_body(
 
     streaming_entered_run = False
     session_registered = False
+
+    def _release_active_slot() -> None:
+        # Compare-and-swap: only clear the slot if it's still ours (a
+        # preempting connection may have already replaced it).
+        with _ACTIVE_SLOT_LOCK:
+            cur = _ACTIVE_SESSION[0]
+            if cur is not None and cur.streaming is streaming:
+                _ACTIVE_SESSION[0] = None
+
+    ctx_stack.callback(_release_active_slot)
 
     def _close_streaming_if_init_fails() -> None:
         if not streaming_entered_run:
@@ -587,6 +1080,15 @@ def _handle_client_body(
                 "requires": event.requires,
                 "error": event.error,
             })
+        elif isinstance(event, SessionError):
+            # Runtime failure after the ready handshake (e.g. the
+            # pipeline runner died). Reuses the wire `error` event so
+            # the client shows a reason instead of a silently frozen UI.
+            _send_json({
+                "type": "error",
+                "code": event.code,
+                "message": event.message,
+            })
         elif isinstance(event, TimbreSet):
             _send_json({
                 "type": "timbre_set", "name": event.name,
@@ -613,6 +1115,28 @@ def _handle_client_body(
             })
         elif isinstance(event, AudioWriteFailed):
             _send_json({"type": "audio_write_failed", "error": event.error})
+        elif isinstance(event, StemAssets):
+            # Late background-rip delivery (upload path): same wire
+            # shape the init/swap paths send inline. send_lock keeps
+            # the JSON header + per-stem binaries atomic vs slices.
+            try:
+                with send_lock:
+                    send_stem_payload(
+                        ws,
+                        fixture_name=event.fixture_name,
+                        source_mode=event.source_mode,
+                        stems=event.stems,
+                    )
+            except ConnectionClosed:
+                state.running = False
+            except Exception as exc:
+                logger.warning("stem_assets_send_failed error={}", exc)
+        elif isinstance(event, StemFailed):
+            _send_json({
+                "type": "stem_failed",
+                "fixture_name": event.fixture_name or "",
+                "error": event.error,
+            })
         elif isinstance(event, SubscriberDropped):
             # Terminal notice from the bus: our subscription overflowed
             # and was force-closed. Outbound delivery is dead; the

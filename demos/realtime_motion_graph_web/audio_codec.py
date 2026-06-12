@@ -152,7 +152,11 @@ def send_stem_payload(
         "channels": channels,
         "frames": frames,
         "stems": order,
-        "source_mode": source_mode or "full",
+        # Empty string = overlay-only push (late background-rip
+        # delivery): the client must NOT treat it as a source-mode
+        # change. None keeps the legacy "full" default for the init /
+        # swap paths.
+        "source_mode": source_mode if source_mode is not None else "full",
     }))
     for name in order:
         arr = stems[name].detach().cpu().numpy().T.astype(np.float16)

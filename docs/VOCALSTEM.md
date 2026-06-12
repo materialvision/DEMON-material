@@ -28,6 +28,45 @@ decoded, trimmed/profile-aligned, and prepared with `Session.prepare_source()`.
 For source swaps, the same extraction path runs inside `apply_swap_if_pending()`
 after the new uploaded waveform has been decoded and prepared.
 
+## Two-Phase Uploads (Background Stem Rip)
+
+The `upload_track` side-channel optimizes time-to-sound by splitting the
+pipeline:
+
+- **Phase 1 (synchronous, ~5–7 s):** analyze BPM/key, VAE-encode the FULL
+  source, persist the track packet (source WAV + full sidecar), ack
+  `upload_ok` with `stems_pending: true`. The client can swap to the
+  track — and hear audio — immediately.
+- **Phase 2 (background thread):** Mel-Band RoFormer separation (with the
+  ACE-Step encoder parked, see below), per-stem sidecars, stem WAVs, and
+  a metadata re-save. Finished stems are pushed to the live session as a
+  late `stem_assets` frame (with `source_mode: ""`, meaning
+  "overlay-only — don't change the client's source-mode pick"); failures
+  push `stem_failed`. If the track was wiped by session teardown mid-rip,
+  the results are discarded.
+
+The swap path coordinates through the pending-stems registry
+(`mark_stems_pending` / `stems_pending` / `wait_for_pending_stems` in
+`acestep/streaming/stems.py`): a mode-`full` swap proceeds WITHOUT stems
+while a rip is in flight (never a duplicate separation), and a
+`vocals`/`instruments` swap — where the stem IS the inference source —
+waits for the rip and then loads it from the disk cache.
+
+Phase-1 latency is kept low by four measures:
+
+- librosa's numba-JIT'd beat tracker is warmed at server boot (the
+  cold first call costs ~4 s);
+- BPM/key analysis runs on a centered 60 s window (identical estimates,
+  fraction of the cost on long tracks) and overlaps the GPU source
+  encode on a worker thread;
+- the separator's weights stay in system RAM between rips
+  (`DEMON_MELBAND_RAM_CACHE`, default on; per-rip GPU residency is a
+  ~0.2 s CPU→GPU move instead of a ~2 s disk load — the VRAM discipline
+  is unchanged);
+- the TRT engine files the post-upload swap will need are pulled into
+  the OS page cache in the background during phase 1 (helps
+  cold-page-cache pods; harmless elsewhere).
+
 ## Stem Extraction
 
 Stem extraction is performed with Mel-Band RoFormer through
@@ -58,6 +97,99 @@ MELBAND_ROFORMER_MODEL_PATH
 
 The instrumental bed is the RoFormer instrumental output, not ACE-guided
 spectral suppression.
+
+## VRAM Management
+
+The RoFormer always loads on top of a resident ACE-Step model stack — the
+streaming session at create/swap time, or the shared eager upload-encoder
+session in the demo's `upload_track` path. On VRAM-constrained pods that
+stack is a memory-pressure spike, so `extract_upload_stems()` accepts the
+resident `ModelContext` as `model_context` and runs a park/restore cycle
+around separation:
+
+1. **Decide** (`should_park_for_melband()`): the default policy is
+   **always park** — the separator and the resident eager ACE-Step
+   weights never occupy VRAM at the same time, regardless of how much
+   happens to be free. `DEMON_MELBAND_VRAM_PARK` selects the policy:
+   `always` (default), `auto` (park only when claimable VRAM —
+   driver-free + torch's cached slack — is below
+   `DEMON_MELBAND_VRAM_RESERVE_GB`, default 6.0), or `never`.
+2. **Park** (`ModelContext.vram_parked()`): the eager modules (DiT, VAE,
+   text encoder) and the silence latent move to CPU and the freed pages
+   return to CUDA. TRT engines are untouched — their device memory
+   belongs to TensorRT execution contexts and cannot be offloaded.
+3. **Separate**: the RoFormer loads into the vacated VRAM and runs.
+4. **Release**: the RoFormer is dropped and its cache emptied BEFORE the
+   restore, so ACE-Step returns into the space the separator vacated.
+5. **Restore**: parked modules move back to the device with their
+   canonical dtypes.
+
+Concurrency: `vram_parked()` holds the ModelContext's placement lock for
+the whole cycle, and every eager-module consumer routes through
+`ModelContext._load_model_context()`, which takes the same lock. A
+concurrent operation (prompt re-encode, timbre/structure set) issued
+while the models are parked therefore blocks until the restore instead
+of running GPU inputs against CPU weights. The session create and swap
+paths run the extraction on the runner thread (or before the runner
+exists), so streaming ticks never overlap a park; in the upload path the
+parked encoder is a separate `ModelContext` from any live session, which
+keeps streaming untouched.
+
+Beyond the per-separation cycle, two standing policies keep steady-state
+VRAM flat:
+
+- **The shared upload encoder lives on GPU only while an upload is in
+  flight — and carries no generation stack.** It is BUILT with its
+  weights in system RAM (`Session(offload_to_cpu=True,
+  offload_dit_to_cpu=True)`, then flipped to resident mode), so even
+  the first upload never spikes VRAM with a full second model copy.
+  Uploads execute exactly three model surfaces (VAE encode, semantic
+  extract, conditioning encoder), so
+  `_strip_upload_encoder_generation_stack()` drops the DiT *decoder*
+  (~1.6 B params on the 2B turbo) and the eager DiffusionEngine at
+  construction — the per-upload GPU restore is the ~1.3 GB conditioning
+  stack, not a ~4.7 GB model copy, which keeps uploads inside the
+  headroom of a live session running a long (120 s+) TRT profile.
+  `_handle_upload_track` calls `ModelContext.offload_eager_to_cpu()`
+  when each upload's background rip finishes (persistent park — nothing
+  auto-restores), and `_load_model_context()` lazily restores exactly
+  the modules the next upload touches (`model` for semantic extract;
+  `vae` only when no TRT VAE engine fits).
+- **Shape-aware TRT VAE engine selection** (`acestep/nodes/vae_nodes.py`):
+  the process-wide TRT VAE cache can hand the upload encoder an engine
+  belonging to the live streaming session, whose optimization profile
+  may not cover the upload's length (a 120 s upload vs the session's
+  60 s `vae_encode` engine). `_trt_vae_profile_fits()` checks the input
+  shape against the cached engine's profile first; on a mismatch, a
+  handler that carries an eager VAE falls back to it instead of letting
+  TRT reject the shape and fail the upload.
+- **One streaming session per pod, enforced** (`ws_adapter`):
+  `StreamingSession.create` calls are serialized, and a new main-session
+  connection preempts the active session — stops its runner, closes its
+  socket with close code 4001 (`PREEMPTED_CLOSE_CODE`, which the web
+  client treats as final rather than reconnecting), and waits on
+  `StreamingSession.closed` for its GPU teardown before building the new
+  stack. This prevents the dual-create OOM and the cascade where a dying
+  session's cleanup evicts shared TRT VAE cache entries out from under a
+  live one.
+
+  **Deployment ordering:** the server and web client must ship together.
+  A client built before `PREEMPTED_CLOSE_CODE` existed treats a 4001
+  close as unexpected and re-enters its reconnect loop, preempting the
+  newer session back — exactly the rebuild ping-pong the code prevents.
+  When the bundle is served from the pod itself the exposure is bounded
+  to already-open stale tabs, which remain a known hazard until
+  refreshed.
+
+Every phase emits a structured `stems_vram` log line
+(free/available/allocated/reserved GiB), plus `vram_parked` /
+`vram_unparked` from the context. Unit coverage lives in
+`tests/unit/test_model_context_parking.py` (park/restore + placement
+lock), `tests/unit/test_melband_park_policy.py` (park policy knobs +
+pending-stems registry), `tests/unit/test_pending_stems_gating.py`
+(swap gating), `tests/unit/test_ws_preemption.py` (preemption + 4001
+contract), `tests/unit/test_upload_encoder.py`, and
+`tests/unit/test_upload_two_phase.py`.
 
 ## Returned Stem Assets
 

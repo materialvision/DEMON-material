@@ -180,8 +180,12 @@ def _trt_vae_decode(
             engine_path, tuple(lat.shape),
         )
         raise RuntimeError("TRT VAE decode failed")
-    stream.synchronize()
-
+    # No host sync: the polygraphy stream is a blocking stream w.r.t.
+    # PyTorch's legacy default stream, so the .clone() below is
+    # implicitly ordered after the TRT execution on the GPU. The
+    # caller's eventual D2H (.cpu() at emission) is the natural sync
+    # point; blocking the host here would only serialize CPU prep
+    # against GPU work.
     return audio_buf.clone().to(torch.float32)
 
 
@@ -348,6 +352,48 @@ def _find_trt_engine(name: str) -> Optional[str]:
     return None
 
 
+def _trt_vae_profile_fits(
+    engine_path: str, tensor_name: str, shape,
+) -> Optional[bool]:
+    """Whether ``shape`` satisfies the cached engine's optimization profile.
+
+    The module-level TRT VAE cache is shared process-wide, so a cached
+    engine may belong to a session whose profile doesn't cover another
+    caller's input — e.g. the live streaming session's 60 s
+    ``vae_encode`` engine vs a 120 s upload going through the eager
+    upload-encoder. Callers use this to decide between the cached TRT
+    engine and an eager fallback BEFORE committing to the TRT path.
+
+    Returns ``True``/``False`` when the profile verdict is known, or
+    ``None`` when it can't be determined (engine not cached, API error)
+    — treat ``None`` as "behave as before" (use TRT). Every
+    optimization profile is checked: a multi-profile engine fits when
+    ANY profile covers the shape.
+    """
+    try:
+        entry = _trt_vae_cache.get(os.path.abspath(engine_path))
+        if entry is None or entry.get("engine") is None:
+            return None
+        engine = entry["engine"]
+        num_profiles = int(getattr(engine, "num_optimization_profiles", 1) or 1)
+        for profile in range(num_profiles):
+            mn, _opt, mx = engine.get_tensor_profile_shape(tensor_name, profile)
+            if len(mn) != len(shape):
+                continue
+            if all(
+                int(mn[i]) <= int(shape[i]) <= int(mx[i])
+                for i in range(len(shape))
+            ):
+                return True
+        return False
+    except Exception as exc:
+        logger.warning(
+            "trt_vae_profile_check_failed engine={} tensor={} error={}",
+            engine_path, tensor_name, exc,
+        )
+        return None
+
+
 def _find_best_vae_engine(component: str) -> Optional[str]:
     """Return a TRT VAE engine path for *component* if one was preloaded.
 
@@ -416,13 +462,44 @@ class VAEEncodeAudio(BaseNode):
             waveform = waveform.unsqueeze(0)
 
         trt_path = _find_best_vae_engine("vae_encode") if _trt_available() else None
+        if (
+            trt_path
+            and handler.vae is not None
+            and _trt_vae_profile_fits(trt_path, "audio", tuple(waveform.shape)) is False
+        ):
+            # The cached engine belongs to another session and its
+            # profile can't take this input (e.g. a >60 s upload vs the
+            # live session's 60 s engine). This handler carries an eager
+            # VAE — use it instead of letting TRT reject the shape.
+            logger.info(
+                "vae_encode_trt_profile_mismatch input_shape={} engine={} "
+                "fallback=eager",
+                tuple(waveform.shape), os.path.basename(trt_path),
+            )
+            trt_path = None
         if trt_path:
-            logger.info("VAE encode via TRT")
-            latents_bdt = _trt_vae_encode(waveform, trt_path, device)
-            # [B, D, T] -> [B, T, D]
-            latents = latents_bdt.transpose(1, 2).to(dtype)
-        else:
-            logger.info("VAE encode via PyTorch")
+            logger.debug("VAE encode via TRT")
+            try:
+                latents_bdt = _trt_vae_encode(waveform, trt_path, device)
+            except RuntimeError as exc:
+                if handler.vae is None or "rejected input shape" not in str(exc):
+                    raise
+                # Cold-cache twin of the profile-fit guard above: when
+                # the engine wasn't cached yet the check returned None
+                # ("use TRT"), the engine loaded just now and rejected
+                # the shape. Same hazard, same answer — this handler
+                # carries an eager VAE.
+                logger.info(
+                    "vae_encode_trt_shape_rejected input_shape={} engine={} "
+                    "fallback=eager",
+                    tuple(waveform.shape), os.path.basename(trt_path),
+                )
+                trt_path = None
+            else:
+                # [B, D, T] -> [B, T, D]
+                latents = latents_bdt.transpose(1, 2).to(dtype)
+        if not trt_path:
+            logger.debug("VAE encode via PyTorch")
             with handler._load_model_context("vae"):
                 latents = handler._encode_audio_to_latents(waveform)
             if latents.dim() == 2:
@@ -467,11 +544,38 @@ class VAEDecodeAudio(BaseNode):
         lat_bdt = latent.tensor.transpose(1, 2)
 
         trt_path = _find_best_vae_engine("vae_decode") if _trt_available() else None
+        if (
+            trt_path
+            and handler.vae is not None
+            and _trt_vae_profile_fits(trt_path, "latents", tuple(lat_bdt.shape)) is False
+        ):
+            # Same cross-session profile hazard as the encode node: an
+            # eager-VAE handler must not be forced through another
+            # session's cached engine when the shape can't fit it.
+            logger.info(
+                "vae_decode_trt_profile_mismatch input_shape={} engine={} "
+                "fallback=eager",
+                tuple(lat_bdt.shape), os.path.basename(trt_path),
+            )
+            trt_path = None
         if trt_path:
-            logger.info("VAE decode via TRT")
-            waveform = _trt_vae_decode(lat_bdt, trt_path, device)
-        else:
-            logger.info("VAE decode via PyTorch (no TRT engine found)")
+            # debug, not info: this node can run per decode window.
+            logger.debug("VAE decode via TRT")
+            try:
+                waveform = _trt_vae_decode(lat_bdt, trt_path, device)
+            except RuntimeError as exc:
+                if handler.vae is None or "rejected input shape" not in str(exc):
+                    raise
+                # Cold-cache twin of the profile-fit guard above (see
+                # the encode node).
+                logger.info(
+                    "vae_decode_trt_shape_rejected input_shape={} engine={} "
+                    "fallback=eager",
+                    tuple(lat_bdt.shape), os.path.basename(trt_path),
+                )
+                trt_path = None
+        if not trt_path:
+            logger.debug("VAE decode via PyTorch (no TRT engine found)")
             with handler._load_model_context("vae"):
                 waveform = handler.tiled_decode(lat_bdt)
 

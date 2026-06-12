@@ -15,6 +15,7 @@
 import * as fzstd from "fzstd";
 
 import {
+  PREEMPTED_CLOSE_CODE,
   SAMPLE_RATE,
   SLICE_FLAG_DELTA,
   SLICE_HDR_SIZE,
@@ -700,6 +701,22 @@ export class RemoteBackend extends EventTarget {
               );
               break;
             }
+            case "error":
+              // Mid-session structured failure (e.g. code=pipeline_error
+              // when the server's generation loop dies). Handshake-phase
+              // errors reject the connect() promise above; this case is
+              // the post-ready path. Dispatched as "server_error" (the
+              // plain "error" listener name is reserved for the WS-level
+              // transport error) so the host can surface the message
+              // instead of leaving a silently frozen UI.
+              console.error(
+                `[protocol] server error: ${msg.code || "unknown"}` +
+                  (msg.message ? ` — ${msg.message}` : ""),
+              );
+              this.dispatchEvent(
+                new CustomEvent("server_error", { detail: msg }),
+              );
+              break;
             default:
               this.dispatchEvent(new CustomEvent("json", { detail: msg }));
           }
@@ -756,7 +773,9 @@ export class RemoteBackend extends EventTarget {
         // most often, both recoverable by reloading.
         if (!this.ready) {
           let msg: string;
-          if (e.code === 1011) {
+          if (e.code === PREEMPTED_CLOSE_CODE) {
+            msg = "Another connection took over this session.";
+          } else if (e.code === 1011) {
             msg = "Session failed while starting — refresh the page to retry.";
           } else if (e.code === 1006) {
             msg = "Connection lost — refresh to retry.";

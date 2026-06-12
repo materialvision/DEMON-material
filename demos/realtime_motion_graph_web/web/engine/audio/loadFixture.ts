@@ -203,6 +203,10 @@ export interface UploadTrackResult {
   timeSignature: string;
   durationS: number;
   samples: number;
+  /** True when the server is still ripping vocal/instrument stems on a
+   *  background thread. The track is immediately swappable (full
+   *  source); overlays arrive later via a pushed stem_assets frame. */
+  stemsPending: boolean;
 }
 
 export interface UploadTrackOptions {
@@ -323,6 +327,7 @@ export async function uploadTrackToServer(
             timeSignature: String(msg.time_signature ?? "4"),
             durationS: Number(msg.duration_s ?? 0),
             samples: Number(msg.samples ?? 0),
+            stemsPending: Boolean(msg.stems_pending),
           }),
         );
       } else if (msg.type === "upload_failed") {

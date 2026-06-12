@@ -13,6 +13,16 @@ const backendUrl = (
   process.env.NEXT_PUBLIC_POD_BASE_URL ?? "http://127.0.0.1:1318"
 ).replace(/\/$/, "");
 
+function backendHostname(): string | null {
+  try {
+    return new URL(backendUrl).hostname;
+  } catch {
+    return null;
+  }
+}
+
+const devOriginHost = backendHostname();
+
 const nextConfig: NextConfig = {
   // The @demon/client SDK lives outside this app at packages/demon-client
   // (tsconfig path alias onto its TS source). Widen Turbopack's project
@@ -20,6 +30,7 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: path.join(__dirname, "..", "..", ".."),
   },
+  ...(devOriginHost ? { allowedDevOrigins: [devOriginHost] } : {}),
   async rewrites() {
     return [
       { source: "/api/:path*", destination: `${backendUrl}/api/:path*` },

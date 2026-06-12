@@ -489,6 +489,8 @@ export interface UploadOkEvent {
   time_signature?: string;
   duration_s?: number;
   samples?: number;
+  /** True when the vocal/instrument stem rip is still running on a background thread. The track is immediately swappable (full source); stems land later via a pushed stem_assets frame on the live session (or stem_failed). */
+  stems_pending?: boolean;
 }
 
 export interface UploadFailedEvent {

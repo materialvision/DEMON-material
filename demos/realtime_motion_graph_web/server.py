@@ -87,6 +87,10 @@ _NO_CACHE_HEADERS = [
     # Chrome requires this for Web MIDI API device enumeration.
     ("Permissions-Policy", "midi=*"),
 ]
+_PUBLIC_HTTP_HEADERS = [
+    ("Access-Control-Allow-Origin", "*"),
+    *_NO_CACHE_HEADERS,
+]
 
 
 def _resolve_video(name: str) -> Path | None:
@@ -170,8 +174,7 @@ def _process_request(connection, request):
                 # no credentials/custom headers → no preflight; a single
                 # ACAO:* on the response is sufficient and safe (nothing
                 # sensitive here).
-                ("Access-Control-Allow-Origin", "*"),
-                *_NO_CACHE_HEADERS,
+                *_PUBLIC_HTTP_HEADERS,
             ]),
             body,
         )
@@ -238,7 +241,7 @@ def _process_request(connection, request):
             Headers([
                 ("Content-Type", "application/json; charset=utf-8"),
                 ("Content-Length", str(len(body))),
-                *_NO_CACHE_HEADERS,
+                *_PUBLIC_HTTP_HEADERS,
             ]),
             body,
         )
@@ -258,7 +261,7 @@ def _process_request(connection, request):
             Headers([
                 ("Content-Type", "application/json; charset=utf-8"),
                 ("Content-Length", str(len(body))),
-                *_NO_CACHE_HEADERS,
+                *_PUBLIC_HTTP_HEADERS,
             ]),
             body,
         )
@@ -275,7 +278,7 @@ def _process_request(connection, request):
             Headers([
                 ("Content-Type", "application/json; charset=utf-8"),
                 ("Content-Length", str(len(body))),
-                *_NO_CACHE_HEADERS,
+                *_PUBLIC_HTTP_HEADERS,
             ]),
             body,
         )
@@ -301,8 +304,7 @@ def _process_request(connection, request):
             Headers([
                 ("Content-Type", "application/json; charset=utf-8"),
                 ("Content-Length", str(len(body))),
-                ("Access-Control-Allow-Origin", "*"),
-                *_NO_CACHE_HEADERS,
+                *_PUBLIC_HTTP_HEADERS,
             ]),
             body,
         )
@@ -323,8 +325,7 @@ def _process_request(connection, request):
             Headers([
                 ("Content-Type", "application/json; charset=utf-8"),
                 ("Content-Length", str(len(body))),
-                ("Access-Control-Allow-Origin", "*"),
-                *_NO_CACHE_HEADERS,
+                *_PUBLIC_HTTP_HEADERS,
             ]),
             body,
         )
@@ -346,7 +347,7 @@ def _process_request(connection, request):
             Headers([
                 ("Content-Type", "application/json; charset=utf-8"),
                 ("Content-Length", str(len(body))),
-                *_NO_CACHE_HEADERS,
+                *_PUBLIC_HTTP_HEADERS,
             ]),
             body,
         )
@@ -368,7 +369,7 @@ def _process_request(connection, request):
                 Headers([
                     ("Content-Type", "text/plain; charset=utf-8"),
                     ("Content-Length", str(len(msg))),
-                    *_NO_CACHE_HEADERS,
+                    *_PUBLIC_HTTP_HEADERS,
                 ]),
                 msg,
             )
@@ -383,7 +384,7 @@ def _process_request(connection, request):
                     Headers([
                         ("Content-Type", "text/plain; charset=utf-8"),
                         ("Content-Length", str(len(msg))),
-                        *_NO_CACHE_HEADERS,
+                        *_PUBLIC_HTTP_HEADERS,
                     ]),
                     msg,
                 )
@@ -394,7 +395,7 @@ def _process_request(connection, request):
                 Headers([
                     ("Content-Type", ctype or "application/octet-stream"),
                     ("Content-Length", str(len(body))),
-                    *_NO_CACHE_HEADERS,
+                    *_PUBLIC_HTTP_HEADERS,
                 ]),
                 body,
             )
@@ -422,7 +423,7 @@ def _process_request(connection, request):
                         Headers([
                             ("Content-Type", "text/plain; charset=utf-8"),
                             ("Content-Length", str(len(msg))),
-                            *_NO_CACHE_HEADERS,
+                            *_PUBLIC_HTTP_HEADERS,
                         ]),
                         msg,
                     )
@@ -433,7 +434,7 @@ def _process_request(connection, request):
                     Headers([
                         ("Content-Type", ctype or "application/octet-stream"),
                         ("Content-Length", str(len(body))),
-                        *_NO_CACHE_HEADERS,
+                        *_PUBLIC_HTTP_HEADERS,
                     ]),
                     body,
                 )
@@ -452,7 +453,7 @@ def _process_request(connection, request):
                     Headers([
                         ("Content-Type", "text/plain; charset=utf-8"),
                         ("Content-Length", str(len(msg))),
-                        *_NO_CACHE_HEADERS,
+                        *_PUBLIC_HTTP_HEADERS,
                     ]),
                     msg,
                 )
@@ -463,7 +464,7 @@ def _process_request(connection, request):
                 Headers([
                     ("Content-Type", ctype or "application/octet-stream"),
                     ("Content-Length", str(len(body))),
-                    *_NO_CACHE_HEADERS,
+                    *_PUBLIC_HTTP_HEADERS,
                 ]),
                 body,
             )
@@ -482,7 +483,7 @@ def _process_request(connection, request):
         Headers([
             ("Content-Type", "text/plain; charset=utf-8"),
             ("Content-Length", str(len(body))),
-            *_NO_CACHE_HEADERS,
+            *_PUBLIC_HTTP_HEADERS,
         ]),
         body,
     )
@@ -495,6 +496,82 @@ def _stub_handle_client(ws):
         ws.close(code=1011, reason="ui-only mode (no generative backend)")
     except Exception:
         pass
+
+
+def _run_preflight(decoder_accel: str, vae_accel: str, checkpoint: str) -> None:
+    """Fail fast (and loudly) at boot instead of on the first browser
+    connection.
+
+    Two checks, mirroring what the first WebSocket session would hit:
+
+    1. Checkpoints — downloads the ACE-Step weights NOW, in the
+       terminal where the operator can see progress, rather than
+       stalling the first silent WS connect for 5-15 minutes.
+    2. TRT engines — when either component runs TensorRT, verify a 60 s
+       profile is built (decoder and/or VAE engines, matching the
+       backends in use). On failure, print the fix and exit non-zero.
+
+    ``--skip-preflight`` bypasses both checks (e.g. exotic mixed setups,
+    or testing the error paths themselves).
+    """
+    from acestep.model_downloader import ensure_main_model, ensure_dit_model
+    from acestep.paths import (
+        EngineNotBuiltError,
+        available_trt_engines,
+        checkpoints_dir,
+    )
+    from acestep.setup import DEMO_COMMAND, SETUP_COMMAND
+
+    ok, msg = ensure_main_model()
+    if ok and checkpoint != "acestep-v15-turbo":
+        ok, msg = ensure_dit_model(checkpoint)
+    if not ok:
+        print()
+        print("=" * 64)
+        print("  Model checkpoints unavailable")
+        print("=" * 64)
+        print(f"  {msg}")
+        print(f"  expected location: {checkpoints_dir()}")
+        print(f"  fix: run `{SETUP_COMMAND}` (or `uv run acestep-download`)")
+        print("=" * 64)
+        raise SystemExit(1)
+    logger.info("preflight_checkpoints_ok checkpoint={}", checkpoint)
+
+    needs: tuple[str, ...] = ()
+    if decoder_accel == "tensorrt":
+        needs += ("decoder",)
+    if vae_accel == "tensorrt":
+        needs += ("vae_encode", "vae_decode")
+    if not needs:
+        return
+    trt_profile_checkpoint = (
+        checkpoint if decoder_accel == "tensorrt" else "acestep-v15-turbo"
+    )
+    try:
+        available_trt_engines(
+            duration_s=60.0,
+            needs=needs,
+            checkpoint=trt_profile_checkpoint,
+        )
+    except EngineNotBuiltError as exc:
+        print()
+        print("=" * 64)
+        print("  TensorRT engines not built")
+        print("=" * 64)
+        print(f"  {exc}")
+        print()
+        print(f"  fix (recommended): {SETUP_COMMAND}")
+        if exc.build_command:
+            print(f"  fix (manual):      {exc.build_command}")
+        print()
+        print("  Or run without TensorRT (slower, long first-tick warmup):")
+        print(f"    {DEMO_COMMAND} -- --accel compile")
+        print("=" * 64)
+        raise SystemExit(1)
+    logger.info(
+        "preflight_engines_ok needs={} checkpoint={}",
+        ",".join(needs), trt_profile_checkpoint,
+    )
 
 
 def main():
@@ -592,6 +669,13 @@ def main():
             "ui_only_mode skipped=gpu_and_model_imports",
         )
     else:
+        # Fail fast at boot on missing checkpoints / engines instead of
+        # on the first browser connection (where the failure used to
+        # surface as a silent stall or a WS error frame). Also performs
+        # the checkpoint download here, visibly, when needed.
+        if "--skip-preflight" not in args:
+            _run_preflight(decoder_accel, vae_accel, checkpoint)
+
         # Defer the heavy import until we know we need it. Pulling this in
         # loads torch + acestep + TRT machinery; in --no-backend we never
         # touch any of it.
@@ -663,6 +747,38 @@ def main():
         except Exception as exc:
             logger.warning("user_uploads_wipe_at_startup_failed error={}", exc)
 
+        # Warm librosa's numba-JIT'd beat tracker (and the key detector)
+        # on a tiny clip in the background. Cold, the first upload's BPM
+        # analysis pays ~4 s of one-time JIT compilation; warmed here it
+        # runs in well under a second. Daemon thread: never blocks boot,
+        # and a failure only means the first upload pays the JIT cost as
+        # before.
+        def _warm_audio_analysis_jit() -> None:
+            try:
+                import numpy as np
+
+                import librosa
+                from acestep.audio.key_detection import detect_key
+
+                t0 = time.monotonic()
+                y = np.sin(
+                    np.linspace(0, 2400 * np.pi, 48000 * 3),
+                ).astype(np.float32)
+                librosa.beat.beat_track(y=y, sr=48000)
+                detect_key(y, 48000)
+                logger.info(
+                    "audio_analysis_jit_warmed duration_s={:.1f}",
+                    time.monotonic() - t0,
+                )
+            except Exception as exc:
+                logger.warning("audio_analysis_jit_warm_failed error={}", exc)
+
+        threading.Thread(
+            target=_warm_audio_analysis_jit,
+            name="analysis-jit-warm",
+            daemon=True,
+        ).start()
+
     logger.info("server_starting port={}", port)
     srv = ws_serve(
         ws_handler,
@@ -673,6 +789,12 @@ def main():
         # See web/engine/audio/loadFixture.ts.
         max_size=100 * 1024 * 1024,
         process_request=_process_request,
+        # A generation tick or TRT/VAE setup can hold the GIL long enough to
+        # starve the keepalive's recv_events thread past the 20s default, so a
+        # live session gets closed with `1011 keepalive ping timeout`. Widen
+        # the pong deadline to 90s. Trade-off: slower detection of genuinely
+        # dead clients — pair with an app-level idle-session reaper.
+        ping_timeout=90,
     )
     ws_thread = threading.Thread(target=srv.serve_forever, daemon=True)
     ws_thread.start()

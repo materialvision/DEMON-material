@@ -540,7 +540,11 @@ EVENTS: tuple = (
                                   "the source duration whose TRT profile is "
                                   "missing."),
         ),
-        description="Structured init failure (sent during the handshake).",
+        description="Structured failure. Sent during the init handshake "
+                    "(engine_not_built, unsupported_trt_checkpoint, ...) "
+                    "AND mid-session when the pipeline runner dies "
+                    "(code=pipeline_error) so the client can show a "
+                    "reason instead of a silently frozen UI.",
     ),
     EventSpec(
         "params_update",
@@ -749,9 +753,17 @@ HANDSHAKE_EVENTS: tuple = (
             FieldSpec("time_signature", "str"),
             FieldSpec("duration_s", "float"),
             FieldSpec("samples", "int"),
+            FieldSpec("stems_pending", "bool",
+                      description="True when the vocal/instrument stem rip is "
+                                  "still running on a background thread. The "
+                                  "track is immediately swappable (full source); "
+                                  "stems land later via a pushed stem_assets "
+                                  "frame on the live session (or stem_failed)."),
         ),
         description="Init-phase ack: the uploaded track was persisted + encoded "
-                    "(or an identical existing one was reused).",
+                    "(or an identical existing one was reused). Sent as soon as "
+                    "the FULL source is ready; stem separation continues in the "
+                    "background when stems_pending is true.",
     ),
     EventSpec(
         "upload_failed",

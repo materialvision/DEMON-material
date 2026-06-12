@@ -19,10 +19,18 @@ renders the live UI:
 
 ## Requirements
 
-- **Server**: the full ACE-Step install (CUDA GPU, `uv sync`, prebuilt
-  TensorRT engines). No extra dependencies beyond the main project.
+- **Server**: the full DEMON install — `uv sync` then `uv run
+  demon-setup` (downloads the model checkpoints and builds the minimal
+  TensorRT engine set; see the [repo README Quickstart](../../README.md#quickstart)
+  and [docs/INSTALL.md](../../docs/INSTALL.md)). No extra dependencies
+  beyond the main project.
 - **Client**: any modern Chromium or Firefox. Web MIDI and webcam
   support are optional.
+
+At boot the backend runs a preflight: it downloads checkpoints if they
+are missing (visible in the terminal) and verifies the TensorRT
+engines for the configured `--accel`, exiting with the exact fix
+command when they are absent. Bypass with `--skip-preflight`.
 
 ## Run
 
@@ -39,6 +47,35 @@ First run installs `web/node_modules` automatically (Node.js 20+ required).
 Open `http://localhost:6660`. Next.js rewrites `/api/*`, `/fixtures/*`,
 `/loras/*`, and `/videos/*` to the backend at `:1318`; the WebSocket
 URL comes from `NEXT_PUBLIC_POD_BASE_URL` (set by the launcher).
+
+### Remote / headless server
+
+To run the GPU server on one machine and open the UI from another, bind the
+backend to all interfaces and tell the browser the server's address:
+
+```bash
+# launcher flags go BEFORE `--`; backend flags (e.g. --accel) go AFTER it.
+uv run python -u -m demos.realtime_motion_graph_web.run \
+  --host 0.0.0.0 --client-host 10.0.0.5 \
+  -- --accel tensorrt
+# (10.0.0.5 = the server's LAN IP)
+```
+
+On startup the launcher prints `engine base URL (for browser): …` — it must be
+the server's address, not `127.0.0.1`. Then open `http://10.0.0.5:6660` from
+the client. Note:
+
+- **Argument order matters.** Everything after `--` is forwarded to the
+  backend, so a launcher flag like `--client-host` placed after `--` silently
+  has no effect (the base URL falls back to `127.0.0.1`, which a remote browser
+  resolves to *itself*). Put launcher flags before `--`.
+- `--client-host` sets the address the **browser** uses for both the HTTP API
+  and the WebSocket — both connect straight to the backend, so it must be
+  reachable from the client, not `localhost`.
+- Open **both** ports on the server's firewall: `:6660` (UI) and `:1318`
+  (backend HTTP + WebSocket).
+- Changing `web/.env.local` requires restarting the dev server — it's read
+  only at startup.
 
 The full UI lives under `web/` (React + zustand, mirrored from the
 internal `daydreamlive/demon-react` package). See `web/components/`,

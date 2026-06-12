@@ -61,7 +61,6 @@ def _download_from_huggingface_internal(
     snapshot_download(
         repo_id=repo_id,
         local_dir=str(local_dir),
-        local_dir_use_symlinks=False,
         token=token,
     )
 
@@ -405,7 +404,6 @@ def download_melband_roformer_model(
             repo_id=MELBAND_ROFORMER_REPO,
             filename=MELBAND_ROFORMER_MODEL_FILE,
             local_dir=str(model_dir),
-            local_dir_use_symlinks=False,
             token=token,
             force_download=force,
         )
@@ -653,9 +651,12 @@ Network Detection:
   - Google accessible -> HuggingFace (fallback to ModelScope)
   - Google blocked -> ModelScope (fallback to HuggingFace)
 
-Alternative using huggingface-cli:
-  huggingface-cli download ACE-Step/Ace-Step1.5 --local-dir ./checkpoints
-  huggingface-cli download ACE-Step/acestep-5Hz-lm-0.6B --local-dir ./checkpoints/acestep-5Hz-lm-0.6B
+Default destination:
+  ~/.daydream-scope/models/demon/checkpoints (override with the
+  ACESTEP_MODELS_DIR environment variable or --dir)
+
+Alternative using huggingface-cli (substitute your checkpoints dir):
+  huggingface-cli download ACE-Step/Ace-Step1.5 --local-dir ~/.daydream-scope/models/demon/checkpoints
         """
     )
     
@@ -678,7 +679,9 @@ Alternative using huggingface-cli:
         "--dir", "-d",
         type=str,
         default=None,
-        help="Custom checkpoints directory (default: ./checkpoints)"
+        help="Custom checkpoints directory (default: "
+             "~/.daydream-scope/models/demon/checkpoints, or "
+             "$ACESTEP_MODELS_DIR/checkpoints)"
     )
     parser.add_argument(
         "--force", "-f",
