@@ -112,6 +112,34 @@ def test_stem_swap_waits_for_pending_rip_then_uses_cache(monkeypatch):
     assert torch.equal(out_wf, _STEMS["vocals"])
 
 
+def test_stem_swap_abort_maps_to_error_not_inline_separation(monkeypatch):
+    # Session is stopping (preempted) while a rip is pending: the wait
+    # gives up and the swap must FAIL — falling through to a duplicate
+    # inline separation on a stack mid-teardown would hold the preemptor
+    # past its 45 s budget and double-stack the GPU.
+    _forbid_separation(monkeypatch)
+    monkeypatch.setattr(session_mod, "audio_clip_stems", lambda *a, **k: None)
+    monkeypatch.setattr(session_mod, "stems_pending", lambda name: True)
+    monkeypatch.setattr(
+        session_mod, "wait_for_pending_stems",
+        lambda name, should_abort=None, **k: False,
+    )
+
+    source = object()
+    stems, error, out_source, out_wf = extract_and_select_upload_stem(
+        _WAVEFORM,
+        session=_fake_session(),
+        source=source,
+        source_mode="vocals",
+        fixture_name="track.wav",
+        should_abort=lambda: True,
+    )
+    assert stems is None
+    assert "session stopping" in error
+    assert out_source is source
+    assert out_wf is _WAVEFORM
+
+
 def test_cache_hit_skips_wait_and_separation(monkeypatch):
     _forbid_separation(monkeypatch)
     monkeypatch.setattr(session_mod, "audio_clip_stems", lambda *a, **k: _STEMS)

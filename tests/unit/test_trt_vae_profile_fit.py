@@ -23,14 +23,19 @@ _PATH = "/tmp/fake_vae_encode.engine"
 
 
 class _FakeEngine:
-    def __init__(self, mn, opt, mx, error=None):
-        self._mn, self._opt, self._mx = mn, opt, mx
+    def __init__(self, mn, opt, mx, error=None, extra_profiles=()):
+        # Profile 0 plus any extra (mn, opt, mx) triples.
+        self._profiles = [(mn, opt, mx), *extra_profiles]
         self._error = error
+
+    @property
+    def num_optimization_profiles(self):
+        return len(self._profiles)
 
     def get_tensor_profile_shape(self, tensor_name, profile_index):
         if self._error is not None:
             raise self._error
-        return self._mn, self._opt, self._mx
+        return self._profiles[profile_index]
 
 
 def _install(monkeypatch, engine):
@@ -79,6 +84,21 @@ def test_rejects_rank_mismatch(monkeypatch):
         mn=(1, 2, 48_000), opt=(1, 2, 1_440_000), mx=(1, 2, 2_880_000),
     ))
     assert vn._trt_vae_profile_fits(_PATH, "audio", (2, 48_000)) is False
+
+
+def test_any_profile_fitting_is_enough(monkeypatch):
+    # Multi-profile engine: profile 0 is too small, profile 1 covers the
+    # shape — the guard must not false-negative into the eager fallback
+    # by only consulting profile 0.
+    _install(monkeypatch, _FakeEngine(
+        mn=(1, 2, 48_000), opt=(1, 2, 1_440_000), mx=(1, 2, 2_880_000),
+        extra_profiles=[
+            ((1, 2, 2_880_000), (1, 2, 5_760_000), (1, 2, 11_520_000)),
+        ],
+    ))
+    assert vn._trt_vae_profile_fits(_PATH, "audio", (1, 2, 5_760_000)) is True
+    # Outside every profile still rejects.
+    assert vn._trt_vae_profile_fits(_PATH, "audio", (1, 2, 20_000_000)) is False
 
 
 def test_unknown_on_trt_api_error(monkeypatch):

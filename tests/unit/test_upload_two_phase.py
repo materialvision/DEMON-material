@@ -117,3 +117,30 @@ def test_phase2_refuses_to_write_after_track_wipe(tmp_path, monkeypatch):
 
     root = user_uploads_dir()
     assert not track_dir(root, "wiped.wav").exists()
+
+
+def test_phase2_honors_wipe_racing_the_writes(tmp_path, monkeypatch):
+    # TOCTOU: the is_dir() pre-check passes, then the session-end wipe
+    # runs while the stem WAVs/sidecars are being written. The post-write
+    # sentinel (phase-1 source WAV, which phase 2 never recreates) must
+    # catch it: everything just written is deleted again, nothing leaks
+    # to the pod's next renter.
+    import shutil
+
+    import acestep.user_uploads as uploads_mod
+
+    monkeypatch.setenv("ACESTEP_MODELS_DIR", str(tmp_path))
+    _persist_phase1("raced.wav")
+    root = user_uploads_dir()
+    tdir = track_dir(root, "raced.wav")
+
+    real_write_stem_wavs = uploads_mod.write_stem_wavs
+
+    def _write_then_wipe(*args, **kwargs):
+        real_write_stem_wavs(*args, **kwargs)
+        shutil.rmtree(tdir)  # the wipe lands mid-phase-2
+
+    monkeypatch.setattr(uploads_mod, "write_stem_wavs", _write_then_wipe)
+
+    assert _persist_phase2("raced.wav") is False
+    assert not tdir.exists()

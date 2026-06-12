@@ -10,6 +10,7 @@ swaps. CPU-only: VRAM telemetry is monkeypatched at the module seam.
 from __future__ import annotations
 
 import threading
+import time
 
 import torch
 
@@ -188,6 +189,49 @@ def test_finish_unblocks_concurrent_waiter():
 
 def test_finish_is_safe_for_unknown_names():
     finish_stems_pending("never-marked-either")  # must not raise
+
+
+def test_wait_aborts_early_when_session_is_stopping():
+    # A preempting connection only grants 45 s of teardown; the 300 s
+    # stem wait must be interruptible or the preemptor double-stacks.
+    name = "test-pending-abort"
+    mark_stems_pending(name)
+    t0 = time.monotonic()
+    try:
+        finished = wait_for_pending_stems(
+            name, timeout=30.0, should_abort=lambda: True,
+        )
+    finally:
+        finish_stems_pending(name)
+    assert finished is False
+    assert time.monotonic() - t0 < 5.0  # gave up immediately, not at timeout
+
+
+def test_wait_with_inactive_abort_still_completes():
+    name = "test-pending-abort-inactive"
+    mark_stems_pending(name)
+    results: list[bool] = []
+    waiter = threading.Thread(
+        target=lambda: results.append(wait_for_pending_stems(
+            name, timeout=10.0, should_abort=lambda: False,
+        )),
+    )
+    waiter.start()
+    finish_stems_pending(name)
+    waiter.join(timeout=10.0)
+    assert results == [True]
+
+
+def test_wait_with_abort_respects_timeout():
+    name = "test-pending-abort-timeout"
+    mark_stems_pending(name)
+    try:
+        finished = wait_for_pending_stems(
+            name, timeout=0.05, should_abort=lambda: False,
+        )
+    finally:
+        finish_stems_pending(name)
+    assert finished is False
 
 
 def test_finish_unblocks_waiter_on_failure_path_too():

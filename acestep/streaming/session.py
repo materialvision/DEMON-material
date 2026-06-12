@@ -227,6 +227,7 @@ def extract_and_select_upload_stem(
     source_mode: str | None,
     fixture_name: str | None = None,
     log_context: str = "",
+    should_abort=None,
 ) -> tuple[dict[str, torch.Tensor] | None, str | None, PreparedSource, torch.Tensor]:
     """Run Mel-Band RoFormer and (when requested) substitute the chosen
     stem as the inference source. Returns ``(stems, error, source, wf)``.
@@ -234,6 +235,11 @@ def extract_and_select_upload_stem(
     Reused by initial setup AND by the swap path inside the session, so
     cache lookup / encode fallback / rollback semantics stay in one
     place.
+
+    ``should_abort`` (optional zero-arg callable) lets a stopping
+    session cut the pending-stems wait short (see
+    :func:`wait_for_pending_stems`); the abort maps to a normal
+    stem-extraction error, which the swap path turns into SwapFailed.
     """
     if source_mode is None:
         return None, None, source, waveform
@@ -270,11 +276,23 @@ def extract_and_select_upload_stem(
                 "stems_pending_wait fixture_name={} source_mode={} context={}",
                 fixture_name, source_mode, log_context or None,
             )
-            finished = wait_for_pending_stems(fixture_name)
+            finished = wait_for_pending_stems(
+                fixture_name, should_abort=should_abort,
+            )
             logger.info(
                 "stems_pending_wait_done fixture_name={} finished={}",
                 fixture_name, finished,
             )
+            if not finished and should_abort is not None and should_abort():
+                # Session is stopping (e.g. preempted): bail out of the
+                # swap instead of falling through to a duplicate inline
+                # separation on a stack that's about to be torn down.
+                return (
+                    None,
+                    "session stopping; aborted wait for background stems",
+                    source,
+                    waveform,
+                )
             upload_stems = audio_clip_stems(
                 fixture_name,
                 waveform=waveform,
@@ -1020,6 +1038,12 @@ class StreamingSession:
                     source_mode=new_stem_source_mode,
                     fixture_name=new_fixture_name,
                     log_context="swap",
+                    # We ARE the runner thread: a preempting connection
+                    # flips running=False and waits only 45 s for
+                    # teardown, so the pending-stems wait (300 s) must
+                    # be interruptible or the preemptor builds a second
+                    # stack next to this still-resident one.
+                    should_abort=lambda: not self.state.running,
                 )
             )
             if new_stem_error is not None and new_stem_source_mode != "full":

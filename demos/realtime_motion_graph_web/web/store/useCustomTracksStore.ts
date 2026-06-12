@@ -70,6 +70,27 @@ interface CustomTracksState {
   isServerResident: (name: string) => boolean;
 }
 
+
+// "processing" is a promise that a stem_assets / stem_failed push will
+// follow on the live session's socket. That promise can silently break:
+// the background rip's late push goes to whichever session is active
+// when it completes, so a preemption mid-rip (another tab took the pod)
+// strands the losing client on "processing" forever — no stem_failed,
+// no timeout. The watchdog makes the status honest: comfortably past
+// the server's own 300 s pending-stems wait budget, a still-"processing"
+// track flips to "failed" with a retry hint (re-swapping re-checks the
+// pod's disk cache, where a completed rip would have landed).
+const STEM_PROCESSING_TIMEOUT_MS = 6 * 60 * 1000;
+const stemWatchdogs = new Map<string, ReturnType<typeof setTimeout>>();
+
+function clearStemWatchdog(name: string): void {
+  const timer = stemWatchdogs.get(name);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    stemWatchdogs.delete(name);
+  }
+}
+
 export const useCustomTracksStore = create<CustomTracksState>((set, get) => ({
   names: [],
   tracks: new Map(),
@@ -107,7 +128,22 @@ export const useCustomTracksStore = create<CustomTracksState>((set, get) => ({
       };
     }),
 
-  setStemStatus: (name, status, error) =>
+  setStemStatus: (name, status, error) => {
+    clearStemWatchdog(name);
+    if (status === "processing") {
+      stemWatchdogs.set(
+        name,
+        setTimeout(() => {
+          stemWatchdogs.delete(name);
+          if (get().tracks.get(name)?.stemStatus !== "processing") return;
+          get().setStemStatus(
+            name,
+            "failed",
+            "Stem separation timed out — re-swap to the track to retry.",
+          );
+        }, STEM_PROCESSING_TIMEOUT_MS),
+      );
+    }
     set((s) => {
       const track = s.tracks.get(name);
       if (!track) return {};
@@ -118,7 +154,8 @@ export const useCustomTracksStore = create<CustomTracksState>((set, get) => ({
         ...(error ? { stemError: error } : { stemError: undefined }),
       });
       return { tracks: nextTracks };
-    }),
+    });
+  },
 
   setSourceMode: (name, sourceMode) =>
     set((s) => {
@@ -129,7 +166,8 @@ export const useCustomTracksStore = create<CustomTracksState>((set, get) => ({
       return { tracks: nextTracks };
     }),
 
-  setStems: (name, stems) =>
+  setStems: (name, stems) => {
+    clearStemWatchdog(name);
     set((s) => {
       const track = s.tracks.get(name);
       if (!track) return {};
@@ -141,7 +179,8 @@ export const useCustomTracksStore = create<CustomTracksState>((set, get) => ({
         stemError: undefined,
       });
       return { tracks: nextTracks };
-    }),
+    });
+  },
 
   resolveSourceMode: (name) => {
     return get().tracks.get(name)?.sourceMode;

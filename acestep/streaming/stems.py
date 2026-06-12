@@ -786,16 +786,43 @@ def finish_stems_pending(name: str) -> None:
         event.set()
 
 
-def wait_for_pending_stems(name: object, timeout: float = 300.0) -> bool:
+def wait_for_pending_stems(
+    name: object,
+    timeout: float = 300.0,
+    should_abort=None,
+) -> bool:
     """Block until the in-flight rip for ``name`` completes. Returns
-    True when no rip is pending or it finished within ``timeout``."""
+    True when no rip is pending or it finished within ``timeout``.
+
+    ``should_abort`` (optional zero-arg callable) is polled about once
+    a second; when it returns True the wait gives up early and returns
+    False. The swap path passes the session's stop flag here so a
+    preempting connection isn't stuck behind this wait: preemption only
+    grants 45 s of teardown (``_PREEMPT_TEARDOWN_TIMEOUT_S``) while this
+    timeout is 300 s — an uninterruptible wait would let the preemptor
+    build a second full model stack next to the still-resident old one,
+    the exact dual-stack OOM the single-session policy exists to
+    prevent. Note the events must NOT simply be set on session close:
+    waiters that wake to a cache miss start a duplicate inline
+    separation, which is worse.
+    """
     if not isinstance(name, str):
         return True
     with _PENDING_STEMS_LOCK:
         event = _PENDING_STEMS.get(name)
     if event is None:
         return True
-    return event.wait(timeout=timeout)
+    if should_abort is None:
+        return event.wait(timeout=timeout)
+    deadline = time.monotonic() + timeout
+    while True:
+        if should_abort():
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if event.wait(timeout=min(1.0, remaining)):
+            return True
 
 # ---------------------------------------------------------------------------
 # VRAM management for the separator
@@ -1057,7 +1084,18 @@ def _acquire_melband_model(device: torch.device) -> MelBandRoformer:
         if _melband_ram_cache_enabled():
             _MELBAND_RAM_CACHE[key] = model
     else:
-        model.to(device)
+        try:
+            model.to(device)
+        except Exception:
+            # A move that dies partway (e.g. CUDA OOM) leaves the cached
+            # instance half-on-GPU, and the caller's cleanup never runs
+            # because it never received the model. Pull it back to CPU
+            # and drain the device cache before surfacing the error.
+            try:
+                model.to("cpu")
+            finally:
+                _collect_device_cache(device)
+            raise
     return model
 
 

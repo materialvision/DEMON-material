@@ -366,19 +366,26 @@ def _trt_vae_profile_fits(
 
     Returns ``True``/``False`` when the profile verdict is known, or
     ``None`` when it can't be determined (engine not cached, API error)
-    — treat ``None`` as "behave as before" (use TRT).
+    — treat ``None`` as "behave as before" (use TRT). Every
+    optimization profile is checked: a multi-profile engine fits when
+    ANY profile covers the shape.
     """
     try:
         entry = _trt_vae_cache.get(os.path.abspath(engine_path))
         if entry is None or entry.get("engine") is None:
             return None
-        mn, _opt, mx = entry["engine"].get_tensor_profile_shape(tensor_name, 0)
-        if len(mn) != len(shape):
-            return False
-        return all(
-            int(mn[i]) <= int(shape[i]) <= int(mx[i])
-            for i in range(len(shape))
-        )
+        engine = entry["engine"]
+        num_profiles = int(getattr(engine, "num_optimization_profiles", 1) or 1)
+        for profile in range(num_profiles):
+            mn, _opt, mx = engine.get_tensor_profile_shape(tensor_name, profile)
+            if len(mn) != len(shape):
+                continue
+            if all(
+                int(mn[i]) <= int(shape[i]) <= int(mx[i])
+                for i in range(len(shape))
+            ):
+                return True
+        return False
     except Exception as exc:
         logger.warning(
             "trt_vae_profile_check_failed engine={} tensor={} error={}",

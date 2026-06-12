@@ -173,11 +173,23 @@ VRAM flat:
   session's cleanup evicts shared TRT VAE cache entries out from under a
   live one.
 
+  **Deployment ordering:** the server and web client must ship together.
+  A client built before `PREEMPTED_CLOSE_CODE` existed treats a 4001
+  close as unexpected and re-enters its reconnect loop, preempting the
+  newer session back — exactly the rebuild ping-pong the code prevents.
+  When the bundle is served from the pod itself the exposure is bounded
+  to already-open stale tabs, which remain a known hazard until
+  refreshed.
+
 Every phase emits a structured `stems_vram` log line
 (free/available/allocated/reserved GiB), plus `vram_parked` /
-`vram_unparked` from the context. Verify against real models with
-`scripts/verify_melband_vram.py`; unit coverage lives in
-`tests/unit/test_melband_vram_management.py`.
+`vram_unparked` from the context. Unit coverage lives in
+`tests/unit/test_model_context_parking.py` (park/restore + placement
+lock), `tests/unit/test_melband_park_policy.py` (park policy knobs +
+pending-stems registry), `tests/unit/test_pending_stems_gating.py`
+(swap gating), `tests/unit/test_ws_preemption.py` (preemption + 4001
+contract), `tests/unit/test_upload_encoder.py`, and
+`tests/unit/test_upload_two_phase.py`.
 
 ## Returned Stem Assets
 

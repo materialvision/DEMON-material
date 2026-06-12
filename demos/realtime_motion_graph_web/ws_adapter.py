@@ -171,6 +171,12 @@ _ACTIVE_SESSION: list = [None]  # [_ActiveSession | None]
 # web/hooks/useStartSession.ts) recognizes it and does NOT enter the
 # reconnect loop — reconnecting would just preempt the newer session
 # back and ping-pong the pod through full session rebuilds.
+#
+# DEPLOYMENT ORDERING: server and client must ship together. A client
+# built before this constant existed treats 4001 as an unexpected close
+# and reconnects, recreating the ping-pong. Stale already-open tabs are
+# the residual hazard until refreshed (docs/VOCALSTEM.md § one session
+# per pod).
 PREEMPTED_CLOSE_CODE = 4001
 
 # How long a preempting connection waits for the old session's teardown
@@ -669,10 +675,18 @@ def _handle_upload_track(
 
     try:
         _send_upload_ok(ws, packet, stems_pending=True)
-    except ConnectionClosed:
-        # Client is gone, but the track is persisted — finish the rip
-        # anyway so the on-disk packet is complete for later swaps.
-        pass
+    except Exception as exc:
+        # Client is gone (ConnectionClosed) or the ack failed some other
+        # way — either way the track is persisted, so finish the rip
+        # anyway. This except must stay BROAD: mark_stems_pending(name)
+        # already ran, and only the rip thread below pops the registry
+        # entry. An exception escaping here would leak the entry forever
+        # (every stem-source swap of this track stalls on the 300 s
+        # wait) and leave the upload encoder resident on the GPU.
+        if not isinstance(exc, ConnectionClosed):
+            logger.warning(
+                "upload_ok_send_failed name={} error={}", name, exc,
+            )
     logger.info(
         "upload_track_ready name={} bpm={} key={} duration_s={:.1f} stems=background",
         packet.name, packet.bpm, packet.key, packet.duration_s,

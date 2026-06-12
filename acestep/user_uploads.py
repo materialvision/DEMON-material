@@ -378,13 +378,19 @@ def persist_user_upload_stems(
     writes the stem WAVs + per-stem sidecars and re-saves the track
     metadata so its asset manifest advertises them.
 
-    Returns False (writing nothing) when the track dir no longer exists
-    — the session-end wipe (`wipe_user_uploads`) can race a long rip,
-    and recreating a wiped track's stems would leak them to the pod's
-    next renter.
+    Returns False when the track dir no longer exists — the session-end
+    wipe (`wipe_user_uploads`) can race a long rip, and recreating a
+    wiped track's stems would leak them to the pod's next renter. The
+    guard is checked before AND after the writes: the writes span a
+    multi-second window for long tracks and would otherwise recreate
+    files the wipe deleted mid-write. The post-write sentinel is the
+    phase-1 source WAV, which nothing in this function recreates; when
+    it's gone the whole track dir (including everything just written)
+    is removed again.
     """
     root = user_uploads_dir()
-    if not track_dir(root, name).is_dir():
+    written_root = track_dir(root, name)
+    if not written_root.is_dir():
         return False
     write_stem_wavs(root, name, stems=stems, sample_rate=sample_rate)
     for mode, source in sources.items():
@@ -414,4 +420,10 @@ def persist_user_upload_stems(
         key=key,
         time_signature=time_signature,
     )
+    if not source_audio_path(root, name).is_file():
+        # The session-end wipe ran while we were writing; our writes
+        # recreated parts of the track dir. Honor the wipe: remove
+        # everything again and report the rip as discarded.
+        shutil.rmtree(written_root, ignore_errors=True)
+        return False
     return True
