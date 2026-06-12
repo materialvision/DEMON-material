@@ -482,7 +482,13 @@ class ModelContext:
         return tensor.device.type == target_type
 
     def _ensure_silence_latent_on_device(self) -> None:
-        if self.silence_latent is not None:
+        # Under _placement_lock: cond_nodes calls this directly (outside
+        # _load_model_context), and an unsynchronized move here can race
+        # vram_parked's eviction of the same tensor. Reentrant-safe for
+        # the _restore_eager_locked caller, which already holds the lock.
+        if self.silence_latent is None:
+            return
+        with self._placement_lock:
             if not self._is_on_target_device(self.silence_latent, self.device):
                 self.silence_latent = self.silence_latent.to(self.device).to(self.dtype)
 

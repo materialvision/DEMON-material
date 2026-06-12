@@ -536,7 +536,6 @@ class VAEDecodeAudio(BaseNode):
             )
             trt_path = None
         if trt_path:
-            # logger.info("VAE decode via TRT")
             waveform = _trt_vae_decode(lat_bdt, trt_path, device)
         else:
             logger.info("VAE decode via PyTorch (no TRT engine found)")
