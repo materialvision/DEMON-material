@@ -41,6 +41,7 @@ from typing import IO
 
 WEB_DIR = Path(__file__).parent / "web"
 ROOT_DIR = Path(__file__).resolve().parents[2]
+SDK_DIR = ROOT_DIR / "packages" / "demon-client"
 
 
 def _harden_stdout() -> None:
@@ -96,16 +97,16 @@ def _resolve_npm() -> str:
     return npm
 
 
-def _ensure_node_modules(npm: str) -> None:
-    if (WEB_DIR / "node_modules").is_dir():
+def _ensure_node_modules(npm: str, package_dir: Path, label: str) -> None:
+    if (package_dir / "node_modules").is_dir():
         return
     print(
-        f"{_PREFIXES['web']} node_modules missing — running `npm install`...",
+        f"{_PREFIXES['web']} {label} node_modules missing - running `npm install`...",
         flush=True,
     )
-    rc = subprocess.call([npm, "install"], cwd=WEB_DIR)
+    rc = subprocess.call([npm, "install"], cwd=package_dir)
     if rc != 0:
-        sys.exit(f"npm install exited with {rc}")
+        sys.exit(f"npm install in {package_dir} exited with {rc}")
 
 
 def _local_backend_host(host: str) -> str:
@@ -210,7 +211,8 @@ def main() -> int:
 
     npm = _resolve_npm()
     if not args.no_install:
-        _ensure_node_modules(npm)
+        _ensure_node_modules(npm, WEB_DIR, "web")
+        _ensure_node_modules(npm, SDK_DIR, "@demon/client")
 
     backend_cmd = [
         sys.executable,

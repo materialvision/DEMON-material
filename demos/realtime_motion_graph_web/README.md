@@ -43,7 +43,8 @@ uv run python -u -m demos.realtime_motion_graph_web.run
 uv run python -u -m demos.realtime_motion_graph_web.run -- --accel eager
 ```
 
-First run installs `web/node_modules` automatically (Node.js 20+ required).
+First run installs the web and shared SDK `node_modules` automatically
+(Node.js 20+ required).
 Open `http://localhost:6660`. Next.js rewrites `/api/*`, `/fixtures/*`,
 `/loras/*`, and `/videos/*` to the backend at `:1318`; the WebSocket
 URL comes from `NEXT_PUBLIC_POD_BASE_URL` (set by the launcher).
