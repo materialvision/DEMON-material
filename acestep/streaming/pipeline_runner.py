@@ -138,6 +138,38 @@ class _RemotePlayheadClock:
         return self.sample() / SAMPLE_RATE
 
 
+def _finalized_segments(hwm, win_start: int, n: int):
+    """Pure region selection for emit-trim. Given the previous emit
+    high-water mark ``hwm`` (None on the first call), the frontier's new
+    ``win_start``, and the buffer length ``n``, return
+    ``(segments, new_hwm)`` where ``segments`` is the list of
+    ``(start, end)`` buffer ranges newly finalized as the frontier moved
+    from ``hwm`` to ``win_start``. Each sample is finalized exactly once
+    per lap (no gaps, no overlaps), so the client never plays an
+    un-covered region.
+
+      * first call (``hwm is None``) — nothing finalized behind us yet
+        (the handshake initial buffer covers earlier audio); just anchor.
+      * no advance (``win_start == hwm``) — gap-fill at the same spot;
+        nothing new.
+      * forward (``win_start > hwm``) — finalize ``[hwm, win_start]``.
+      * loop wrap (``win_start`` dropped by more than half the buffer) —
+        finalize the tail ``[hwm, n]`` then the head ``[0, win_start]``.
+      * small frontier retreat (lead shrank; ``win_start`` dropped a
+        little) — that region was already emitted; skip and KEEP ``hwm``
+        so forward progress resumes from the high-water mark (no re-emit,
+        no gap once the frontier passes it again). Distinguishing this
+        from a wrap is why the half-buffer threshold exists.
+    """
+    if hwm is None or win_start == hwm:
+        return [], win_start
+    if win_start > hwm:
+        return [(hwm, win_start)], win_start
+    if hwm - win_start > n // 2:
+        return [(hwm, n), (0, win_start)], win_start
+    return [], hwm
+
+
 class PipelineRunner:
     """The generic streaming loop over a :class:`GeneratorBackend`.
 
@@ -546,37 +578,20 @@ class PipelineRunner:
             )
 
     def _emit_finalized(self, buf, win_start: int) -> None:
-        """Emit (trim mode) the buffer region the frontier just finalized:
-        ``[_emit_hwm, win_start]``, read straight from the live buffer so
-        it carries the freshest crossfaded content and abuts the previous
-        emit (no seam). Sends each region once, ~lead ahead of the
-        playhead — same timing the full-window leading edge would have, so
-        latency is unchanged. Handles loop wrap as tail+head pieces; a
-        non-advancing frontier (gap-fill at the same position) emits
-        nothing. Copies the slice (the buffer is mutated by later writes)."""
-        n = buf.shape[0]
-        hwm = self._emit_hwm
-        if hwm is None:
-            # First emit of the session: nothing finalized behind us yet.
-            # (The handshake initial buffer already covers earlier audio.)
-            self._emit_hwm = win_start
-            return
-        if win_start == hwm:
-            return  # frontier didn't advance — no newly-final audio
-        if win_start > hwm:
-            seg = buf[hwm:win_start]
-            if seg.shape[0] > 0:
-                self.on_audio_ready(seg.copy(), hwm, win_start)
-        else:
-            # Loop wrap (or frontier reset to an earlier position): finalize
-            # the tail [hwm:end] then the head [0:win_start].
-            tail = buf[hwm:n]
-            if tail.shape[0] > 0:
-                self.on_audio_ready(tail.copy(), hwm, n)
-            head = buf[0:win_start]
-            if head.shape[0] > 0:
-                self.on_audio_ready(head.copy(), 0, win_start)
-        self._emit_hwm = win_start
+        """Emit (trim mode) the buffer region(s) the frontier just
+        finalized, read straight from the live buffer so they carry the
+        freshest crossfaded content and abut the previous emit (no seam).
+        Each region goes out once, ~lead ahead of the playhead — same
+        timing the full-window leading edge would have, so latency is
+        unchanged. Region selection is the pure
+        :func:`_finalized_segments`; copy each slice (the buffer is
+        mutated by later writes)."""
+        segs, self._emit_hwm = _finalized_segments(
+            self._emit_hwm, int(win_start), buf.shape[0],
+        )
+        for ss, se in segs:
+            if se > ss:
+                self.on_audio_ready(buf[ss:se].copy(), ss, se)
 
     def _playhead_seconds_now(self) -> float:
         return self._playhead_clock.seconds()
