@@ -189,24 +189,70 @@ def _trt_vae_decode(
     return audio_buf.clone().to(torch.float32)
 
 
-def _trt_vae_encode(
-    audio_bct: torch.Tensor, engine_path: str, device: torch.device
-) -> torch.Tensor:
-    """Encode audio [B, 2, samples] -> latents [B, D, T] via TRT.
+# Latent frame geometry shared by every ACE-Step VAE engine: 48 kHz
+# audio, 25 latent frames per second -> 1920 samples per latent frame.
+_VAE_SAMPLES_PER_FRAME = 1920
 
-    The ONNX export produces moments [B, 128, T] (mean+logvar concatenated).
-    We split and sample: latent = mean + exp(0.5 * logvar) * noise,
-    matching the VAE's latent_dist.sample() behavior.
+# Per-side context margin (in latent frames) for chunked VAE encode.
+# Empirically the Oobleck encoder's receptive field is under 8 frames:
+# with an 8-frame margin a chunked encode is bit-exact (fp16) against
+# the full-engine encode — see
+# scripts/benchmarks/validate_chunked_vae_encode.py. 64 frames (2.56 s)
+# keeps a comfortable safety factor at negligible cost.
+_VAE_ENCODE_CHUNK_MARGIN_FRAMES = 64
+
+
+def _plan_encode_chunks(
+    n_samples: int, max_samples: int, min_samples: int,
+) -> list[tuple[int, int, int, int]]:
+    """Chunk plan for an encode input longer than the engine max.
+
+    Returns ``(ctx_start, ctx_end, core_start, core_end)`` tuples in
+    latent frames. ``ctx_*`` is the audio span fed to the engine
+    (core plus receptive-field margin); ``core_*`` is the span whose
+    moments are kept. Cores tile ``[0, total_frames)`` exactly. Every
+    context span fits the engine profile: at most ``max_samples`` and
+    at least ``min_samples`` long (the tail chunk's left context is
+    extended when needed — extra frames are trimmed with the margin).
     """
-    entry = _get_trt_vae(engine_path, device)
+    spf = _VAE_SAMPLES_PER_FRAME
+    margin = _VAE_ENCODE_CHUNK_MARGIN_FRAMES
+    total_frames = (n_samples + spf - 1) // spf
+    core_frames = max_samples // spf - 2 * margin
+    if core_frames <= 0:
+        raise RuntimeError(
+            f"TRT VAE encode engine max profile ({max_samples} samples) "
+            f"is too small for chunked encode"
+        )
+    min_ctx_frames = (min_samples + spf - 1) // spf
+    plan: list[tuple[int, int, int, int]] = []
+    core_start = 0
+    while core_start < total_frames:
+        core_end = min(core_start + core_frames, total_frames)
+        ctx_start = max(0, core_start - margin)
+        ctx_end = min(total_frames, core_end + margin)
+        # The tail chunk can fall below the engine's min profile shape;
+        # extend the left context (trimmed away by the caller) to stay
+        # within range. n_samples > max_samples >= min_samples
+        # guarantees enough audio exists to the left.
+        if ctx_end - ctx_start < min_ctx_frames:
+            ctx_start = max(0, ctx_end - min_ctx_frames)
+        plan.append((ctx_start, ctx_end, core_start, core_end))
+        core_start = core_end
+    return plan
+
+
+def _trt_vae_encode_moments(
+    inp: torch.Tensor, entry: dict, engine_path: str
+) -> torch.Tensor:
+    """Single-shot TRT encode of audio [B, 2, samples] -> moments [B, 128, T].
+
+    ``inp`` must already be on-device, contiguous, and within the
+    engine's profile range.
+    """
     ctx = entry["context"]
     stream = _get_trt_stream()
-
     dtypes = entry["tensor_dtypes"]
-    inp = audio_bct.to(device=device, dtype=dtypes.get("audio", torch.float32)).contiguous()
-
-    # Release PyTorch's unused reserved VRAM before TRT encode.
-    torch.cuda.empty_cache()
 
     # Log structured TRT-VAE-encode failures from the deepest call site so
     # the JSON record carries input_shape + engine_path. The surrounding
@@ -238,7 +284,7 @@ def _trt_vae_encode(
 
     out_shape = tuple(ctx.get_tensor_shape("moments"))
     moments_dtype = dtypes.get("moments", torch.float32)
-    moments_buf = torch.empty(out_shape, dtype=moments_dtype, device=device)
+    moments_buf = torch.empty(out_shape, dtype=moments_dtype, device=inp.device)
     if not ctx.set_tensor_address("moments", moments_buf.data_ptr()):
         logger.error(
             "trt_vae_encode_rejected_output_address engine={}", engine_path,
@@ -252,9 +298,65 @@ def _trt_vae_encode(
         )
         raise RuntimeError("TRT VAE encode failed")
     stream.synchronize()
+    return moments_buf
+
+
+def _trt_vae_encode(
+    audio_bct: torch.Tensor, engine_path: str, device: torch.device
+) -> torch.Tensor:
+    """Encode audio [B, 2, samples] -> latents [B, D, T] via TRT.
+
+    The ONNX export produces moments [B, 128, T] (mean+logvar concatenated).
+    We split and sample: latent = mean + exp(0.5 * logvar) * noise,
+    matching the VAE's latent_dist.sample() behavior.
+
+    Inputs longer than the engine's max profile shape are encoded in
+    overlapping chunks and stitched at latent-frame granularity: each
+    chunk carries ``_VAE_ENCODE_CHUNK_MARGIN_FRAMES`` of audio context
+    per side, and only the interior core frames are kept. This lets a
+    small (e.g. 60 s) encode engine serve arbitrarily long sources, so
+    the profile manager never has to swap in the 120/240 s encode
+    engines and their multi-GB workspace reservations.
+    """
+    entry = _get_trt_vae(engine_path, device)
+
+    dtypes = entry["tensor_dtypes"]
+    inp = audio_bct.to(device=device, dtype=dtypes.get("audio", torch.float32)).contiguous()
+
+    # Release PyTorch's unused reserved VRAM before TRT encode.
+    torch.cuda.empty_cache()
+
+    min_dims, _, max_dims = entry["engine"].get_tensor_profile_shape("audio", 0)
+    max_samples = int(max_dims[-1])
+    min_samples = int(min_dims[-1])
+    n_samples = inp.shape[-1]
+
+    if n_samples <= max_samples:
+        moments = _trt_vae_encode_moments(inp, entry, engine_path)
+    else:
+        spf = _VAE_SAMPLES_PER_FRAME
+        plan = _plan_encode_chunks(n_samples, max_samples, min_samples)
+        total_frames = (n_samples + spf - 1) // spf
+        logger.info(
+            "trt_vae_encode_chunked samples={} engine_max={} chunks={}",
+            n_samples, max_samples, len(plan),
+        )
+        pieces: list[torch.Tensor] = []
+        for ctx_start, ctx_end, core_start, core_end in plan:
+            seg = inp[..., ctx_start * spf : min(ctx_end * spf, n_samples)]
+            m = _trt_vae_encode_moments(seg.contiguous(), entry, engine_path)
+            keep_from = core_start - ctx_start
+            if core_end >= total_frames:
+                # Tail chunk: keep whatever the engine produced past the
+                # margin so a partial trailing frame follows the engine's
+                # own rounding rather than our ceil().
+                pieces.append(m[..., keep_from:])
+            else:
+                pieces.append(m[..., keep_from : keep_from + (core_end - core_start)])
+        moments = torch.cat(pieces, dim=-1)
 
     # Split moments into mean and logvar, sample
-    mean, logvar = moments_buf.float().chunk(2, dim=1)  # [B, 64, T] each
+    mean, logvar = moments.float().chunk(2, dim=1)  # [B, 64, T] each
     std = torch.exp(0.5 * logvar)
     latent = mean + std * torch.randn_like(mean)
     return latent
@@ -394,6 +496,53 @@ def _trt_vae_profile_fits(
         return None
 
 
+def _trt_vae_encode_fits_or_chunkable(engine_path: str, shape) -> Optional[bool]:
+    """Whether the cached encode engine can serve ``shape``, directly or chunked.
+
+    Chunk-aware variant of :func:`_trt_vae_profile_fits` for the encode
+    path. A samples dim above the profile max is NOT a mismatch here:
+    :func:`_trt_vae_encode` serves it via overlapping chunks, which is
+    the whole point of pinning the small encode engine. Only
+    non-chunkable mismatches reject — rank, batch/channel out of range,
+    or samples below the profile min. Same ``None`` semantics as
+    ``_trt_vae_profile_fits`` (engine not cached, API error → "behave
+    as before", i.e. use TRT).
+    """
+    try:
+        entry = _trt_vae_cache.get(os.path.abspath(engine_path))
+        if entry is None or entry.get("engine") is None:
+            return None
+        engine = entry["engine"]
+        num_profiles = int(getattr(engine, "num_optimization_profiles", 1) or 1)
+        for profile in range(num_profiles):
+            mn, _opt, mx = engine.get_tensor_profile_shape("audio", profile)
+            if len(mn) != len(shape):
+                continue
+            if not all(
+                int(mn[i]) <= int(shape[i]) <= int(mx[i])
+                for i in range(len(shape) - 1)
+            ):
+                continue
+            n_samples = int(shape[-1])
+            if n_samples < int(mn[-1]):
+                continue
+            if n_samples <= int(mx[-1]):
+                return True
+            # Above the profile max: chunkable iff the max window leaves
+            # room for core frames beyond the two per-side margins (the
+            # same bound _plan_encode_chunks enforces).
+            max_frames = int(mx[-1]) // _VAE_SAMPLES_PER_FRAME
+            if max_frames > 2 * _VAE_ENCODE_CHUNK_MARGIN_FRAMES:
+                return True
+        return False
+    except Exception as exc:
+        logger.warning(
+            "trt_vae_encode_fit_check_failed engine={} error={}",
+            engine_path, exc,
+        )
+        return None
+
+
 def _find_best_vae_engine(component: str) -> Optional[str]:
     """Return a TRT VAE engine path for *component* if one was preloaded.
 
@@ -465,12 +614,15 @@ class VAEEncodeAudio(BaseNode):
         if (
             trt_path
             and handler.vae is not None
-            and _trt_vae_profile_fits(trt_path, "audio", tuple(waveform.shape)) is False
+            and _trt_vae_encode_fits_or_chunkable(trt_path, tuple(waveform.shape))
+            is False
         ):
-            # The cached engine belongs to another session and its
-            # profile can't take this input (e.g. a >60 s upload vs the
-            # live session's 60 s engine). This handler carries an eager
-            # VAE — use it instead of letting TRT reject the shape.
+            # The cached engine can't take this input directly OR via
+            # the chunked encode path (rank/batch/channel mismatch, or
+            # input below the profile min). This handler carries an
+            # eager VAE — use it instead of letting TRT reject the
+            # shape. Inputs that merely exceed the profile max stay on
+            # TRT: _trt_vae_encode chunks them.
             logger.info(
                 "vae_encode_trt_profile_mismatch input_shape={} engine={} "
                 "fallback=eager",
