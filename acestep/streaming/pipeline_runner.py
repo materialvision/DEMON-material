@@ -593,6 +593,16 @@ class PipelineRunner:
             if se > ss:
                 self.on_audio_ready(buf[ss:se].copy(), ss, se)
 
+    def _reset_emit_trim_frontier(self) -> None:
+        """Drop trim's monotonic frontier after an untrimmed emission.
+
+        Loop-band playback deliberately falls back to full-window sends.
+        That path is not part of trim's one-forward-frontier invariant, so
+        resuming from the old HWM can produce a large redundant catch-up
+        slice. Anchor the next trimmed tick at its own frontier instead.
+        """
+        self._emit_hwm = None
+
     def _playhead_seconds_now(self) -> float:
         return self._playhead_clock.seconds()
 
@@ -924,6 +934,8 @@ class PipelineRunner:
                             self._emit_finalized(current, win_start)
                         else:
                             self.on_audio_ready(patched, win_start, win_end)
+                            if self._emit_trim:
+                                self._reset_emit_trim_frontier()
                         # Fold this write's wall gap into the adaptive lead
                         # state. One call per successful write — real
                         # generation OR gap-fill; the band-wrap second render

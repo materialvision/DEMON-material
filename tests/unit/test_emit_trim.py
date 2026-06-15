@@ -8,8 +8,9 @@ is finalized exactly once (no gaps -> no raw-source bleed, no overlaps
 must not be mistaken for a loop WRAP (which would re-emit ~the whole
 buffer).
 """
+import numpy as np
 
-from acestep.streaming.pipeline_runner import _finalized_segments
+from acestep.streaming.pipeline_runner import PipelineRunner, _finalized_segments
 
 
 def test_first_call_anchors_without_emitting():
@@ -72,3 +73,22 @@ def test_one_lap_with_wrap_covers_every_sample_exactly_once():
     # overlaps (no wasted re-sends) across the lap.
     bad = [i for i, c in enumerate(count) if c != 1]
     assert not bad, f"{len(bad)} samples not covered exactly once, e.g. {bad[:10]}"
+
+
+def test_trim_resume_after_untrimmed_fallback_reanchors_frontier():
+    runner = PipelineRunner.__new__(PipelineRunner)
+    runner._emit_hwm = 500
+    calls = []
+    runner.on_audio_ready = lambda wav, ss, se: calls.append((ss, se, wav.copy()))
+    buf = np.arange(1000, dtype=np.float32).reshape(1000, 1)
+
+    runner._reset_emit_trim_frontier()
+    runner._emit_finalized(buf, 540)
+
+    assert calls == []
+    assert runner._emit_hwm == 540
+
+    runner._emit_finalized(buf, 580)
+
+    assert [(ss, se) for ss, se, _ in calls] == [(540, 580)]
+    np.testing.assert_array_equal(calls[0][2], buf[540:580])
