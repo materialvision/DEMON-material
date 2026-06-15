@@ -390,6 +390,24 @@ class PipelineRunner:
         # quiet — drain the extra rather than pinning latency forever).
         self._transport_report_stale_s = 10.0
 
+        # ----- Emit trim (experimental wire-redundancy reduction) ----------
+        # The frontier writes 0.36s windows ~0.04s apart, so every region is
+        # re-sent ~9x as the frontier sweeps it — but all those writes finish
+        # ~lead BEFORE the playhead reaches the region, so only the LAST
+        # (freshest) one is ever heard. With trim on, we still decode+write
+        # the full window into the buffer (refinement + receptive field
+        # intact), but TRANSMIT only the newly-finalized region the frontier
+        # just passed: [_emit_hwm, win_start], read straight from the buffer.
+        # Each region goes out once, at its freshest, ~lead ahead of the
+        # playhead — identical latency (generation/lead are untouched; this
+        # is purely a transmission change), ~Nx less wire. Contiguous buffer
+        # slices => no new seams. Off by default; opt in for measurement.
+        self._emit_trim = (
+            os.environ.get("DEMON_SLICE_EMIT_TRIM", "") not in ("", "0")
+        )
+        # Highest sample whose finalized content we've already emitted.
+        self._emit_hwm = None
+
     # ---- delegates kept for the session's runner_holder contract ----------
 
     def mark_hint_dirty(self) -> None:
@@ -526,6 +544,39 @@ class PipelineRunner:
                 self._transport_extra_s + deficit,
                 self._transport_extra_cap_s,
             )
+
+    def _emit_finalized(self, buf, win_start: int) -> None:
+        """Emit (trim mode) the buffer region the frontier just finalized:
+        ``[_emit_hwm, win_start]``, read straight from the live buffer so
+        it carries the freshest crossfaded content and abuts the previous
+        emit (no seam). Sends each region once, ~lead ahead of the
+        playhead — same timing the full-window leading edge would have, so
+        latency is unchanged. Handles loop wrap as tail+head pieces; a
+        non-advancing frontier (gap-fill at the same position) emits
+        nothing. Copies the slice (the buffer is mutated by later writes)."""
+        n = buf.shape[0]
+        hwm = self._emit_hwm
+        if hwm is None:
+            # First emit of the session: nothing finalized behind us yet.
+            # (The handshake initial buffer already covers earlier audio.)
+            self._emit_hwm = win_start
+            return
+        if win_start == hwm:
+            return  # frontier didn't advance — no newly-final audio
+        if win_start > hwm:
+            seg = buf[hwm:win_start]
+            if seg.shape[0] > 0:
+                self.on_audio_ready(seg.copy(), hwm, win_start)
+        else:
+            # Loop wrap (or frontier reset to an earlier position): finalize
+            # the tail [hwm:end] then the head [0:win_start].
+            tail = buf[hwm:n]
+            if tail.shape[0] > 0:
+                self.on_audio_ready(tail.copy(), hwm, n)
+            head = buf[0:win_start]
+            if head.shape[0] > 0:
+                self.on_audio_ready(head.copy(), 0, win_start)
+        self._emit_hwm = win_start
 
     def _playhead_seconds_now(self) -> float:
         return self._playhead_clock.seconds()
@@ -847,7 +898,17 @@ class PipelineRunner:
                         # Backend handler uses it to delta-encode against
                         # its client mirror; standalone callers can
                         # ignore the args.
-                        self.on_audio_ready(patched, win_start, win_end)
+                        #
+                        # Emit trim: send only the region the frontier's
+                        # leading edge has finalized since the last emit
+                        # (read from the just-updated buffer), not the whole
+                        # overlapping window. Falls back to the full window
+                        # while a loop band is armed (the band-wrap second
+                        # render below keeps the legacy path). See __init__.
+                        if self._emit_trim and band_end_sample is None:
+                            self._emit_finalized(current, win_start)
+                        else:
+                            self.on_audio_ready(patched, win_start, win_end)
                         # Fold this write's wall gap into the adaptive lead
                         # state. One call per successful write — real
                         # generation OR gap-fill; the band-wrap second render
