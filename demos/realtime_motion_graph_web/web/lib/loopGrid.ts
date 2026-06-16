@@ -1,11 +1,13 @@
-// Snap resolutions for the playback loop region ("brace"). Declared once
-// here and shared by the editor (WaveformScrubBox), the performance store,
-// and config import/export so the set never drifts out of sync between the
-// three. Coarse→fine.
+// Snap resolutions for the playback loop region ("brace"). The type, the
+// coarse→fine order, and the runtime guard now live in @demon/client/config
+// (shared with config import/export so the set never drifts). Re-exported
+// here so the editor (WaveformScrubBox) and the performance store call sites
+// are unchanged. LOOP_GRID_LABEL is UI display text, kept local.
 
-export type LoopGridRes = "bar" | "half" | "beat" | "eighth";
+import type { LoopGridRes } from "@demon/client";
 
-export const LOOP_GRID_ORDER: LoopGridRes[] = ["bar", "half", "beat", "eighth"];
+export { LOOP_GRID_ORDER, isLoopGridRes } from "@demon/client";
+export type { LoopGridRes } from "@demon/client";
 
 export const LOOP_GRID_LABEL: Record<LoopGridRes, string> = {
   bar: "Bar",
@@ -13,9 +15,3 @@ export const LOOP_GRID_LABEL: Record<LoopGridRes, string> = {
   beat: "Beat",
   eighth: "⅛",
 };
-
-/** Runtime guard — config JSON is operator-editable, so an imported grid
- *  value has to be validated before it's trusted as a `LoopGridRes`. */
-export function isLoopGridRes(v: unknown): v is LoopGridRes {
-  return typeof v === "string" && (LOOP_GRID_ORDER as string[]).includes(v);
-}

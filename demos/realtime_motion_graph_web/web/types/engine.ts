@@ -1,5 +1,41 @@
 // Slider definitions and engine-side knobs.
 
+// The config-semantic enums (DCW mode/wavelet, RCFG mode, time signature)
+// now live in @demon/client/config so every frontend shares one source of
+// truth. Re-exported here so the app's existing `@/types/engine` call sites
+// are unchanged. UI-only metadata (SLIDER_META, keyscales, display labels)
+// stays below.
+import {
+  DCW_MODES,
+  DCW_WAVELETS,
+  DEFAULT_TIME_SIGNATURE,
+  isDcwMode,
+  isDcwWavelet,
+  isRcfgMode,
+  isTimeSignature,
+  RCFG_MODES,
+  VALID_TIME_SIGNATURES,
+} from "@demon/client";
+import type {
+  DcwMode,
+  DcwWavelet,
+  RcfgMode,
+  TimeSignature,
+} from "@demon/client";
+
+export {
+  DCW_MODES,
+  DCW_WAVELETS,
+  DEFAULT_TIME_SIGNATURE,
+  isDcwMode,
+  isDcwWavelet,
+  isRcfgMode,
+  isTimeSignature,
+  RCFG_MODES,
+  VALID_TIME_SIGNATURES,
+};
+export type { DcwMode, DcwWavelet, RcfgMode, TimeSignature };
+
 export interface SliderMeta {
   /** Maximum value (slider top). */
   max: number;
@@ -115,36 +151,6 @@ for (let slot = 1; slot <= MANUAL_SLOT_PREREG; slot++) {
   };
 }
 
-export const DCW_MODES = ["low", "high", "double", "pix"] as const;
-export const DCW_WAVELETS = ["haar", "db4", "sym8", "db8"] as const;
-export type DcwMode = (typeof DCW_MODES)[number];
-export type DcwWavelet = (typeof DCW_WAVELETS)[number];
-export function isDcwMode(v: unknown): v is DcwMode {
-  return typeof v === "string" && (DCW_MODES as readonly string[]).includes(v);
-}
-export function isDcwWavelet(v: unknown): v is DcwWavelet {
-  return (
-    typeof v === "string" && (DCW_WAVELETS as readonly string[]).includes(v)
-  );
-}
-
-// RCFG (Residual Classifier-Free Guidance) modes. "off" disables APG
-// entirely on the wire (turbo default — no guidance, no extra forwards).
-// "initialize" runs the uncond pass only at step 0 per slot, caches the
-// velocity, reuses it for the slot's remaining steps. "self" skips the
-// uncond forward entirely; virtual ``v_uncond ≈ initial_noise``
-// (flow-matching identity with ``x0_uncond ≈ 0``). See
-// acestep/engine/stream.py. The engine also supports "full" (standard
-// two-pass CFG, 2x cost), but it's intentionally NOT in the demo
-// dropdown — turbo is CFG-distilled and an externally-driven full CFG
-// against an empty-prompt uncond doesn't produce the right perceptual
-// direction. Test scripts can still set ``rcfg_mode="full"`` directly.
-export const RCFG_MODES = ["off", "initialize", "self"] as const;
-export type RcfgMode = (typeof RCFG_MODES)[number];
-export function isRcfgMode(v: unknown): v is RcfgMode {
-  return typeof v === "string" && (RCFG_MODES as readonly string[]).includes(v);
-}
-
 // Capped at 1.8 (was 2.0). Operator finding: most LoRAs we ship turn
 // to noise above ~1.7 (e.g. v5/discofunk noise at 2.0, hardrock noise
 // at 2.0). 1.8 still leaves room above the natural sweet spot for
@@ -199,15 +205,6 @@ export const VALID_KEYSCALES: string[] = (() => {
   return out;
 })();
 
-/** Time signatures the model accepts. Mirrors
- *  ``acestep.constants.VALID_TIME_SIGNATURES`` (``[2, 3, 4, 6]``). The
- *  encoder takes the value as a string in
- *  ``Session.encode_text(time_signature=...)``, where it gets baked into
- *  the prompt as ``- timesignature: <value>``. We carry the strings
- *  end-to-end so there's no int/string round-tripping at the wire. */
-export const VALID_TIME_SIGNATURES = ["2", "3", "4", "6"] as const;
-export type TimeSignature = (typeof VALID_TIME_SIGNATURES)[number];
-
 /** Display labels for the dropdowns. Numerators map to the conventional
  *  meter notation (4 → 4/4, 6 → 6/8). The wire value stays the bare
  *  numerator string the encoder expects. */
@@ -218,9 +215,3 @@ export const TIME_SIGNATURE_LABELS: Record<TimeSignature, string> = {
   "6": "6/8",
 };
 
-export const DEFAULT_TIME_SIGNATURE: TimeSignature = "4";
-
-export function isTimeSignature(v: unknown): v is TimeSignature {
-  return typeof v === "string"
-    && (VALID_TIME_SIGNATURES as readonly string[]).includes(v);
-}

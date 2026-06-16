@@ -10,6 +10,7 @@ import { noteSliceLead } from "@/engine/sliceLeadTracker";
 import { PREEMPTED_CLOSE_CODE, RemoteBackend, SAMPLE_RATE, SLICE_FLAG_DELTA } from "@demon/client";
 import { getApiKey, getClientId } from "@/engine/rtmgConfig";
 import { WsReconnector } from "@demon/client";
+import { rtmgConfigToSessionConfig } from "@demon/client";
 import {
   applyLoraCapWithServerSync,
   getConfig,
@@ -102,62 +103,36 @@ function buildConfig(
 ): SessionConfig {
   const perf = usePerformanceStore.getState();
   const lora = useLoraStore.getState();
-  const cfg = getConfig().engine;
   const enabledLoras = Array.from(lora.enabled);
   const loraStrengths: Record<string, number> = {};
   for (const id of enabledLoras) {
     const v = lora.strengths[id];
     if (typeof v === "number") loraStrengths[id] = v;
   }
-  // Engine fields come from web/public/config.json (overridable per
-  // installation). Default depth=4 over depth=8: ~½ VRAM, ~⅛ param
-  // latency, ~11.3/s vs 12.3/s throughput on a 32 GB card. The VRAM
-  // headroom is what unlocks longer audio uploads (cap lives in
-  // loadFixture.ts; depth=4 makes future bumps VRAM-safe).
   const custom = useCustomTracksStore.getState();
+  // Lets the server look up a precomputed sidecar (BPM, key, source
+  // latent, context_latent). Absent / unknown name -> live path.
   const sourceMode = custom.resolveSourceMode(fixtureName);
   // Optional opaque per-browser identifier from the host (the demo's
   // standalone shell wires no getter, so this is null and the field is
   // omitted; demon-public-demo wires PostHog's distinct_id).
   const clientId = getClientId();
-  return {
-    telemetry_version: 1,
-    sde: cfg.sde,
-    lora: cfg.lora,
-    depth: cfg.depth,
-    vae_window: cfg.vae_window,
-    crop: cfg.crop,
-    steps: cfg.steps,
-    fast_vae: cfg.fast_vae,
-    walk_window: cfg.walk_window ?? false,
-    walk_window_s: cfg.walk_window_s ?? 60,
-    lead_floor_s: cfg.lead_floor_s,
-    lead_ceiling_s: cfg.lead_ceiling_s,
-    lead_release_tau_s: cfg.lead_release_tau_s,
-    enabled_loras: enabledLoras,
-    prompt: perf.promptA,
-    prompt_b: perf.promptB,
-    lora_strengths: loraStrengths,
-    // Lets the server look up a precomputed sidecar (BPM, key, source
-    // latent, context_latent). Absent / unknown name -> live path.
-    // Key is intentionally not sent: the server's session-init resolver
-    // ignores config.key anyway and uses sidecar.key for known fixtures
-    // (or CNN-detects on a miss). The result echoes back in `ready.key`
-    // and `setDetected` writes it into the dropdown. Sending the
-    // dropdown's stale value here would only re-introduce the
-    // override-wins-over-sidecar regression.
-    fixture_name: fixtureName,
-    ...(sourceMode ? { stem_source_mode: sourceMode } : {}),
-    // Only set when the target pod advertised it can load this fixture
-    // server-side (capability-gated by the caller via
-    // probeServerSideFixtures). When true the pod reads the waveform
-    // from its own /fixtures cache and the client sends no audio frame
-    // (saves the ~20 MB / ~11 s round-trip). When false we fall back to
-    // the unchanged upload path, so this is safe on a mixed fleet in
-    // any deploy/merge order.
-    use_server_fixture: useServerFixture,
-    ...(clientId ? { client_id: clientId } : {}),
-  };
+  // The RtmgConfig → wire SessionConfig mapping lives in @demon/client so
+  // every frontend negotiates an identical session. Engine fields come from
+  // web/public/config.json (overridable per installation). `use_server_fixture`
+  // is set only when the pod advertised it can load this fixture server-side
+  // (capability-gated upstream); when true the pod reads the waveform from
+  // its own /fixtures cache and the client sends no audio frame.
+  return rtmgConfigToSessionConfig(getConfig(), {
+    enabledLoras,
+    loraStrengths,
+    promptA: perf.promptA,
+    promptB: perf.promptB,
+    fixtureName,
+    stemSourceMode: sourceMode,
+    useServerFixture,
+    clientId,
+  });
 }
 
 /**

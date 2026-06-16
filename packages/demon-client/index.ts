@@ -15,6 +15,11 @@ export * from "./types/knobs";
 // Client view-models + binary-framing constants.
 export * from "./types/protocol";
 
+// Operator-defaults config.json: portable schema + pure transforms + loader
+// + wire mapping. Client-side, hand-authored — distinct from the generated
+// /api/knobs and /api/protocol contracts above. See ./config and README.
+export * from "./config";
+
 // WebSocket session client (binary slice stream, swap/stem state
 // machines, typed senders).
 export { RemoteBackend, float16ArrayToFloat32 } from "./protocol";

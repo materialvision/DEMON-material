@@ -99,6 +99,29 @@ CustomEvents (`ready`, `slice`, `params`, `params_echo`, `swap_ready`,
 seams: `RemoteBackendOptions.promptTransform` (e.g. LoRA trigger
 prefixing) and `AudioPlayerOptions.loudnessConfig` / `workletUrl`.
 
+## Operator defaults (`config.json`) — client-side, not a manifest
+
+Separate from the two backend manifests above: `config.json` is a
+hand-authored, per-installation file of *startup defaults* (prompts, knob
+start values, enabled LoRAs, engine/session fields, plus per-client UI
+blocks). The portable schema + pure transforms live in `config/` and are
+shared across frontends; import them from the package root:
+
+- `loadConfig(baseUrl?)` → merge `config.json` onto `DEFAULT_CONFIG`.
+- `rtmgConfigToSessionConfig(cfg, runtime)` → the config → handshake
+  `SessionConfig` mapping. Use it to start your session identically to
+  every other frontend.
+- `applyConfigToState` / `captureConfigFromState` → neutral apply/capture
+  adapters; write a thin wrapper from your own state to the snapshot shape
+  (the SDK never touches your store).
+- `serializeConfig` → **preserve-unknown on write**: re-emit top-level keys
+  you read but don't model, so a config another client authored isn't
+  silently truncated when you export.
+
+Unlike the manifests, this file is hand-edited (comment-heavy `_comment` /
+`_*_help` keys): read ignores unknown keys, write preserves them, and a
+`version` field is present from day one.
+
 ## Reference implementations in the demo app
 
 - `demos/realtime_motion_graph_web/web/components/Performance/DynamicKnobPanel.tsx` — a complete control
@@ -121,6 +144,9 @@ prefixing) and `AudioPlayerOptions.loudnessConfig` / `workletUrl`.
 - Binary framing (the `<II` PCM header, the 23-byte slice header) is
   hand-coded by design; it lives in `packPcmFrame` / the slice decoder
   and is documented per-entry in the registry, not typed.
+- `config/` is the operator-defaults `config.json` schema + pure transforms
+  (the one hand-authored, client-side contract — not generated). Keep it
+  pure: no store/DOM imports cross into it, so M4L / VST can consume it.
 
 ## Agent-driven control without a browser
 
