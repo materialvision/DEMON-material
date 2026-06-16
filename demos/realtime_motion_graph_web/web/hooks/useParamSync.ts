@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 
+import { noteSliceLead, takeSliceLead } from "@/engine/sliceLeadTracker";
 import { useLoraStore } from "@/store/useLoraStore";
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
@@ -81,7 +82,21 @@ export function useParamSync() {
       // Playback position is *seconds* (raw audio.positionSec), not a 0..1
       // ratio. The server uses absolute time for curve sampling.
       const playbackSec = session.player.positionSec;
-      session.remote.sendParams(raw, playbackSec);
+      // Worst slice landing lead since the previous tick (null when no
+      // slice arrived). The server widens its playback lead until these
+      // stay positive — see sliceLeadTracker.ts.
+      const sliceLead = takeSliceLead();
+      const sent = session.remote.sendParams(
+        raw,
+        playbackSec,
+        sliceLead ?? undefined,
+      );
+      // sendParams can drop the tick (socket not open, or backpressure gate)
+      // without touching the wire. takeSliceLead() already cleared the worst
+      // lead, so re-arm it — otherwise a negative sample vanishes locally and
+      // the server never widens its lead. noteSliceLead folds it back in with
+      // Math.min, so it still loses to a worse lead noted before the next tick.
+      if (!sent && sliceLead !== null) noteSliceLead(sliceLead);
     }, TICK_MS);
 
     return () => {
