@@ -138,6 +138,38 @@ class _RemotePlayheadClock:
         return self.sample() / SAMPLE_RATE
 
 
+def _finalized_segments(hwm, win_start: int, n: int):
+    """Pure region selection for emit-trim. Given the previous emit
+    high-water mark ``hwm`` (None on the first call), the frontier's new
+    ``win_start``, and the buffer length ``n``, return
+    ``(segments, new_hwm)`` where ``segments`` is the list of
+    ``(start, end)`` buffer ranges newly finalized as the frontier moved
+    from ``hwm`` to ``win_start``. Each sample is finalized exactly once
+    per lap (no gaps, no overlaps), so the client never plays an
+    un-covered region.
+
+      * first call (``hwm is None``) — nothing finalized behind us yet
+        (the handshake initial buffer covers earlier audio); just anchor.
+      * no advance (``win_start == hwm``) — gap-fill at the same spot;
+        nothing new.
+      * forward (``win_start > hwm``) — finalize ``[hwm, win_start]``.
+      * loop wrap (``win_start`` dropped by more than half the buffer) —
+        finalize the tail ``[hwm, n]`` then the head ``[0, win_start]``.
+      * small frontier retreat (lead shrank; ``win_start`` dropped a
+        little) — that region was already emitted; skip and KEEP ``hwm``
+        so forward progress resumes from the high-water mark (no re-emit,
+        no gap once the frontier passes it again). Distinguishing this
+        from a wrap is why the half-buffer threshold exists.
+    """
+    if hwm is None or win_start == hwm:
+        return [], win_start
+    if win_start > hwm:
+        return [(hwm, win_start)], win_start
+    if hwm - win_start > n // 2:
+        return [(hwm, n), (0, win_start)], win_start
+    return [], hwm
+
+
 class PipelineRunner:
     """The generic streaming loop over a :class:`GeneratorBackend`.
 
@@ -390,6 +422,24 @@ class PipelineRunner:
         # quiet — drain the extra rather than pinning latency forever).
         self._transport_report_stale_s = 10.0
 
+        # ----- Emit trim (experimental wire-redundancy reduction) ----------
+        # The frontier writes 0.36s windows ~0.04s apart, so every region is
+        # re-sent ~9x as the frontier sweeps it — but all those writes finish
+        # ~lead BEFORE the playhead reaches the region, so only the LAST
+        # (freshest) one is ever heard. With trim on, we still decode+write
+        # the full window into the buffer (refinement + receptive field
+        # intact), but TRANSMIT only the newly-finalized region the frontier
+        # just passed: [_emit_hwm, win_start], read straight from the buffer.
+        # Each region goes out once, at its freshest, ~lead ahead of the
+        # playhead — identical latency (generation/lead are untouched; this
+        # is purely a transmission change), ~Nx less wire. Contiguous buffer
+        # slices => no new seams. Off by default; opt in for measurement.
+        self._emit_trim = (
+            os.environ.get("DEMON_SLICE_EMIT_TRIM", "") not in ("", "0")
+        )
+        # Highest sample whose finalized content we've already emitted.
+        self._emit_hwm = None
+
     # ---- delegates kept for the session's runner_holder contract ----------
 
     def mark_hint_dirty(self) -> None:
@@ -526,6 +576,32 @@ class PipelineRunner:
                 self._transport_extra_s + deficit,
                 self._transport_extra_cap_s,
             )
+
+    def _emit_finalized(self, buf, win_start: int) -> None:
+        """Emit (trim mode) the buffer region(s) the frontier just
+        finalized, read straight from the live buffer so they carry the
+        freshest crossfaded content and abut the previous emit (no seam).
+        Each region goes out once, ~lead ahead of the playhead — same
+        timing the full-window leading edge would have, so latency is
+        unchanged. Region selection is the pure
+        :func:`_finalized_segments`; copy each slice (the buffer is
+        mutated by later writes)."""
+        segs, self._emit_hwm = _finalized_segments(
+            self._emit_hwm, int(win_start), buf.shape[0],
+        )
+        for ss, se in segs:
+            if se > ss:
+                self.on_audio_ready(buf[ss:se].copy(), ss, se)
+
+    def _reset_emit_trim_frontier(self) -> None:
+        """Drop trim's monotonic frontier after an untrimmed emission.
+
+        Loop-band playback deliberately falls back to full-window sends.
+        That path is not part of trim's one-forward-frontier invariant, so
+        resuming from the old HWM can produce a large redundant catch-up
+        slice. Anchor the next trimmed tick at its own frontier instead.
+        """
+        self._emit_hwm = None
 
     def _playhead_seconds_now(self) -> float:
         return self._playhead_clock.seconds()
@@ -847,7 +923,19 @@ class PipelineRunner:
                         # Backend handler uses it to delta-encode against
                         # its client mirror; standalone callers can
                         # ignore the args.
-                        self.on_audio_ready(patched, win_start, win_end)
+                        #
+                        # Emit trim: send only the region the frontier's
+                        # leading edge has finalized since the last emit
+                        # (read from the just-updated buffer), not the whole
+                        # overlapping window. Falls back to the full window
+                        # while a loop band is armed (the band-wrap second
+                        # render below keeps the legacy path). See __init__.
+                        if self._emit_trim and band_end_sample is None:
+                            self._emit_finalized(current, win_start)
+                        else:
+                            self.on_audio_ready(patched, win_start, win_end)
+                            if self._emit_trim:
+                                self._reset_emit_trim_frontier()
                         # Fold this write's wall gap into the adaptive lead
                         # state. One call per successful write — real
                         # generation OR gap-fill; the band-wrap second render

@@ -162,6 +162,36 @@ uv run python -u -m demos.realtime_motion_graph_web \
     --accel tensorrt --checkpoint acestep-v15-xl-turbo
 ```
 
+### Slow links (server-side env knobs)
+
+The slice stream is heavily overlapped: the write frontier emits ~0.36 s
+windows only ~0.03–0.04 s apart, so each region is re-sent ~9× as the
+frontier sweeps it. Two env toggles tune this for bandwidth-limited
+deployments (SSH/IDE tunnels, weak uplinks):
+
+- `DEMON_SLICE_WINDOW_BYTES` (default `262144` = 256 KiB) — in-flight
+  flow-control window. The server holds back slice emission while
+  sent-minus-acked exceeds this, so a slow link gets fresh slices at
+  link rate instead of an ever-staler backlog. Reactive backpressure.
+
+- `DEMON_SLICE_EMIT_TRIM` (default off; set `1` to enable) — transmit
+  only the region the frontier just **finalized** each tick, instead of
+  re-sending the full overlapping window. Every overlapping copy lands
+  ~lead *before* the playhead reaches the region, so only the last is
+  ever heard; trimming sends each region once, at its freshest.
+  Measured ~**2.8× less downstream bandwidth** (420 → 150 KB/s) with
+  **identical latency** — the generation lead is untouched; this is a
+  transmission-only change (verified: `advance_s` byte-identical with
+  and without the flag). 150 KB/s is near the irreducible audio entropy
+  at fp16, so this extracts essentially all the *count* redundancy.
+
+  Trade-off: it spends the overlap's redundancy, which was also a
+  safety margin. The client buffers less pre-playhead audio (~the lead,
+  vs ~0.6 s with full overlap), so it tolerates a shorter transient
+  stall before falling back to the source, and flow-control drops have
+  no redundancy left to mask. Pairs with the connection-quality
+  indicator for the below-floor case. Default off pending broader soak.
+
 ## Headless Performance Benchmark
 
 The browser HUD receives `tick_ms` and `dec_ms` over WebSocket, but the
