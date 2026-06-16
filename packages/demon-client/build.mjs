@@ -40,6 +40,20 @@ await build({
   outfile: "dist/sliceDecoder.worker.js",
 });
 
+// Node/CJS bundle for non-browser hosts (the Node-for-Max M4L bridge).
+// Single self-contained file the bridge `require()`s: fzstd inlined (Max
+// packaging ships no node_modules), no browser-audio code (entry is
+// node.ts, which omits AudioPlayer). The bridge injects `ws` as
+// RemoteBackendOptions.WebSocketConstructor, so no WS impl is bundled.
+await build({
+  ...common,
+  platform: "node",
+  format: "cjs",
+  target: "node22",
+  entryPoints: ["node.ts"],
+  outfile: "dist/demon-client.node.cjs",
+});
+
 // The worklet is already plain JS; ship it alongside so static demos can
 // point AudioPlayerOptions.workletUrl at the same /sdk/ mount.
 copyFileSync("assets/audio-worklet.js", "dist/audio-worklet.js");
