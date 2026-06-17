@@ -445,6 +445,83 @@ function captureConfigFromState(snapshot, base) {
   );
 }
 
+// inputs.ts
+function writeAscii(view, offset, text) {
+  for (let i = 0; i < text.length; i++) {
+    view.setUint8(offset + i, text.charCodeAt(i));
+  }
+}
+function encodeWavInterleaved(interleaved, channels, sampleRate) {
+  const frames = Math.floor(interleaved.length / channels);
+  const bytesPerSample = 2;
+  const dataLen = frames * channels * bytesPerSample;
+  const out = new ArrayBuffer(44 + dataLen);
+  const view = new DataView(out);
+  writeAscii(view, 0, "RIFF");
+  view.setUint32(4, 36 + dataLen, true);
+  writeAscii(view, 8, "WAVE");
+  writeAscii(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * channels * bytesPerSample, true);
+  view.setUint16(32, channels * bytesPerSample, true);
+  view.setUint16(34, 8 * bytesPerSample, true);
+  writeAscii(view, 36, "data");
+  view.setUint32(40, dataLen, true);
+  const pcm = new Int16Array(out, 44, frames * channels);
+  const n = frames * channels;
+  for (let i = 0; i < n; i++) {
+    const s = interleaved[i];
+    const c = s < -1 ? -1 : s > 1 ? 1 : s;
+    pcm[i] = c < 0 ? c * 32768 : c * 32767;
+  }
+  return out;
+}
+var B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+var B64_LOOKUP = (() => {
+  const t = new Int16Array(256).fill(-1);
+  for (let i = 0; i < B64.length; i++) t[B64.charCodeAt(i)] = i;
+  return t;
+})();
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  const len = bytes.length;
+  let out = "";
+  let i = 0;
+  for (; i + 2 < len; i += 3) {
+    const n = bytes[i] << 16 | bytes[i + 1] << 8 | bytes[i + 2];
+    out += B64[n >> 18 & 63] + B64[n >> 12 & 63] + B64[n >> 6 & 63] + B64[n & 63];
+  }
+  const rem = len - i;
+  if (rem === 1) {
+    const n = bytes[i] << 16;
+    out += B64[n >> 18 & 63] + B64[n >> 12 & 63] + "==";
+  } else if (rem === 2) {
+    const n = bytes[i] << 16 | bytes[i + 1] << 8;
+    out += B64[n >> 18 & 63] + B64[n >> 12 & 63] + B64[n >> 6 & 63] + "=";
+  }
+  return out;
+}
+function base64ToArrayBuffer(b64) {
+  const bytes = new Uint8Array(Math.floor(b64.length * 3 / 4));
+  let bi = 0;
+  let acc = 0;
+  let accBits = 0;
+  for (let i = 0; i < b64.length; i++) {
+    const v = B64_LOOKUP[b64.charCodeAt(i)];
+    if (v < 0) continue;
+    acc = acc << 6 | v;
+    accBits += 6;
+    if (accBits >= 8) {
+      accBits -= 8;
+      bytes[bi++] = acc >> accBits & 255;
+    }
+  }
+  return bytes.buffer.slice(0, bi);
+}
+
 // node_modules/fzstd/esm/index.mjs
 var ab = ArrayBuffer;
 var u8 = Uint8Array;
@@ -3193,7 +3270,10 @@ export {
   VALID_TIME_SIGNATURES,
   WsReconnector,
   applyConfigToState,
+  arrayBufferToBase64,
+  base64ToArrayBuffer,
   captureConfigFromState,
+  encodeWavInterleaved,
   fetchKnobManifest,
   fetchWireContract,
   fetchWithRetry,
