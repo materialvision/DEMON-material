@@ -159,7 +159,35 @@ function driveRecordedSend(
   );
   const wire = ws.sent[ws.sent.length - 1];
   expect(typeof wire).toBe("string");
-  expect(JSON.parse(wire as string)).toEqual(data);
+  // params carries telemetry the replay can't and shouldn't match byte-for-
+  // byte: client_time is a wall-clock performance.now() send stamp (never
+  // deterministic), and slice_bytes_rx / slice_lead_s are runtime flow-control
+  // feedback whose values depend on live receive/apply timing, not on the
+  // recorded input bytes. They postdate the golden transcripts (added in
+  // #256). The replay's contract is decode/apply + command-shape fidelity, so
+  // drop these fields from both sides before comparing.
+  expect(stripParamsTelemetry(JSON.parse(wire as string))).toEqual(
+    stripParamsTelemetry(data),
+  );
+}
+
+const PARAMS_TELEMETRY_FIELDS = [
+  "client_time",
+  "slice_bytes_rx",
+  "slice_lead_s",
+] as const;
+
+function stripParamsTelemetry<T>(msg: T): T {
+  if (
+    msg === null ||
+    typeof msg !== "object" ||
+    (msg as { type?: unknown }).type !== "params"
+  ) {
+    return msg;
+  }
+  const copy = { ...(msg as Record<string, unknown>) };
+  for (const field of PARAMS_TELEMETRY_FIELDS) delete copy[field];
+  return copy as T;
 }
 
 async function replayScenario(bundle: ScenarioBundle): Promise<ReplayOutcome> {
