@@ -27,9 +27,11 @@ export function isSwapSourceMode(v: unknown): v is SwapSourceMode {
 // Mechanism: `mergeConfig` stashes unknown top-level keys onto the result
 // under a non-enumerable symbol, so they never leak through `{...cfg}`,
 // `JSON.stringify(cfg)`, or a typed field — the re-emit is explicit, via
-// `serializeConfig`. Web's own export models every schema field and handles
-// its `inputs` / `tracks` extensions out of band, so it stays byte-identical
-// (it does not call serializeConfig); the capability exists for M4L / VST.
+// `serializeConfig`. Web routes its Export through `serializeConfig` too
+// (OperatorStrip), so an unknown key authored by another frontend survives a
+// web load → export round-trip; web layers its own `inputs` / `tracks`
+// extensions onto the serialized object out of band. A config exported with
+// no unknown keys present is byte-identical to the legacy schema-only shape.
 
 /** The schema's own top-level keys. Anything else a loaded config carries
  *  is "unknown" and travels through untouched on a write. */
