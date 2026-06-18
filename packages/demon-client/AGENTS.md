@@ -122,6 +122,24 @@ Unlike the manifests, this file is hand-edited (comment-heavy `_comment` /
 `_*_help` keys): read ignores unknown keys, write preserves them, and a
 `version` field is present from day one.
 
+## Control copy (`controls/`) — user-facing, also not a manifest
+
+The descriptions and display names you render ON the controls. Two layers,
+don't conflate them: the `/api/knobs` manifest's `description` is the **terse,
+agent-facing** one-liner (registry-generated); `controls/` is the **editorial,
+when-to-reach-for-it** prose (hand-authored, client-side). Import from the
+package root:
+
+- `describeControl(param)` → rich description or `undefined` (LoRA / manual
+  slots share one string each, matched by prefix).
+- `displayNameFor(param)` → friendly label (`denoise` → `strength`, else
+  snake_case → spaced).
+- `resolveControlDescription(param, manifest?)` → prefer rich copy, fall back
+  to the manifest's `description` so runtime-only knobs still read something.
+
+The tooltip-rendering machinery and web-only affordance hints (keyboard
+chords, MIDI-learn) stay in your client — only the copy is shared.
+
 ## Reference implementations in the demo app
 
 - `demos/realtime_motion_graph_web/web/components/Performance/DynamicKnobPanel.tsx` — a complete control
@@ -147,6 +165,12 @@ Unlike the manifests, this file is hand-edited (comment-heavy `_comment` /
 - `config/` is the operator-defaults `config.json` schema + pure transforms
   (the one hand-authored, client-side contract — not generated). Keep it
   pure: no store/DOM imports cross into it, so M4L / VST can consume it.
+- `controls/` is the user-facing knob/input copy (the second hand-authored,
+  client-side layer — editorial prose, not the registry's terse
+  `description`). Pure data + pure functions, no store/DOM imports.
+- If you change the SDK's bundled surface (`controls/`, `config/`, etc.),
+  rebuild so the committed `dist/` static-demo bundles don't go stale:
+  `cd packages/demon-client && npm run build`.
 
 ## Agent-driven control without a browser
 

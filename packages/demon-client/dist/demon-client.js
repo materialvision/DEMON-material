@@ -522,6 +522,95 @@ function base64ToArrayBuffer(b64) {
   return bytes.buffer.slice(0, bi);
 }
 
+// controls/copy.ts
+var CONTROL_DISPLAY_NAMES = {
+  // Macros where the friendly name reads more clearly than the
+  // engine-honest one: `strength` for `denoise` (the "denoise"
+  // engine-internal naming refers to the diffusion step, but users
+  // perceive this knob as "how strong is the remix"), `structure` for
+  // `hint_strength`, `timbre` for `timbre_strength` (drop the
+  // "strength" suffix on knobs — the value readout already conveys
+  // magnitude). Everything else falls back to displayNameFor
+  // (underscore → space) so the UI matches what the engine, MIDI map,
+  // and config files call them.
+  denoise: "strength",
+  hint_strength: "structure",
+  timbre_strength: "timbre",
+  // dcw_* keep their engine-honest "DCW low" / "DCW high" — these are
+  // DCW-internal scalers, not generic EQ.
+  dcw_scaler: "DCW low",
+  dcw_high_scaler: "DCW high"
+};
+var CONTROL_DESCRIPTIONS = {
+  // ── Main remix controls ──
+  denoise: "How much the model reshapes the source audio. Keep it low for a subtle remix that stays close to the original; push it high to fully transform the track into something new. The most expressive knob \u2014 try sweeping it during playback.",
+  hint_strength: "How closely the model follows the original song's structure \u2014 sections, rhythm, dynamics. Crank it up to keep the arrangement intact; drop it to let the model rearrange more freely.",
+  timbre_strength: "How much of the source's instrument character (tone, color) carries into the output. High keeps the original instruments recognizable; low frees the model to swap them for whatever fits the prompt.",
+  // ── Engine internals ──
+  feedback: "How similar each new generation is to the previous one. Low values give you variety on every refresh; higher values give you a continuous evolution where each generation flows into the next. 0.3\u20130.5 is the sweet spot for smooth continuity without everything sounding the same.",
+  feedback_depth: "How far back in time the Feedback knob reaches. 1 (default) blends with the most recent generation. Higher values reach back several ticks for an echo / ghost effect \u2014 a faint repeat of an earlier moment surfaces in the current output. Lets you get distant feedback without cranking Feedback all the way up.",
+  shift: "Advanced: changes where the model concentrates its work across denoising. The default is tuned for the turbo engine and works well in most cases \u2014 leave it alone unless you're chasing a specific feel.",
+  steps_override: "Diffusion step count. Lower steps = lower quality. Higher steps = more latency. Default 8 is the turbo balance. Changing this rebuilds the streaming pipeline, so expect a brief audio glitch when you move it.",
+  guidance_scale: "CFG strength. Only takes effect when the RCFG mode dropdown below is NOT 'off'. Higher values push the output further toward the prompt at the cost of more artifacts. Turbo is CFG-distilled, so the useful range is narrower than a base SD model \u2014 try 3\u20138.",
+  cfg_rescale: "After CFG, mix the guided velocity's magnitude back toward what the positive forward produced. 0 keeps raw CFG; 1 fully snaps the magnitude. Pair with high guidance_scale to keep the prompt-push without the harshness that high CFG causes on its own.",
+  // ── Activation steering (auto path) ──
+  // Each tooltip names the underlying probe cell so the operator can
+  // recreate the effect on a manual slot.
+  steer_bright: "Activation-steering: positive alpha shifts spectral centroid up (brighter, more highs). 0 = off; useful range 5-15 by ear. Recreate as a manual slot: vector brightness_l09_t3 at layer = 9, step = round(3/8 x steps_count).",
+  steer_warm: "Activation-steering: positive alpha tilts the spectrum toward bass (warmer). The raw vector points the wrong way for this axis, so this knob folds in a -1 sign. 0 = off; useful range 5-15 by ear. Recreate as a manual slot: vector warmth_l15_t0 at layer = 15, step = 0, then INVERT alpha sign (manual mode is sign-agnostic).",
+  steer_rough: "Activation-steering: positive alpha increases spectral flatness (grittier, noisier). Vector magnitude at this probe cell is small, so effect builds slowly. 0 = off; useful range 5-15 by ear. Recreate as a manual slot: vector roughness_l09_t3 at layer = 9, step = round(3/8 x steps_count).",
+  steer_density: "Activation-steering: positive alpha thins the texture toward sparse/minimal. Inject layer is shifted 3 shallower than the probe layer (Phase-3 transfer finding). 0 = off; useful range 5-15 by ear. Recreate as a manual slot: vector density_l18_t3 at layer = 15 (probe 18 minus 3), step = round(3/8 x steps_count).",
+  // ── DCW ──
+  dcw_scaler: "Experimental \u2014 adjusts the low-band strength of an internal correction the model applies to itself during generation (DCW). This scaler is active in the early part of the run. The exact audio mapping is still being explored \u2014 sweep it to discover what it does for your source. Extreme values can be unpredictable but cool.",
+  dcw_high_scaler: "Experimental \u2014 adjusts the high-band strength of an internal correction the model applies to itself during generation (DCW). This scaler is active in the later part of the run. The exact audio mapping is still being explored \u2014 sweep it to discover what it does for your source. Extreme values can be unpredictable but cool."
+};
+var CHANNEL_GAINS = ["ch_g0", "ch_g1", "ch_g2", "ch_g3", "ch_g4", "ch_g5", "ch_g6", "ch_g7"];
+var NAMED_CHANNELS = ["ch13", "ch14", "ch19", "ch23", "ch29", "ch56"];
+for (const [i, p] of CHANNEL_GAINS.entries()) {
+  CONTROL_DESCRIPTIONS[p] = `Experimental \u2014 adjusts the strength of one of the model's internal latent channels (channel ${i}). Each channel encodes a different aspect of the sound (frequency band, dynamics, transients); the exact mapping is still being explored. Sweep it to discover what it does for your source.`;
+}
+for (const p of NAMED_CHANNELS) {
+  const idx = p.slice(2);
+  CONTROL_DESCRIPTIONS[p] = `Experimental \u2014 a hand-picked internal latent channel (#${idx}) that produces a noticeable perceptual change. Sweep it to hear what this specific channel controls for your source.`;
+}
+var LORA_STRENGTH_DESCRIPTION = "How strongly this LoRA shapes the output. LoRAs are little style packs \u2014 set a low value for a subtle flavor, crank past 1.0 to make this LoRA dominate the sound. Multiple LoRAs stack \u2014 turn several on at once for combined styles.";
+var LORA_BLEND_DESCRIPTION = "Crossfade between LoRA A and LoRA B. 0 = A only, 1 = B only, 0.5 = both at half strength. Use this to morph between two styles smoothly.";
+var MANUAL_SRC_DESCRIPTION = "Catalog index of the steering vector this slot fires. The catalog enumerates every pre-built (axis, build_layer, build_step) cell on disk in stable axis-major order. Double-click the readout to type an exact index; query the MCP list_manual_steering_vectors tool for the full table. Has no effect until \u03B1 is non-zero.";
+var MANUAL_LAYER_DESCRIPTION = "DiT inject layer (0-23). The vector is added to this layer's post-block residual. Bypasses the auto path's density layer offset \u2014 the value lands exactly where you point it.";
+var MANUAL_STEP_DESCRIPTION = "Diffusion inject step (0-15). Bypasses the auto path's fractional step mapping; the engine fires the injection only on the step that matches this value. If you pick a step past the current steps count - 1, the slot stays silent until you raise the step count.";
+var MANUAL_ALPHA_DESCRIPTION = "Strength of this manual slot's injection. 0 disables the slot. Negative \u03B1 inverts the vector's direction at injection time (no sign correction is applied; what you set is what the engine receives). Sweep range and breakage point mirror the perceptual steering knobs.";
+var INTERP_PATH_DESCRIPTIONS = {
+  structure: "How structural (semantic-hint) guidance blends in. Slerp holds the latent's norm constant; linear averages.",
+  timbre: "How the timbre reference blends from silence to full. Slerp holds the conditioning norm constant; linear averages.",
+  prompt: "How prompt A crossfades to prompt B. Slerp avoids the washed-out midpoint a linear average produces between unrelated prompts.",
+  feedback: "How the latent feedback tap mixes into the source. Slerp holds the latent's norm constant; linear averages."
+};
+var SOURCE_MODE_HINTS = {
+  full: "Feed the whole mix to inference",
+  instruments: "Feed only the instrumental bed to inference",
+  vocals: "Feed only the vocal stem to inference"
+};
+var TIMBRE_REF_DESCRIPTION = "Optional reference audio for the timbre channel. Picking a track here biases the model's instrument character toward what's in that file, leaving structure (rhythm, sections) free to follow the playing input. Default 'Input Track' uses the playing source's own latent.";
+var STRUCTURE_REF_DESCRIPTION = "Optional reference audio for the structure channel. Picking a track here biases the model's section/rhythm/dynamics layout toward that file, leaving timbre (instrument character) free to follow the playing input. Default 'Input Track' uses the playing source's own latent.";
+var STEM_SECTION_DESCRIPTION = "Vocal and instrumental stems extracted from the source track. Drag a panner right to mix that layer into the model output. Click the layer name to mute or unmute without losing the level. Hold V (vocals) or I (instruments) + \u25B2\u25BC to nudge from the keyboard.";
+
+// controls/index.ts
+function displayNameFor(param) {
+  return CONTROL_DISPLAY_NAMES[param] ?? param.replace(/_/g, " ");
+}
+function describeControl(param) {
+  if (param.startsWith("lora_str_")) return LORA_STRENGTH_DESCRIPTION;
+  if (param === "lora_blend") return LORA_BLEND_DESCRIPTION;
+  if (param.startsWith("man_src_")) return MANUAL_SRC_DESCRIPTION;
+  if (param.startsWith("man_layer_")) return MANUAL_LAYER_DESCRIPTION;
+  if (param.startsWith("man_step_")) return MANUAL_STEP_DESCRIPTION;
+  if (param.startsWith("man_alpha_")) return MANUAL_ALPHA_DESCRIPTION;
+  return CONTROL_DESCRIPTIONS[param];
+}
+function resolveControlDescription(param, manifest) {
+  return describeControl(param) ?? manifest?.[param]?.description;
+}
+
 // node_modules/fzstd/esm/index.mjs
 var ab = ArrayBuffer;
 var u8 = Uint8Array;
@@ -3251,15 +3340,24 @@ async function fetchKnobManifest(sde = false, toUrl = (p) => p) {
 export {
   AudioPlayer,
   COMMAND_NAMES,
+  CONTROL_DESCRIPTIONS,
+  CONTROL_DISPLAY_NAMES,
   CROSSFADE_SECONDS,
   DCW_MODES,
   DCW_WAVELETS,
   DEFAULT_CONFIG,
   DEFAULT_TIME_SIGNATURE,
   EVENT_NAMES,
+  INTERP_PATH_DESCRIPTIONS,
   KNOB_SCHEMA_VERSION,
   KNOWN_TOP_LEVEL_KEYS,
   LOOP_GRID_ORDER,
+  LORA_BLEND_DESCRIPTION,
+  LORA_STRENGTH_DESCRIPTION,
+  MANUAL_ALPHA_DESCRIPTION,
+  MANUAL_LAYER_DESCRIPTION,
+  MANUAL_SRC_DESCRIPTION,
+  MANUAL_STEP_DESCRIPTION,
   PREEMPTED_CLOSE_CODE,
   PROTOCOL_VERSION,
   RCFG_MODES,
@@ -3268,13 +3366,19 @@ export {
   SLICE_FLAG_DELTA,
   SLICE_FLAG_RAW,
   SLICE_HDR_SIZE,
+  SOURCE_MODE_HINTS,
+  STEM_SECTION_DESCRIPTION,
+  STRUCTURE_REF_DESCRIPTION,
   T,
+  TIMBRE_REF_DESCRIPTION,
   VALID_TIME_SIGNATURES,
   WsReconnector,
   applyConfigToState,
   arrayBufferToBase64,
   base64ToArrayBuffer,
   captureConfigFromState,
+  describeControl,
+  displayNameFor,
   encodeWavInterleaved,
   fetchKnobManifest,
   fetchWireContract,
@@ -3296,6 +3400,7 @@ export {
   measureLoudness,
   mergeConfig,
   normalizeConfigShape,
+  resolveControlDescription,
   resolveLoraCapForSource,
   rtmgConfigToSessionConfig,
   selectVariant,

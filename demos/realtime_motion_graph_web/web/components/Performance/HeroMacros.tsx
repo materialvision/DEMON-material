@@ -17,6 +17,7 @@ import {
 } from "@/store/useRecordingStore";
 import { useSessionStore } from "@/store/useSessionStore";
 import { LORA_SLIDER_MAX } from "@/types/engine";
+import { STEM_SECTION_DESCRIPTION } from "@demon/client";
 
 import { Knob } from "./Knob";
 import { MidiInToggle } from "./MidiInToggle";
@@ -164,9 +165,8 @@ function HeroStyleFader({ slotIndex }: HeroStyleFaderProps) {
 
 // Keyboard hold-chord shortcuts (V/I + ▲▼) still work via
 // useKeyboardShortcuts.ts — they're documented in the section-header
-// tooltip below rather than under each panner.
-const STEM_SECTION_TOOLTIP =
-  "Vocal and instrumental stems extracted from the source track. Drag a panner right to mix that layer into the model output. Click the layer name to mute or unmute without losing the level. Hold V (vocals) or I (instruments) + ▲▼ to nudge from the keyboard.";
+// tooltip below (STEM_SECTION_DESCRIPTION, from @demon/client/controls)
+// rather than under each panner.
 
 export function HeroMacros() {
   const status = useSessionStore((s) => s.status);
@@ -270,7 +270,7 @@ export function HeroMacros() {
           <div className="hero-macros-stems">
             <div
               className="hero-macros-group-label"
-              data-dd-tooltip={STEM_SECTION_TOOLTIP}
+              data-dd-tooltip={STEM_SECTION_DESCRIPTION}
               data-dd-tooltip-wide=""
               data-dd-tooltip-title="Stem Layers"
             >

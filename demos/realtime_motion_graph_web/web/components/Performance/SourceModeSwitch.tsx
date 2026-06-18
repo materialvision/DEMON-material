@@ -1,5 +1,7 @@
 "use client";
 
+import { SOURCE_MODE_HINTS } from "@demon/client";
+
 import type { StemSourceMode } from "@/engine/audio/loadFixture";
 import { useCustomTracksStore } from "@/store/useCustomTracksStore";
 
@@ -18,13 +20,9 @@ const MODES: ReadonlyArray<{
   label: string;
   hint: string;
 }> = [
-  { mode: "full", label: "Full", hint: "Feed the whole mix to inference" },
-  {
-    mode: "instruments",
-    label: "Instr",
-    hint: "Feed only the instrumental bed to inference",
-  },
-  { mode: "vocals", label: "Vocals", hint: "Feed only the vocal stem to inference" },
+  { mode: "full", label: "Full", hint: SOURCE_MODE_HINTS.full },
+  { mode: "instruments", label: "Instr", hint: SOURCE_MODE_HINTS.instruments },
+  { mode: "vocals", label: "Vocals", hint: SOURCE_MODE_HINTS.vocals },
 ];
 
 interface Props {

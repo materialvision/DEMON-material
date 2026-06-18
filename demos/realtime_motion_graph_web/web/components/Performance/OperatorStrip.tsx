@@ -37,6 +37,7 @@ import {
   VALID_TIME_SIGNATURES,
   isTimeSignature,
 } from "@/types/engine";
+import { INTERP_PATH_DESCRIPTIONS } from "@demon/client";
 
 import { ExportDialog } from "./ExportDialog";
 import { MidiBadge } from "./MidiBadge";
@@ -72,16 +73,8 @@ const INTERP_METHOD_OPTIONS: { value: InterpMethod; label: string }[] = [
   { value: "linear", label: "Linear" },
 ];
 
-const INTERP_PATH_TOOLTIPS: Record<InterpPath, string> = {
-  structure:
-    "How structural (semantic-hint) guidance blends in. Slerp holds the latent's norm constant; linear averages.",
-  timbre:
-    "How the timbre reference blends from silence to full. Slerp holds the conditioning norm constant; linear averages.",
-  prompt:
-    "How prompt A crossfades to prompt B. Slerp avoids the washed-out midpoint a linear average produces between unrelated prompts.",
-  feedback:
-    "How the latent feedback tap mixes into the source. Slerp holds the latent's norm constant; linear averages.",
-};
+// Interp-method copy (slerp vs linear, per blend path) now lives in the SDK
+// at @demon/client/controls (INTERP_PATH_DESCRIPTIONS).
 
 // One labelled dropdown per live blend path, using the same RefSelect
 // component as the core input / structure / timbre pickers so they match
@@ -98,7 +91,7 @@ function InterpRow({ path }: { path: InterpPath }) {
       groups={[]}
       onSelect={(v) => setMethod(path, v as InterpMethod)}
       ariaLabel={`${INTERP_PATH_LABELS[path]} interpolation method`}
-      tooltip={INTERP_PATH_TOOLTIPS[path]}
+      tooltip={INTERP_PATH_DESCRIPTIONS[path]}
     />
   );
 }
