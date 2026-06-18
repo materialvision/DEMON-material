@@ -118,7 +118,7 @@ export function useFixtureSwap() {
           // swap at 1:30 resumes at 1:30 of the new track unless we seek.
           // This gate is the single source of truth for restart-on-swap on
           // both paths. Operator can disable via config.
-          if (getConfig().restart_song_on_swap) {
+          if (getConfig().web.restart_song_on_swap) {
             session.player?.seek(0);
           }
           // Always update detectedBpm / detectedKey / detectedTimeSignature
@@ -260,7 +260,7 @@ export function useFixtureSwap() {
         // denoise value with a snap-to-zero. Consume-and-clear here so
         // the next legitimate swap reverts to the normal behaviour.
         const perfState = usePerformanceStore.getState();
-        const gate = getConfig().denoise_session_gate;
+        const gate = getConfig().web.denoise_session_gate;
         if (perfState.skipNextDenoiseGate) {
           perfState.setSkipNextDenoiseGate(false);
         } else if (gate.enabled) {

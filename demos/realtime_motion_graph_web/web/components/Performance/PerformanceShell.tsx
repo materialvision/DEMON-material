@@ -86,7 +86,7 @@ export function PerformanceShell() {
   useRefSourceAcks("structure");
   useMcpMirror();
   const config = useConfig();
-  useIdleReset(config.reset_seconds);
+  useIdleReset(config.web.reset_seconds);
 
   const startSession = useStartSession();
   const status = useSessionStore((s) => s.status);

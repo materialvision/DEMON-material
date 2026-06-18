@@ -305,12 +305,17 @@ export interface RtmgConfigLoop {
   fullBuffer?: boolean;
 }
 
-export interface RtmgConfig {
-  engine: RtmgConfigEngine;
-  prompts: RtmgConfigPrompts;
-  controls: RtmgConfigControls;
-  channel_ranges: RtmgConfigChannelRanges;
-  seed: number;
+/** The browser demo's own presentation, playback, and interaction
+ *  settings. Deliberately separated from the shared `RtmgConfig` fields
+ *  so the config object stays portable across frontends (Ableton M4L,
+ *  the VST, MCP / headless): those consume only the shared fields and
+ *  keep their own equivalent of this block. On the wire / in config.json
+ *  this lives under the top-level `web` key.
+ *
+ *  Note `channel_ranges` is NOT here — per-channel {min,max,reverse} is
+ *  part of the shared *control surface* a native plugin's knob layout
+ *  would also honor, so it lives on `RtmgConfig` directly. */
+export interface RtmgWebConfig {
   effects: RtmgConfigEffects;
   audio: RtmgConfigAudio;
   reset_seconds: number;
@@ -321,10 +326,30 @@ export interface RtmgConfig {
    * ScriptProcessor fallback already restarts on swap; this aligns the
    * worklet path with that behavior and makes it operator-tunable. */
   restart_song_on_swap: boolean;
+}
+
+export interface RtmgConfig {
+  /** Shared-config schema version. Bump on a breaking shape change so
+   *  consumers across frontends can detect mismatches. Old config.json
+   *  files that predate the field are normalised to 1 on load. */
+  version: number;
+  engine: RtmgConfigEngine;
+  prompts: RtmgConfigPrompts;
+  controls: RtmgConfigControls;
+  /** Per-channel {min,max,reverse} for the channel-gain controls. Part
+   *  of the shared control surface (a VST / M4L knob layout would honor
+   *  the same ranges), so it sits alongside `controls` rather than in
+   *  the web-only block. */
+  channel_ranges: RtmgConfigChannelRanges;
+  seed: number;
   /** Default inference source for uploaded-track swaps. Built-in
    *  fixtures keep using their full source unless the track is present
-   *  in the custom upload store. */
+   *  in the custom upload store. Engine-facing (selects the audio sent
+   *  for inference), so it stays in the shared config rather than `web`. */
   swap_source_mode: SwapSourceMode;
+  /** The browser demo's own presentation/playback/interaction settings.
+   *  Other frontends ignore this block. */
+  web: RtmgWebConfig;
   /** Per-param schedule curves. Same shape useCurveStore persists to
    *  localStorage today, lifted into the operator-editable config so a
    *  pod's deployed sound can ship its automation alongside its
@@ -338,6 +363,7 @@ export interface RtmgConfig {
 }
 
 export const DEFAULT_CONFIG: RtmgConfig = {
+  version: 1,
   engine: {
     sde: false,
     lora: true,
@@ -410,27 +436,29 @@ export const DEFAULT_CONFIG: RtmgConfig = {
     ch56: { min: 0, max: 2.0, reverse: false },
   },
   seed: 0,
-  effects: {
-    parallax_strength: 0.4,
-    bloom_on_kick: 0.3,
-    bloom_threshold: 0.15,
-    warp_strength: 0.4,
-  },
-  audio: {
-    lufs_enabled: false,
-    lufs_window_sec: 3.0,
-    lufs_metric: "lufs",
-    lufs_peak_headroom: 4.0,
-    lufs_silence_floor_db: 30.0,
-    lufs_silence_floor_hysteresis_db: 6.0,
-  },
-  reset_seconds: 0,
-  denoise_session_gate: {
-    enabled: true,
-    glide_ms: 700,
-  },
-  restart_song_on_swap: true,
   swap_source_mode: "instruments",
+  web: {
+    effects: {
+      parallax_strength: 0.4,
+      bloom_on_kick: 0.3,
+      bloom_threshold: 0.15,
+      warp_strength: 0.4,
+    },
+    audio: {
+      lufs_enabled: false,
+      lufs_window_sec: 3.0,
+      lufs_metric: "lufs",
+      lufs_peak_headroom: 4.0,
+      lufs_silence_floor_db: 30.0,
+      lufs_silence_floor_hysteresis_db: 6.0,
+    },
+    reset_seconds: 0,
+    denoise_session_gate: {
+      enabled: true,
+      glide_ms: 700,
+    },
+    restart_song_on_swap: true,
+  },
 };
 
 let _activeConfig: RtmgConfig = DEFAULT_CONFIG;
@@ -574,12 +602,48 @@ export function useConfig(): RtmgConfig {
   return c;
 }
 
+/** Fields that lived at the top level before the `web` split and now
+ *  belong under `web`. `channel_ranges` is intentionally excluded — it
+ *  was top-level in the old flat shape and stays top-level (shared) in
+ *  the new one, so it needs no lifting. */
+const LEGACY_WEB_KEYS = [
+  "effects",
+  "audio",
+  "reset_seconds",
+  "denoise_session_gate",
+  "restart_song_on_swap",
+] as const;
+
+/** Lift a pre-`web` flat config (effects/audio/... at the top level)
+ *  into the current nested shape so older config.json files and exported
+ *  sounds keep loading. Only fills `web` sub-fields the override doesn't
+ *  already set under `web`; a config that already nests `web` is returned
+ *  untouched. Operates on a shallow copy — never mutates input. */
+export function normalizeConfigShape(
+  raw: Partial<RtmgConfig> & Record<string, unknown>,
+): Partial<RtmgConfig> {
+  const hasLegacyTopLevel = LEGACY_WEB_KEYS.some((k) => k in raw);
+  if (!hasLegacyTopLevel) return raw;
+  const liftedWeb: Record<string, unknown> = { ...(raw.web ?? {}) };
+  for (const k of LEGACY_WEB_KEYS) {
+    if (k in raw && !(k in liftedWeb)) liftedWeb[k] = (raw as Record<string, unknown>)[k];
+  }
+  const out: Record<string, unknown> = { ...raw, web: liftedWeb };
+  for (const k of LEGACY_WEB_KEYS) delete out[k];
+  return out as Partial<RtmgConfig>;
+}
+
 export function mergeConfig(
   base: RtmgConfig,
-  override: Partial<RtmgConfig> | null | undefined,
+  rawOverride: Partial<RtmgConfig> | null | undefined,
 ): RtmgConfig {
-  if (!override) return base;
+  if (!rawOverride) return base;
+  const override = normalizeConfigShape(
+    rawOverride as Partial<RtmgConfig> & Record<string, unknown>,
+  );
+  const web: Partial<RtmgWebConfig> = override.web ?? {};
   return {
+    version: typeof override.version === "number" ? override.version : base.version,
     engine: { ...base.engine, ...(override.engine ?? {}) },
     prompts: { ...base.prompts, ...(override.prompts ?? {}) },
     controls: { ...base.controls, ...(override.controls ?? {}) },
@@ -592,23 +656,25 @@ export function mergeConfig(
       ...(override.channel_ranges ?? {}),
     },
     seed: typeof override.seed === "number" ? override.seed : base.seed,
-    effects: { ...base.effects, ...(override.effects ?? {}) },
-    audio: { ...base.audio, ...(override.audio ?? {}) },
-    reset_seconds:
-      typeof override.reset_seconds === "number"
-        ? override.reset_seconds
-        : base.reset_seconds,
-    denoise_session_gate: {
-      ...base.denoise_session_gate,
-      ...(override.denoise_session_gate ?? {}),
-    },
-    restart_song_on_swap:
-      typeof override.restart_song_on_swap === "boolean"
-        ? override.restart_song_on_swap
-        : base.restart_song_on_swap,
     swap_source_mode: isSwapSourceMode(override.swap_source_mode)
       ? override.swap_source_mode
       : base.swap_source_mode,
+    web: {
+      effects: { ...base.web.effects, ...(web.effects ?? {}) },
+      audio: { ...base.web.audio, ...(web.audio ?? {}) },
+      reset_seconds:
+        typeof web.reset_seconds === "number"
+          ? web.reset_seconds
+          : base.web.reset_seconds,
+      denoise_session_gate: {
+        ...base.web.denoise_session_gate,
+        ...(web.denoise_session_gate ?? {}),
+      },
+      restart_song_on_swap:
+        typeof web.restart_song_on_swap === "boolean"
+          ? web.restart_song_on_swap
+          : base.web.restart_song_on_swap,
+    },
     // Curves are operator-authored and only meaningful as a whole bag,
     // so the override entry replaces the base entry whole when present.
     // Absent override keeps whatever the base has (DEFAULT_CONFIG leaves
@@ -724,7 +790,7 @@ export function applyConfig(c: RtmgConfig): void {
       ? resolved.controls.dcw_wavelet
       : s.dcwWavelet,
     rcfgMode: isRcfgMode(resolved.controls.rcfg_mode) ? resolved.controls.rcfg_mode : s.rcfgMode,
-    lufsOn: resolved.audio.lufs_enabled,
+    lufsOn: resolved.web.audio.lufs_enabled,
   }));
 
   // Loop region: when the config carries one, push it into the perf
@@ -841,10 +907,10 @@ export function applyConfig(c: RtmgConfig): void {
  * DEMON-shaped base of a session without rebuilding the field-mapping
  * logic.
  *
- * Fields the stores don't own (channel_ranges, effects, audio
- * defaults, denoise_session_gate, restart_song_on_swap, swap_source_mode, the
- * non-numeric engine.* config) are pulled from the active config so
- * exports round-trip cleanly through Import.
+ * Fields the stores don't own (channel_ranges, swap_source_mode, the
+ * non-numeric engine.* config, and the whole `web` block — effects,
+ * audio defaults, denoise_session_gate, restart_song_on_swap) are pulled
+ * from the active config so exports round-trip cleanly through Import.
  */
 export function captureRtmgConfig(): RtmgConfig {
   const perf = usePerformanceStore.getState();
@@ -865,6 +931,7 @@ export function captureRtmgConfig(): RtmgConfig {
   }
 
   return {
+    version: active.version,
     engine: {
       ...active.engine,
       key: perf.activeKey,
@@ -884,12 +951,14 @@ export function captureRtmgConfig(): RtmgConfig {
     controls,
     channel_ranges: active.channel_ranges,
     seed: perf.seed,
-    effects: active.effects,
-    audio: { ...active.audio, lufs_enabled: perf.lufsOn },
-    reset_seconds: active.reset_seconds,
-    denoise_session_gate: active.denoise_session_gate,
-    restart_song_on_swap: active.restart_song_on_swap,
     swap_source_mode: active.swap_source_mode,
+    web: {
+      effects: active.web.effects,
+      audio: { ...active.web.audio, lufs_enabled: perf.lufsOn },
+      reset_seconds: active.web.reset_seconds,
+      denoise_session_gate: active.web.denoise_session_gate,
+      restart_song_on_swap: active.web.restart_song_on_swap,
+    },
     loop: {
       band: perf.loopBand,
       enabled: perf.bandLoopEnabled,

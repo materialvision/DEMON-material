@@ -116,10 +116,10 @@ export function useRenderLoop(refs: Refs) {
         // every applyConfig() so an async-arriving config or future
         // "Reload config" affordance lands without a page refresh.
         const applyFx = (c: ReturnType<typeof getConfig>) => {
-          e.setParallaxStrength(c.effects.parallax_strength);
-          e.setBloomOnKick(c.effects.bloom_on_kick);
-          e.setBloomThreshold(c.effects.bloom_threshold);
-          e.setWarpStrength(c.effects.warp_strength);
+          e.setParallaxStrength(c.web.effects.parallax_strength);
+          e.setBloomOnKick(c.web.effects.bloom_on_kick);
+          e.setBloomThreshold(c.web.effects.bloom_threshold);
+          e.setWarpStrength(c.web.effects.warp_strength);
         };
         applyFx(getConfig());
         unsubEffectsConfig = subscribeConfig(applyFx);

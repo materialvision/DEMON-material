@@ -1,7 +1,11 @@
 {
   "_comment": "Initial settings for the DEMON installation. Edit and refresh — no rebuild needed. Slider max/step lives in types/engine.ts (SLIDER_META); only the per-control starting value is set here. Schema and defaults: web/lib/config.ts.",
 
+  "_shape_help": "Two concerns live here. Everything OUTSIDE `web` is the SHARED config — engine/generation intent and the control surface that any frontend driving DEMON consumes (web demo, Ableton M4L, the VST, MCP/headless). The `web` block is the browser demo's own presentation/playback/interaction; other frontends read the shared fields, keep their own equivalent of `web`, and ignore this one. `version` tags the shared schema; bump it on a breaking shape change.",
+
   "_variants_help": "Selected fields carry an `_xl` sibling (depth_xl, enabled_loras_xl in engine; a_xl, b_xl, blend_xl in prompts). When the active checkpoint scale is 5B (xl), the `_xl` value wins at applyConfig time. Other scales (2B / unknown) use the base value. Selection happens once at boot after /api/loras returns the checkpoint scale.",
+
+  "version": 1,
 
   "engine": {
     "sde": false,
@@ -86,7 +90,12 @@
     "dcw_wavelet": "haar"
   },
 
-  "_channel_ranges_help": "Per-channel slider range + direction. {min,max} caps the value the slider/MIDI/keyboard can drive into the engine (also applied to scheduled-curve writes via clampToMeta). `reverse: true` flips the input mapping so dragging UP (or turning the MIDI knob clockwise) sends a LOWER engine value -- use for channels that sound better when turned down so the operator's instinct to push up produces the desired result. Stored values still live in [min, max]; reverse changes only the UI/input mapping, not the wire range. Omitted params fall back to SLIDER_META in types/engine.ts (max=3.0 by default, no min).",
+  "seed": 42,
+
+  "_swap_source_mode_help": "Default inference source for uploaded-track swaps. One of full, instruments, vocals. Built-in fixtures keep using their full source unless the track is present in the upload library. Engine-facing (selects what audio is sent for inference), so it lives in the shared config.",
+  "swap_source_mode": "instruments",
+
+  "_channel_ranges_help": "Per-channel control range + direction — part of the shared control surface, so the VST and M4L knob mappings can honor it too. {min,max} caps the value a slider/MIDI/keyboard can drive into the engine (also applied to scheduled-curve writes via clampToMeta). `reverse: true` flips the input mapping so dragging UP (or turning the knob clockwise) sends a LOWER engine value -- use for channels that sound better when turned down so the operator's instinct to push up produces the desired result. Stored values still live in [min, max]; reverse changes only the input mapping, not the wire range. Omitted params fall back to SLIDER_META in types/engine.ts (max=3.0 by default, no min).",
   "channel_ranges": {
     "ch_g0": { "min": 0, "max": 2.2, "reverse": false },
     "ch_g1": { "min": 0, "max": 2.0, "reverse": false },
@@ -104,38 +113,36 @@
     "ch56": { "min": 0, "max": 2.0, "reverse": false }
   },
 
-  "seed": 42,
+  "_web_help": "The browser demo's own presentation, playback, and interaction settings. Other frontends (Ableton M4L, the VST, MCP/headless) read the shared fields above and ignore this block — each keeps its own equivalent.",
+  "web": {
+    "_audio_help": "Output audio chain (client-side playback DSP). lufs_enabled toggles the loudness matcher on at boot (operator can still flip it via the LUFS button in-session). lufs_window_sec controls the meter's sliding window. 3s is the standard. Lower = faster response but noisier and prone to high-water spikes on transients. Practical floor ~1.5s. lufs_metric picks the metric: 'lufs' (BS.1770 K-weighted, broadcast standard) or 'dba' (IEC 61672 A-weighted, closer to perceived loudness on bright/distorted content). lufs_silence_floor_db disengages the matcher when the chunk at the playhead reads more than this far below target (gain ramps to 1.0 instead of computing a boost), so silent regions of the model output don't get amplified into audible noise; 30 is well outside real musical content, lower to 20 to disengage on quiet passages too. lufs_silence_floor_hysteresis_db is the Schmitt-trigger band: once disengaged, the matcher re-engages only when the chunk reads within (floor - hysteresis) dB of target, preventing flapping at the threshold. Widen if you still hear volume swells at silence boundaries. The matcher always seeds the high-water mark with the source's loudest short-term window at session start, so the louder of {source, denoised} defines the target from t=0 -- no need to wait for the meter to discover it.",
+    "audio": {
+      "lufs_enabled": false,
+      "lufs_window_sec": 1.5,
+      "lufs_metric": "lufs",
+      "lufs_peak_headroom": 4.0,
+      "lufs_silence_floor_db": 30.0,
+      "lufs_silence_floor_hysteresis_db": 6.0
+    },
 
-  "_audio_help": "Output audio chain. lufs_enabled toggles the loudness matcher on at boot (operator can still flip it via the LUFS button in-session). lufs_window_sec controls the meter's sliding window. 3s is the standard. Lower = faster response but noisier and prone to high-water spikes on transients. Practical floor ~1.5s. lufs_metric picks the metric: 'lufs' (BS.1770 K-weighted, broadcast standard) or 'dba' (IEC 61672 A-weighted, closer to perceived loudness on bright/distorted content). lufs_silence_floor_db disengages the matcher when the chunk at the playhead reads more than this far below target (gain ramps to 1.0 instead of computing a boost), so silent regions of the model output don't get amplified into audible noise; 30 is well outside real musical content, lower to 20 to disengage on quiet passages too. lufs_silence_floor_hysteresis_db is the Schmitt-trigger band: once disengaged, the matcher re-engages only when the chunk reads within (floor - hysteresis) dB of target, preventing flapping at the threshold. Widen if you still hear volume swells at silence boundaries. The matcher always seeds the high-water mark with the source's loudest short-term window at session start, so the louder of {source, denoised} defines the target from t=0 -- no need to wait for the meter to discover it.",
-  "audio": {
-    "lufs_enabled": false,
-    "lufs_window_sec": 1.5,
-    "lufs_metric": "lufs",
-    "lufs_peak_headroom": 4.0,
-    "lufs_silence_floor_db": 30.0,
-    "lufs_silence_floor_hysteresis_db": 6.0
-  },
+    "_effects_help": "Audio-reactive video shader pipeline (parallax + bloom-on-kick). Both effects pulse with the kick envelope; the perimeter ribbons + DEMON wordmark also pulse with kick via a CSS variable.",
+    "effects": {
+      "parallax_strength": 0.4,
+      "bloom_on_kick": 0.3,
+      "bloom_threshold": 0.15,
+      "warp_strength": 0.4
+    },
 
-  "_effects_help": "Audio-reactive video shader pipeline (parallax + bloom-on-kick). Both effects pulse with the kick envelope; the perimeter ribbons + DEMON wordmark also pulse with kick via a CSS variable.",
-  "effects": {
-    "parallax_strength": 0.4,
-    "bloom_on_kick": 0.3,
-    "bloom_threshold": 0.15,
-    "warp_strength": 0.4
-  },
+    "_reset_seconds_help": "Idle timeout. After this many seconds of no interaction (pointer, key, or MIDI), every control reverts to the defaults above. Set to 0 to disable.",
+    "reset_seconds": 0,
 
-  "_reset_seconds_help": "Idle timeout. After this many seconds of no interaction (pointer, key, or MIDI), every control reverts to the defaults above. Set to 0 to disable.",
-  "reset_seconds": 0,
+    "_denoise_session_gate_help": "On every session start (clicking Play) AND on song swaps, snap the engine's denoise value to 0 and play a visual-only display glide from the slider's prior value down to 0 over glide_ms. The engine value never moves with the glide; it's a 'hear the source first' onboarding cue, and the slide doubles as a hint that the top ribbon is a slider. The slide is only visible when denoise is non-zero at the moment of the gate (first session uses controls.denoise above; later sessions and swaps use wherever the operator left it). Set enabled to false to skip the snap and glide entirely. With the gate off, controls.denoise seeds first paint and the slider keeps the operator's last value across sessions and swaps.",
+    "denoise_session_gate": {
+      "enabled": true,
+      "glide_ms": 700
+    },
 
-  "_denoise_session_gate_help": "On every session start (clicking Play) AND on song swaps, snap the engine's denoise value to 0 and play a visual-only display glide from the slider's prior value down to 0 over glide_ms. The engine value never moves with the glide; it's a 'hear the source first' onboarding cue, and the slide doubles as a hint that the top ribbon is a slider. The slide is only visible when denoise is non-zero at the moment of the gate (first session uses controls.denoise above; later sessions and swaps use wherever the operator left it). Set enabled to false to skip the snap and glide entirely. With the gate off, controls.denoise seeds first paint and the slider keeps the operator's last value across sessions and swaps.",
-  "denoise_session_gate": {
-    "enabled": true,
-    "glide_ms": 700
-  },
-
-  "_restart_song_on_swap_help": "When true, picking a different song mid-session restarts playback from frame 0 of the new song. When false, the worklet keeps the playhead's phase across the swap, so swapping at 1:30 into a 4:00 track starts the new track at 1:30. Default true matches the ScriptProcessor fallback's existing behavior.",
-  "restart_song_on_swap": false,
-
-  "_swap_source_mode_help": "Default inference source for uploaded-track swaps. One of full, instruments, vocals. Built-in fixtures keep using their full source unless the track is present in the upload library.",
-  "swap_source_mode": "instruments"
+    "_restart_song_on_swap_help": "When true, picking a different song mid-session restarts playback from frame 0 of the new song. When false, the worklet keeps the playhead's phase across the swap, so swapping at 1:30 into a 4:00 track starts the new track at 1:30. Default true matches the ScriptProcessor fallback's existing behavior.",
+    "restart_song_on_swap": false
+  }
 }

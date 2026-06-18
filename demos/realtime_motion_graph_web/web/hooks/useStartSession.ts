@@ -703,7 +703,7 @@ export function useStartSession() {
     setStatus("connecting", "Starting audio…");
 
     const player = new AudioPlayer({
-      loudnessConfig: () => getConfig().audio,
+      loudnessConfig: () => getConfig().web.audio,
     });
     try {
       await player.init(remote.initialBuffer, remote.channels);
@@ -755,7 +755,7 @@ export function useStartSession() {
     // we consume-and-clear here too. Fresh sessions don't set the flag,
     // so their gate behaviour is unchanged.
     const perfState = usePerformanceStore.getState();
-    const gate = getConfig().denoise_session_gate;
+    const gate = getConfig().web.denoise_session_gate;
     if (perfState.skipNextDenoiseGate) {
       perfState.setSkipNextDenoiseGate(false);
     } else if (gate.enabled) {
