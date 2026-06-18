@@ -535,6 +535,26 @@ def test_generated_wire_types_match_contract():
     )
 
 
+def test_generated_wire_types_hpp_match_contract():
+    # The committed packages/demon-client/types/wireContract.gen.hpp (vendored
+    # into the rtmg-vst C++ plugin) must be a byte-for-byte projection of the
+    # live contract. Regenerate with
+    # `python demos/realtime_motion_graph_web/scripts/gen_wire_types.py`.
+    from acestep.streaming.knobs import KNOB_SCHEMA_VERSION
+
+    gen = _load_codegen_module()
+    expected = gen.render_wire_types_hpp(wire_contract(), KNOB_SCHEMA_VERSION)
+    committed = (
+        _SDK / "types" / "wireContract.gen.hpp"
+    ).read_text(encoding="utf-8")
+    # Normalize EOLs: git autocrlf may rewrite the committed file on checkout.
+    assert expected.replace("\r\n", "\n") == committed.replace("\r\n", "\n"), (
+        "packages/demon-client/types/wireContract.gen.hpp is stale — "
+        "regenerate with "
+        "`python demos/realtime_motion_graph_web/scripts/gen_wire_types.py`"
+    )
+
+
 def test_catalog_projection_shapes():
     wc = wire_contract()
     assert wc["version"] >= 1
