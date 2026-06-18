@@ -92,6 +92,14 @@ Also exported: the raw maps/strings (`CONTROL_DESCRIPTIONS`,
 readouts, DOM wiring) and web-only affordance hints (keyboard chords,
 MIDI-learn) stay per-client.
 
+The same module also holds `TERMS` — the canonical product **nouns** for
+features the product team renames over time (`tags`, `lora`/`lora_plural` →
+flip "LoRA" to "Trained Style" in one place). Keyed by a stable id, plain
+serializable data exported from `node.ts` too, so the native (VST) C++ codegen
+emits the same labels instead of hand-authored strings. Compose compound
+labels by interpolating a term (`` `${TERMS.lora} Library` ``). Headline
+labels reference it; deep inline help prose keeps its literals.
+
 ## Quickstart
 
 ```ts

@@ -19,6 +19,7 @@ import { useMidiStore } from "@/store/useMidiStore";
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
 import { LORA_SLIDER_MAX } from "@/types/engine";
+import { TERMS } from "@demon/client";
 import type { LoraCatalogEntry, LoraMetadata } from "@demon/client";
 
 // LoRA library tile — redesigned for a large catalog (40+ genre LoRAs).
@@ -652,23 +653,23 @@ export function LibraryTile() {
   if (catalog.length === 0) {
     return (
       <div className="mixer-tile" data-tile="library">
-        <div className="mixer-tile-label">LoRA Library</div>
-        <div className="lora-empty">no LoRAs found</div>
+        <div className="mixer-tile-label">{`${TERMS.lora} Library`}</div>
+        <div className="lora-empty">{`no ${TERMS.lora_plural} found`}</div>
       </div>
     );
   }
 
   return (
     <div className="mixer-tile" data-tile="library">
-      <div className="mixer-tile-label">LoRA Library</div>
+      <div className="mixer-tile-label">{`${TERMS.lora} Library`}</div>
       <div className="lora-search">
         <input
           type="text"
           className="lora-search-input"
-          placeholder="search LoRAs"
+          placeholder={`search ${TERMS.lora_plural}`}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          aria-label="Search LoRA library"
+          aria-label={`Search ${TERMS.lora} library`}
         />
       </div>
 
@@ -687,7 +688,7 @@ export function LibraryTile() {
         <div className="lora-section-head">
           {searching
             ? `Results · ${filtered.length}`
-            : `All LoRAs · ${compatible.length}`}
+            : `All ${TERMS.lora_plural} · ${compatible.length}`}
         </div>
         <div className="lora-browse">
           {filtered.length === 0 ? (

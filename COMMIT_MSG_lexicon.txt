@@ -1,0 +1,13 @@
+feat(client-sdk): add a product-noun lexicon for control labels
+
+TERMS in @demon/client/controls is the canonical home for the feature
+nouns the product team renames over time (Tags, LoRAs). Keyed by a stable
+id so a rename is a one-line edit in one place instead of the same word
+hand-edited across web + VST + M4L. Pure serializable data exported from
+node.ts too, so the in-progress native (VST) C++ codegen emits the same
+labels from this single source.
+
+The web demo's headline label sites (the Tags / LoRA Library accordion
+titles, the prompts panel labels, the library header / search / counts)
+now compose from TERMS. Deep inline help prose keeps its literals by
+design. Behavior is unchanged: every label renders the same text today.

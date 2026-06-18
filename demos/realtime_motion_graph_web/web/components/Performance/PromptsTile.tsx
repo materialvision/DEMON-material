@@ -2,6 +2,7 @@
 
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
+import { TERMS } from "@demon/client";
 
 export function PromptsTile() {
   const promptA = usePerformanceStore((s) => s.promptA);
@@ -33,7 +34,7 @@ export function PromptsTile() {
 
   return (
     <div className="mixer-tile mixer-tile-prompts" data-tile="prompts">
-      <div className="mixer-tile-label">Tags</div>
+      <div className="mixer-tile-label">{TERMS.tags}</div>
       <div id="prompt-section">
         <div className="prompt-slot">
           <label
@@ -42,7 +43,7 @@ export function PromptsTile() {
             data-dd-tooltip="Primary tags — text the model conditions on. With the blend at 0, these are the only tags driving the output."
             data-dd-tooltip-wide=""
           >
-            Tags A
+            {`${TERMS.tags} A`}
           </label>
           <textarea
             id="prompt-a"
@@ -86,7 +87,7 @@ export function PromptsTile() {
             data-dd-tooltip="Secondary tags — interpolates with A based on the blend slider. With the blend at 1, only B drives the output."
             data-dd-tooltip-wide=""
           >
-            Tags B
+            {`${TERMS.tags} B`}
           </label>
           <textarea
             id="prompt-b"
@@ -104,7 +105,7 @@ export function PromptsTile() {
           type="button"
           onClick={sendPrompt}
         >
-          Send Tags
+          {`Send ${TERMS.tags}`}
           <kbd className="desktop-only send-kbd">⏎</kbd>
         </button>
       </div>
