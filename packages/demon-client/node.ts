@@ -74,3 +74,9 @@ export {
   base64ToArrayBuffer,
 } from "./inputs";
 export type { StemSourceMode, SerializedInput, SerializedInputs } from "./inputs";
+
+// Portable control copy — user-facing knob/input descriptions + display names
+// for the native preset path (M4L bridge / VST codegen). Pure data + pure
+// functions (no DOM/fetch), so the whole module is safe in the CJS bundle.
+// See ./controls.
+export * from "./controls";

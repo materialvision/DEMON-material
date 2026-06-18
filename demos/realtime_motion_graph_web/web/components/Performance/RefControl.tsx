@@ -14,7 +14,11 @@ import { trimAudioBuffer } from "@/lib/audio/trimAudioBuffer";
 import { useCustomTracksStore } from "@/store/useCustomTracksStore";
 import { usePerformanceStore, type RefSource } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
-import type { RemoteBackend } from "@demon/client";
+import {
+  STRUCTURE_REF_DESCRIPTION,
+  TIMBRE_REF_DESCRIPTION,
+  type RemoteBackend,
+} from "@demon/client";
 
 import { RefSelect } from "./RefSelect";
 
@@ -308,9 +312,7 @@ export function RefControl({ kind }: { kind: RefKind }) {
         onUpload={() => fileInputRef.current?.click()}
         uploadLabel={`Upload ${bind.label}`}
         tooltip={
-          kind === "timbre"
-            ? "Optional reference audio for the timbre channel. Picking a track here biases the model's instrument character toward what's in that file, leaving structure (rhythm, sections) free to follow the playing input. Default 'Input Track' uses the playing source's own latent."
-            : "Optional reference audio for the structure channel. Picking a track here biases the model's section/rhythm/dynamics layout toward that file, leaving timbre (instrument character) free to follow the playing input. Default 'Input Track' uses the playing source's own latent."
+          kind === "timbre" ? TIMBRE_REF_DESCRIPTION : STRUCTURE_REF_DESCRIPTION
         }
       />
       <input

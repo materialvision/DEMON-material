@@ -25,6 +25,13 @@ export * from "./config";
 // stays per-client). See ./inputs.
 export * from "./inputs";
 
+// Portable control copy: user-facing knob/input descriptions + display names
+// (describeControl / displayNameFor / resolveControlDescription). Client-side,
+// hand-authored — the editorial layer, distinct from the terse agent-facing
+// descriptions on the /api/knobs manifest. The tooltip-rendering machinery
+// stays per-client. See ./controls.
+export * from "./controls";
+
 // WebSocket session client (binary slice stream, swap/stem state
 // machines, typed senders).
 export { RemoteBackend, float16ArrayToFloat32 } from "./protocol";

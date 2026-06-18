@@ -69,6 +69,29 @@ ignore-unknown; write = preserve-unknown; a `version` field is present from
 day one so a later loader can branch. Each client keeps its own state
 wiring — only the schema + transforms are shared.
 
+## Control copy (`controls/`)
+
+The **user-facing** descriptions and display names a frontend renders on its
+knobs/inputs — "how much the model reshapes the source audio…", `denoise` →
+`strength`. Like `config.json` this is hand-authored, client-side copy, and
+it is a second, distinct layer from the `/api/knobs` manifest's `description`
+field: the manifest carries the **terse, agent-facing** one-liner generated
+from the Python registry; [`controls/`](./controls) carries the **editorial,
+when-to-reach-for-it** prose. Same param ids, different audience.
+
+| Export | What it does |
+|---|---|
+| `describeControl(param)` | Rich user-facing description for a param id, or `undefined`. LoRA/manual-slot families share one string each (matched by prefix). |
+| `displayNameFor(param)` | Friendly label (overrides win; else snake_case → spaced words). |
+| `resolveControlDescription(param, manifest?)` | One lookup that prefers the rich copy and falls back to the manifest's terse `description` — so runtime-only knobs (LoRAs, manual slots) still surface *something*. Pass the `/api/knobs` manifest as the second arg. |
+
+Also exported: the raw maps/strings (`CONTROL_DESCRIPTIONS`,
+`CONTROL_DISPLAY_NAMES`, `INTERP_PATH_DESCRIPTIONS`, `SOURCE_MODE_HINTS`,
+`TIMBRE_REF_DESCRIPTION` / `STRUCTURE_REF_DESCRIPTION`,
+`STEM_SECTION_DESCRIPTION`). The tooltip-**rendering** machinery (hover
+readouts, DOM wiring) and web-only affordance hints (keyboard chords,
+MIDI-learn) stay per-client.
+
 ## Quickstart
 
 ```ts
