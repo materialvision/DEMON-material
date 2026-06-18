@@ -8,6 +8,7 @@ import { useCurveStore } from "@/store/useCurveStore";
 import { useMidiStore } from "@/store/useMidiStore";
 import { usePerformanceStore } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
+import { TERMS } from "@demon/client";
 
 import { CollapsibleTile } from "./CollapsibleTile";
 import { CoreTile } from "./CoreTile";
@@ -323,11 +324,11 @@ function StylesTab({ spread }: { spread: boolean }) {
         </>
       ) : (
         <>
-          <CollapsibleTile title="Tags">
+          <CollapsibleTile title={TERMS.tags}>
             <PromptsTile />
           </CollapsibleTile>
           {canLora && (
-            <CollapsibleTile title="LoRA Library">
+            <CollapsibleTile title={`${TERMS.lora} Library`}>
               <LibraryTile />
             </CollapsibleTile>
           )}

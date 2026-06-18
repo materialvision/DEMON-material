@@ -48,6 +48,7 @@ __export(node_exports, {
   SOURCE_MODE_HINTS: () => SOURCE_MODE_HINTS,
   STEM_SECTION_DESCRIPTION: () => STEM_SECTION_DESCRIPTION,
   STRUCTURE_REF_DESCRIPTION: () => STRUCTURE_REF_DESCRIPTION,
+  TERMS: () => TERMS,
   TIMBRE_REF_DESCRIPTION: () => TIMBRE_REF_DESCRIPTION,
   VALID_TIME_SIGNATURES: () => VALID_TIME_SIGNATURES,
   applyConfigToState: () => applyConfigToState,
@@ -72,6 +73,7 @@ __export(node_exports, {
   rtmgConfigToSessionConfig: () => rtmgConfigToSessionConfig,
   selectVariant: () => selectVariant,
   serializeConfig: () => serializeConfig,
+  termFor: () => termFor,
   withUnknownKeys: () => withUnknownKeys
 });
 module.exports = __toCommonJS(node_exports);
@@ -2336,6 +2338,19 @@ var TIMBRE_REF_DESCRIPTION = "Optional reference audio for the timbre channel. P
 var STRUCTURE_REF_DESCRIPTION = "Optional reference audio for the structure channel. Picking a track here biases the model's section/rhythm/dynamics layout toward that file, leaving timbre (instrument character) free to follow the playing input. Default 'Input Track' uses the playing source's own latent.";
 var STEM_SECTION_DESCRIPTION = "Vocal and instrumental stems extracted from the source track. Drag a panner right to mix that layer into the model output. Click the layer name to mute or unmute without losing the level. Hold V (vocals) or I (instruments) + \u25B2\u25BC to nudge from the keyboard.";
 
+// controls/lexicon.ts
+var TERMS = {
+  /** The prompt/tags input feature. */
+  tags: "Tags",
+  /** A LoRA, singular — for compound labels like `${TERMS.lora} Library`. */
+  lora: "LoRA",
+  /** LoRAs, plural — for counts, placeholders, empty states. */
+  lora_plural: "LoRAs"
+};
+function termFor(id) {
+  return TERMS[id];
+}
+
 // controls/index.ts
 function displayNameFor(param) {
   return CONTROL_DISPLAY_NAMES[param] ?? param.replace(/_/g, " ");
@@ -2383,6 +2398,7 @@ function resolveControlDescription(param, manifest) {
   SOURCE_MODE_HINTS,
   STEM_SECTION_DESCRIPTION,
   STRUCTURE_REF_DESCRIPTION,
+  TERMS,
   TIMBRE_REF_DESCRIPTION,
   VALID_TIME_SIGNATURES,
   applyConfigToState,
@@ -2407,5 +2423,6 @@ function resolveControlDescription(param, manifest) {
   rtmgConfigToSessionConfig,
   selectVariant,
   serializeConfig,
+  termFor,
   withUnknownKeys
 });

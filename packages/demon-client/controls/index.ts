@@ -17,6 +17,7 @@ import {
 } from "./copy";
 
 export * from "./copy";
+export * from "./lexicon";
 
 /** User-facing display label for a param id. Friendly overrides win; the
  *  fallback turns engine snake_case into spaced words so the UI still matches

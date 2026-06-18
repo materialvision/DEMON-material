@@ -137,6 +137,13 @@ package root:
 - `resolveControlDescription(param, manifest?)` → prefer rich copy, fall back
   to the manifest's `description` so runtime-only knobs still read something.
 
+Also here: `TERMS` — the canonical product nouns that get renamed (`tags`,
+`lora`/`lora_plural`). Stable id, plain data, exported from `node.ts` too, so
+the in-progress native (VST) codegen emits labels from the same source.
+Compose compound labels by interpolating (`` `${TERMS.lora} Library` ``);
+flip the noun once and web + VST follow. Headline labels use it; deep inline
+sentences keep their literals (term-fragmenting prose is churn, not a win).
+
 The tooltip-rendering machinery and web-only affordance hints (keyboard
 chords, MIDI-learn) stay in your client — only the copy is shared.
 
@@ -165,9 +172,10 @@ chords, MIDI-learn) stay in your client — only the copy is shared.
 - `config/` is the operator-defaults `config.json` schema + pure transforms
   (the one hand-authored, client-side contract — not generated). Keep it
   pure: no store/DOM imports cross into it, so M4L / VST can consume it.
-- `controls/` is the user-facing knob/input copy (the second hand-authored,
-  client-side layer — editorial prose, not the registry's terse
-  `description`). Pure data + pure functions, no store/DOM imports.
+- `controls/` is the user-facing knob/input copy + the `TERMS` product-noun
+  lexicon (the second hand-authored, client-side layer — editorial prose +
+  display labels, not the registry's terse `description`). Pure data + pure
+  functions, no store/DOM imports, so the native (VST) codegen can read it.
 - If you change the SDK's bundled surface (`controls/`, `config/`, etc.),
   rebuild so the committed `dist/` static-demo bundles don't go stale:
   `cd packages/demon-client && npm run build`.
