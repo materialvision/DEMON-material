@@ -122,6 +122,45 @@ describe("RemoteBackend slice epochs", () => {
     expect(slices[slices.length - 1].epoch).toBe(3);
   });
 
+  it("adopts the server's source_epoch on swap_ready instead of a blind ++", async () => {
+    // The write_audio pin must track the server's authoritative source
+    // generation. When swap_ready carries source_epoch, the client takes
+    // it verbatim — so a missed or duplicated swap_ready can't silently
+    // desync the local counter from the source the server actually holds.
+    const { remote, ws } = await openSession();
+    ws.emitMessage(
+      JSON.stringify({
+        type: "swap_ready",
+        duration: 0.01,
+        channels: 2,
+        fixture_name: "z.wav",
+        source_epoch: 7,
+      }),
+    );
+    ws.emitMessage(makeBufferFrame(f16ExactRamp(480 * 2)));
+    expect(remote.sliceEpoch).toBe(7);
+  });
+
+  it("seeds sliceEpoch from the ready source_epoch on reconnect", async () => {
+    // Reconnecting into a session that already swapped: ready reports the
+    // live source_epoch, so the fresh backend must start there rather than
+    // at 0 — otherwise every write_audio pin would target the wrong source.
+    installFakeWebSocket();
+    const remote = new RemoteBackend(
+      "ws://test.invalid/",
+      new Float32Array(0),
+      2,
+      { use_server_fixture: true, fixture_name: "x.wav" },
+    );
+    const p = remote.connect();
+    const ws = FakeWebSocket.last;
+    ws.emitOpen();
+    ws.emitMessage(JSON.stringify({ ...READY, source_epoch: 4 }));
+    ws.emitMessage(makeBufferFrame(f16ExactRamp(960 * 2)));
+    await p;
+    expect(remote.sliceEpoch).toBe(4);
+  });
+
   it("decodes RAW and DELTA payloads identically on the fallback path", async () => {
     const { ws, slices } = await openSession();
     const audio = f16ExactRamp(128);

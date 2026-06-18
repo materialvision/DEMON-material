@@ -53,6 +53,7 @@ import type {
   SetTimbreStrengthCommand,
   SwapSourceCommand,
   WireEvent,
+  WriteAudioCommand,
 } from "./types/wireContract.gen";
 
 /** Optional behaviors the host app injects into RemoteBackend. */
@@ -68,6 +69,14 @@ export interface RemoteBackendOptions {
    *  static page: point it at the sibling `sliceDecoder.worker.js`
    *  (e.g. "/sdk/sliceDecoder.worker.js"). */
   sliceWorkerUrl?: string | URL;
+  /** WebSocket implementation to connect with. Defaults to the global
+   *  `WebSocket` (the browser path). Non-browser hosts inject one: the
+   *  Node-for-Max bridge passes the `ws` package, since older Node
+   *  runtimes have no global `WebSocket` and a non-HTTPS Max context can
+   *  trip the global undici client. The constructor is also the authority
+   *  for the `OPEN` ready-state constant, so the senders never read a
+   *  global `WebSocket` either. */
+  WebSocketConstructor?: typeof WebSocket;
 }
 
 // Skip a 125 Hz params tick when this many bytes are already queued in
@@ -283,6 +292,12 @@ export class RemoteBackend extends EventTarget {
 
   private _promptTransform: (tags: string) => string;
   private _sliceWorkerUrl: string | URL | undefined;
+  // WebSocket implementation + its OPEN ready-state constant. Injected so
+  // non-browser hosts (Node-for-Max) supply `ws` and never touch a global
+  // `WebSocket`. OPEN is fixed at 1 by the WHATWG spec across every
+  // implementation, so the fallback is exact when nothing is resolvable.
+  private _wsCtor: typeof WebSocket | undefined;
+  private _wsOpen: number;
 
   constructor(
     url: string,
@@ -313,6 +328,11 @@ export class RemoteBackend extends EventTarget {
     };
     this._promptTransform = opts.promptTransform ?? ((tags) => tags);
     this._sliceWorkerUrl = opts.sliceWorkerUrl;
+    this._wsCtor = opts.WebSocketConstructor;
+    this._wsOpen =
+      (opts.WebSocketConstructor ??
+        (typeof WebSocket !== "undefined" ? WebSocket : undefined))?.OPEN ??
+      1;
     this._initDecoderWorker();
   }
 
@@ -389,7 +409,8 @@ export class RemoteBackend extends EventTarget {
 
   async connect(): Promise<this> {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(this.url);
+      const WS = this._wsCtor ?? WebSocket;
+      const ws = new WS(this.url);
       ws.binaryType = "arraybuffer";
       this.ws = ws;
       this._updateTrace({
@@ -507,6 +528,13 @@ export class RemoteBackend extends EventTarget {
             // Scale + depth bounds are exposed as instance fields; the host
             // app mirrors them into its own state from the "ready" event
             // listener (the SDK never writes app stores).
+            // Adopt the server's authoritative source generation rather than
+            // assuming 0: on a reconnect/resume into a session that has
+            // already swapped, the local counter would otherwise start at 0
+            // and every write_audio pin would target the wrong source. Older
+            // servers omit the field — keep whatever we have in that case.
+            if (typeof msg.source_epoch === "number")
+              this._sliceEpoch = msg.source_epoch;
             phase = "initial-buffer";
           } catch (e) {
             this._updateTrace({ errorAt: Date.now(), phase: "error" });
@@ -537,14 +565,16 @@ export class RemoteBackend extends EventTarget {
           this._pendingSwap = null;
           this.duration = meta.duration;
           this.channels = meta.channels;
-          // Bump epoch BEFORE the dispatch so that the synchronous
-          // `player.swap()` call inside the listener (which bumps
-          // AudioPlayer.swapCount in lockstep) and any subsequent
-          // binary slice the WS hands us are all aligned on the new
-          // buffer. Stale slices already queued in the worker still
-          // carry the previous epoch and will be dropped by the
-          // listener.
-          this._sliceEpoch++;
+          // Adopt the server's authoritative source_epoch BEFORE the
+          // dispatch so that the synchronous `player.swap()` call inside the
+          // listener (which bumps AudioPlayer.swapCount in lockstep) and any
+          // subsequent binary slice the WS hands us are all aligned on the
+          // new buffer. Stale slices already queued in the worker still carry
+          // the previous epoch and will be dropped by the listener. Reading
+          // the wire value (rather than a blind ++) keeps the write_audio pin
+          // exact even if a swap_ready is ever missed or duplicated; older
+          // servers omit it, so fall back to the local increment.
+          this._sliceEpoch = meta.source_epoch ?? this._sliceEpoch + 1;
           this.dispatchEvent(
             new CustomEvent("swap_ready", {
               detail: { ...meta, interleaved },
@@ -690,6 +720,24 @@ export class RemoteBackend extends EventTarget {
               }
               break;
             }
+            case "audio_written":
+              // Ack for write_audio: the refreshed (start_s, end_s) span and
+              // the source generation it landed on. The browser app has no
+              // write_audio sender yet, but the M4L bridge feeds the source
+              // live and surfaces this to confirm a splice committed.
+              this.dispatchEvent(
+                new CustomEvent("audio_written", { detail: msg }),
+              );
+              break;
+            case "audio_write_failed":
+              // Failure ack for write_audio (stale source_epoch, write past
+              // the source end, bad mix/repeat). Without this case it would
+              // fall through to the generic `json` event and a rejected
+              // splice would be invisible to the host.
+              this.dispatchEvent(
+                new CustomEvent("audio_write_failed", { detail: msg.error }),
+              );
+              break;
             case "command_failed":
               // A `requires`-tagged command was rejected because this
               // session's backend lacks the capability (loud failure, never
@@ -873,7 +921,7 @@ export class RemoteBackend extends EventTarget {
      *  `slice_lead_s`. Omit when no slice arrived in the interval. */
     sliceLeadS?: number,
   ): boolean {
-    if (this.ws?.readyState !== WebSocket.OPEN) return false;
+    if (this.ws?.readyState !== this._wsOpen) return false;
     // Backpressure gate: when the socket can't drain (slow uplink, TCP
     // retransmit storms), queueing more 125 Hz reports only makes every
     // report STALER — the server re-anchors its playhead clock on each
@@ -916,7 +964,7 @@ export class RemoteBackend extends EventTarget {
     timeSignature?: string,
     tagsB?: string,
   ): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== this._wsOpen) return;
     try {
       // The host app's promptTransform (RemoteBackendOptions) is applied to
       // both tags on every send. The shipped app injects enabled-LoRA
@@ -957,7 +1005,7 @@ export class RemoteBackend extends EventTarget {
    * Same shape as ``sendSetTimbreStrength``; cheap per slider tick.
    */
   sendSetPromptBlend(value: number): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== this._wsOpen) return;
     try {
       const msg: SetPromptBlendCommand = {
         type: "set_prompt_blend",
@@ -981,7 +1029,7 @@ export class RemoteBackend extends EventTarget {
     path: SetInterpMethodCommand["path"],
     method: SetInterpMethodCommand["method"],
   ): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== this._wsOpen) return;
     try {
       const msg: SetInterpMethodCommand = {
         type: "set_interp_method",
@@ -1000,7 +1048,7 @@ export class RemoteBackend extends EventTarget {
    * slots that warm up over the next ``newDepth - oldDepth`` ticks.
    */
   sendSetDepth(value: number): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== this._wsOpen) return;
     if (!Number.isFinite(value)) return;
     try {
       const msg: SetDepthCommand = {
@@ -1020,7 +1068,7 @@ export class RemoteBackend extends EventTarget {
    * clear (linear chase resumes). Seconds, matching `playback_pos`.
    */
   sendLoopBand(startSec: number | null, endSec: number | null): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== this._wsOpen) return;
     try {
       const msg: LoopBandCommand = {
         type: "loop_band",
@@ -1032,7 +1080,7 @@ export class RemoteBackend extends EventTarget {
   }
 
   sendEnableLora(id: string, strength?: number): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== this._wsOpen) return;
     try {
       const msg: EnableLoraCommand = {
         type: "enable_lora",
@@ -1044,7 +1092,7 @@ export class RemoteBackend extends EventTarget {
   }
 
   sendDisableLora(id: string): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== this._wsOpen) return;
     try {
       const msg: DisableLoraCommand = { type: "disable_lora", id };
       this.ws.send(JSON.stringify(msg));
@@ -1054,7 +1102,7 @@ export class RemoteBackend extends EventTarget {
   /** Add the next manual steering slot (LIFO). Server echoes
    *  ``manual_slot_count`` on success or refusal. */
   sendManualSlotAdd(): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== this._wsOpen) return;
     try {
       const msg: ManualSlotAddCommand = { type: "manual_slot_add" };
       this.ws.send(JSON.stringify(msg));
@@ -1063,7 +1111,7 @@ export class RemoteBackend extends EventTarget {
 
   /** Pop the highest-numbered manual steering slot. */
   sendManualSlotPop(): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== this._wsOpen) return;
     try {
       const msg: ManualSlotPopCommand = { type: "manual_slot_pop" };
       this.ws.send(JSON.stringify(msg));
@@ -1077,7 +1125,7 @@ export class RemoteBackend extends EventTarget {
    * silence-baseline timbre. Cheap enough to send per slider tick.
    */
   sendSetTimbreStrength(value: number): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== this._wsOpen) return;
     try {
       const msg: SetTimbreStrengthCommand = {
         type: "set_timbre_strength",
@@ -1098,7 +1146,7 @@ export class RemoteBackend extends EventTarget {
     interleaved: Float32Array,
     channels: number,
   ): boolean {
-    if (this.ws?.readyState !== WebSocket.OPEN) return false;
+    if (this.ws?.readyState !== this._wsOpen) return false;
     try {
       this.ws.send(JSON.stringify(msg));
       this.ws.send(packPcmFrame(interleaved, channels));
@@ -1135,7 +1183,7 @@ export class RemoteBackend extends EventTarget {
    * (e.g. unknown fixture name).
    */
   sendSetTimbreFixture(name: string): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== this._wsOpen) return;
     try {
       const msg: SetTimbreFixtureCommand = { type: "set_timbre_fixture", name };
       this.ws.send(JSON.stringify(msg));
@@ -1148,7 +1196,7 @@ export class RemoteBackend extends EventTarget {
    * timbre_cleared on success.
    */
   sendClearTimbreSource(): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== this._wsOpen) return;
     try {
       const msg: ClearTimbreSourceCommand = { type: "clear_timbre_source" };
       this.ws.send(JSON.stringify(msg));
@@ -1180,7 +1228,7 @@ export class RemoteBackend extends EventTarget {
    * the pod's disk. Replies with structure_set / structure_failed.
    */
   sendSetStructureFixture(name: string): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== this._wsOpen) return;
     try {
       const msg: SetStructureFixtureCommand = {
         type: "set_structure_fixture",
@@ -1195,7 +1243,7 @@ export class RemoteBackend extends EventTarget {
    * source's own context_latent. Replies with structure_cleared.
    */
   sendClearStructureSource(): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== this._wsOpen) return;
     try {
       const msg: ClearStructureSourceCommand = {
         type: "clear_structure_source",
@@ -1245,7 +1293,7 @@ export class RemoteBackend extends EventTarget {
     timeSignature?: string,
     stemSourceMode?: SwapSourceCommand["stem_source_mode"],
   ): boolean {
-    if (this.ws?.readyState !== WebSocket.OPEN) return false;
+    if (this.ws?.readyState !== this._wsOpen) return false;
     try {
       const msg: SwapSourceCommand = {
         type: "swap_source",
@@ -1260,6 +1308,56 @@ export class RemoteBackend extends EventTarget {
       return true;
     } catch (e) {
       console.error("[protocol] sendSwapSourceByName failed:", e);
+      return false;
+    }
+  }
+
+  /**
+   * Write audio onto the live source in place — the "play into the model"
+   * path, with NO song restart / playhead reset / BPM-key re-detect. The
+   * binary PCM frame is ONLY the audio being written (a bar, a chunk, or a
+   * whole period): the server keeps a sample-exact mirror of the source and
+   * pulls all re-encode context from it. The single input primitive behind
+   * the M4L feed modes (stream / splice / print / autosplice) and the VST's
+   * live splice; the browser app drives generation, not source writes, so
+   * it has no caller yet.
+   *
+   * `opts.sourceEpoch` pins the write to the source generation it was
+   * computed against (from `ready`/`swap_ready`, i.e. this client's
+   * `sliceEpoch`); a server-side mismatch is rejected with
+   * `audio_write_failed` rather than splicing into the wrong source.
+   * `opts.dropIfBusy` skips the send while the WS send buffer is still
+   * draining (>1 MiB) — set it for streamed tape-head writes so a slow
+   * link drops stale frames instead of queueing an ever-staler backlog;
+   * never set it for a one-shot commit that must land. Acked by
+   * `audio_written` / `audio_write_failed`.
+   */
+  sendWriteAudio(
+    interleaved: Float32Array,
+    channels: number,
+    opts: {
+      atS?: number;
+      mix?: WriteAudioCommand["mix"];
+      repeat?: WriteAudioCommand["repeat"];
+      sourceEpoch?: number;
+      refreshTimbre?: boolean;
+      dropIfBusy?: boolean;
+    } = {},
+  ): boolean {
+    if (this.ws?.readyState !== this._wsOpen) return false;
+    if (opts.dropIfBusy && (this.ws.bufferedAmount || 0) > 1 << 20) return false;
+    try {
+      const msg: WriteAudioCommand = { type: "write_audio" };
+      if (opts.atS != null) msg.at_s = opts.atS;
+      if (opts.mix) msg.mix = opts.mix;
+      if (opts.repeat) msg.repeat = opts.repeat;
+      if (opts.sourceEpoch != null) msg.source_epoch = opts.sourceEpoch;
+      if (opts.refreshTimbre) msg.refresh_timbre = true;
+      this.ws.send(JSON.stringify(msg));
+      this.ws.send(packPcmFrame(interleaved, channels));
+      return true;
+    } catch (e) {
+      console.error("[protocol] write_audio failed:", e);
       return false;
     }
   }
@@ -1288,6 +1386,14 @@ export class RemoteBackend extends EventTarget {
    *  resolves and the slice listener can run). */
   setSliceEpoch(epoch: number): void {
     this._sliceEpoch = epoch;
+  }
+
+  /** Current source-buffer epoch (0 at create, bumped by every swap) — the
+   *  client mirror of the server's `source_epoch`. Read it to tag a slice
+   *  consumer's local buffer generation and to pin `write_audio` sends to
+   *  the live source. */
+  get sliceEpoch(): number {
+    return this._sliceEpoch;
   }
 
   /** Test/dev hook: synthesize an abnormal close so the client-side
