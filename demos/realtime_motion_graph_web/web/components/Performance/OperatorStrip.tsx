@@ -8,6 +8,7 @@ import {
   captureRtmgConfig,
   getConfig,
   mergeConfig,
+  serializeConfig,
   type RtmgConfig,
 } from "@/lib/config";
 import {
@@ -46,6 +47,9 @@ import { RefSelect } from "./RefSelect";
 // drops unknown keys); a config exported WITHOUT inputs is byte-identical
 // to the legacy format.
 type DemonExport = RtmgConfig & { inputs?: SerializedInputs };
+type SerializedDemonExport = Record<string, unknown> & {
+  inputs?: SerializedInputs;
+};
 
 const IMPORT_CONFIG_TOOLTIP = "Import config from JSON";
 const EXPORT_CONFIG_TOOLTIP =
@@ -207,7 +211,7 @@ export function OperatorStrip() {
   // session don't collide.
   async function runExport(serializeInputs: boolean): Promise<void> {
     setExportOpen(false);
-    const snapshot: DemonExport = captureRtmgConfig();
+    const snapshot: SerializedDemonExport = serializeConfig(captureRtmgConfig());
     // Serialize on → embed the full inputs (audio travels in the file).
     // Serialize off → still record the active track by name so the export
     // reopens the correct local upload, just without the embedded WAV.

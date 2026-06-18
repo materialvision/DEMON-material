@@ -42,6 +42,33 @@ these, not against hardcoded shapes:
 | `types/wireContract.gen.ts` | The same contract as compile-time TypeScript types, generated from the Python registry. Typecheck against these. |
 | MCP (`describe_protocol`, `list_knobs`) | Same manifests for agent consumers. |
 
+## Operator defaults (`config.json`)
+
+`config.json` is the **client-side operator-defaults** file — distinct from
+the backend-served `/api/knobs` and `/api/protocol` above. Those are
+generated from the Python registry and describe what the engine *accepts*;
+`config.json` is a hand-authored, per-installation file of *startup values*:
+default prompts, knob/param start positions, enabled LoRAs, engine/session
+fields, plus per-client UI blocks (the web app's `web` section). The schema
++ pure transforms live in [`config/`](./config) so web / M4L / VST honor one
+file with one implementation:
+
+| Export | What it does |
+|---|---|
+| `loadConfig(baseUrl?)` | Fetch `<baseUrl>/config.json` (no-arg = page-relative `/config.json`) and merge onto `DEFAULT_CONFIG`. |
+| `mergeConfig(base, override)` | Layer an override (a file, an import) onto a base. Ignores unknown keys for the typed surface; **preserves** them for the write path. |
+| `selectVariant(cfg, scale)` | Resolve the XL (5B) `*_xl` siblings when the active checkpoint is 5B. |
+| `resolveLoraCapForSource(durationS, engine)` | The duration-aware LoRA cap (tiers, else the static fallback). |
+| `rtmgConfigToSessionConfig(cfg, runtime)` | Map the config's engine block + live runtime bits to the handshake `SessionConfig`. The one place every frontend negotiates an identical session. |
+| `applyConfigToState(cfg, scale)` / `captureConfigFromState(snapshot, base)` | Neutral apply/capture adapters — pure shape in, pure shape out. Each client writes a thin wrapper from its own state (zustand, a plugin's param model) to these. |
+| `serializeConfig(cfg)` / `getUnknownKeys(cfg)` | Write path: re-emit top-level keys a client read but does not model, untouched (**preserve-unknown on write**). |
+
+This is a deliberate exception to the "build from manifests, never
+hand-declare" rule (below): it is a hand-authored, client-side file. Read =
+ignore-unknown; write = preserve-unknown; a `version` field is present from
+day one so a later loader can branch. Each client keeps its own state
+wiring — only the schema + transforms are shared.
+
 ## Quickstart
 
 ```ts
