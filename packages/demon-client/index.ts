@@ -20,6 +20,11 @@ export * from "./types/protocol";
 // /api/knobs and /api/protocol contracts above. See ./config and README.
 export * from "./config";
 
+// Portable inputs codec: SerializedInput(s) shape + the shared WAV/base64
+// codec the DemonExport `inputs` field rides on (the store/DOM capture/apply
+// stays per-client). See ./inputs.
+export * from "./inputs";
+
 // WebSocket session client (binary slice stream, swap/stem state
 // machines, typed senders).
 export { RemoteBackend, float16ArrayToFloat32 } from "./protocol";

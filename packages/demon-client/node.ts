@@ -63,3 +63,14 @@ export type {
   ConfigStateSnapshot,
   ConfigApplyPatch,
 } from "./config/wire";
+
+// Portable inputs codec — the SerializedInput(s) shape + the dependency-free
+// WAV/base64 codec the DemonExport `inputs` field rides on. Environment-
+// neutral (no btoa/atob/Buffer) so the bridge produces byte-identical
+// `wavBase64` to the web. The capture/apply (audio decode) stays per-client.
+export {
+  encodeWavInterleaved,
+  arrayBufferToBase64,
+  base64ToArrayBuffer,
+} from "./inputs";
+export type { StemSourceMode, SerializedInput, SerializedInputs } from "./inputs";

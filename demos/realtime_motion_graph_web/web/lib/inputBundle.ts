@@ -38,107 +38,28 @@ import {
   type DecodedFixture,
   type StemSourceMode,
 } from "@/engine/audio/loadFixture";
+import {
+  arrayBufferToBase64,
+  base64ToArrayBuffer,
+  encodeWavInterleaved,
+  type SerializedInput,
+  type SerializedInputs,
+} from "@demon/client";
+
 import { getConfig } from "@/lib/config";
 import { trimAudioBuffer } from "@/lib/audio/trimAudioBuffer";
 import { useCustomTracksStore } from "@/store/useCustomTracksStore";
 import { usePerformanceStore, type RefSource } from "@/store/usePerformanceStore";
 import { useSessionStore } from "@/store/useSessionStore";
 
+// The SerializedInput(s) shape + WAV/base64 codec now live in the SDK (the
+// single source of truth shared with the M4L bridge and the VST). Re-export
+// the types so existing `@/lib/inputBundle` consumers keep their imports.
+export type { SerializedInput, SerializedInputs };
+
 // Fallback ref-duration cap when engine.max_source_duration_s is unset.
 // Mirrors RefControl / TrackPicker.
 const DEFAULT_TRIM_CAP_S = 120;
-
-/** One serialized input. `fixture` is a library track the server can
- *  load by name (no audio on the wire). `clip` embeds the trimmed PCM as
- *  a base64 WAV so an upload survives the round-trip even on a machine
- *  that never had the original file. */
-export type SerializedInput =
-  | { kind: "fixture"; name: string }
-  | {
-      kind: "clip";
-      name: string;
-      sourceMode?: StemSourceMode;
-      /** 16-bit PCM WAV, base64-encoded. Sample rate + channel count
-       *  ride in the WAV header, so decode re-derives them. */
-      wavBase64: string;
-    };
-
-/** The three inputs as captured for export. A field is null when that
- *  input axis simply has nothing active. */
-export interface SerializedInputs {
-  track?: SerializedInput | null;
-  timbre?: SerializedInput | null;
-  structure?: SerializedInput | null;
-}
-
-// ── WAV + base64 codec ─────────────────────────────────────────────────
-
-function writeAscii(view: DataView, offset: number, text: string): void {
-  for (let i = 0; i < text.length; i++) {
-    view.setUint8(offset + i, text.charCodeAt(i));
-  }
-}
-
-/** Encode already-interleaved float32 PCM as a 16-bit WAV ArrayBuffer.
- *  Parallels lib/audio/encodeWav.ts (which takes an AudioBuffer); here
- *  the source is the interleaved Float32Array a DecodedFixture already
- *  holds, so we skip the channel de-interleave. */
-function encodeWavInterleaved(
-  interleaved: Float32Array,
-  channels: number,
-  sampleRate: number,
-): ArrayBuffer {
-  const frames = Math.floor(interleaved.length / channels);
-  const bytesPerSample = 2;
-  const dataLen = frames * channels * bytesPerSample;
-  const out = new ArrayBuffer(44 + dataLen);
-  const view = new DataView(out);
-
-  writeAscii(view, 0, "RIFF");
-  view.setUint32(4, 36 + dataLen, true);
-  writeAscii(view, 8, "WAVE");
-  writeAscii(view, 12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true); // PCM
-  view.setUint16(22, channels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * channels * bytesPerSample, true);
-  view.setUint16(32, channels * bytesPerSample, true);
-  view.setUint16(34, 8 * bytesPerSample, true);
-  writeAscii(view, 36, "data");
-  view.setUint32(40, dataLen, true);
-
-  const pcm = new Int16Array(out, 44, frames * channels);
-  const n = frames * channels;
-  for (let i = 0; i < n; i++) {
-    const s = interleaved[i];
-    const c = s < -1 ? -1 : s > 1 ? 1 : s;
-    // Asymmetric scaling (mirrors encodeWav.ts) keeps the full negative
-    // range without wrapping.
-    pcm[i] = c < 0 ? c * 0x8000 : c * 0x7fff;
-  }
-  return out;
-}
-
-function arrayBufferToBase64(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf);
-  // Chunk to stay clear of the argument-count ceiling on
-  // String.fromCharCode for multi-MB clips.
-  const chunk = 0x8000;
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
-}
-
-function base64ToArrayBuffer(b64: string): ArrayBuffer {
-  const binary = atob(b64);
-  const len = binary.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
-}
 
 function encodeClip(
   name: string,
