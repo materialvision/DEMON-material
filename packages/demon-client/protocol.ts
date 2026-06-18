@@ -528,6 +528,13 @@ export class RemoteBackend extends EventTarget {
             // Scale + depth bounds are exposed as instance fields; the host
             // app mirrors them into its own state from the "ready" event
             // listener (the SDK never writes app stores).
+            // Adopt the server's authoritative source generation rather than
+            // assuming 0: on a reconnect/resume into a session that has
+            // already swapped, the local counter would otherwise start at 0
+            // and every write_audio pin would target the wrong source. Older
+            // servers omit the field — keep whatever we have in that case.
+            if (typeof msg.source_epoch === "number")
+              this._sliceEpoch = msg.source_epoch;
             phase = "initial-buffer";
           } catch (e) {
             this._updateTrace({ errorAt: Date.now(), phase: "error" });
@@ -558,14 +565,16 @@ export class RemoteBackend extends EventTarget {
           this._pendingSwap = null;
           this.duration = meta.duration;
           this.channels = meta.channels;
-          // Bump epoch BEFORE the dispatch so that the synchronous
-          // `player.swap()` call inside the listener (which bumps
-          // AudioPlayer.swapCount in lockstep) and any subsequent
-          // binary slice the WS hands us are all aligned on the new
-          // buffer. Stale slices already queued in the worker still
-          // carry the previous epoch and will be dropped by the
-          // listener.
-          this._sliceEpoch++;
+          // Adopt the server's authoritative source_epoch BEFORE the
+          // dispatch so that the synchronous `player.swap()` call inside the
+          // listener (which bumps AudioPlayer.swapCount in lockstep) and any
+          // subsequent binary slice the WS hands us are all aligned on the
+          // new buffer. Stale slices already queued in the worker still carry
+          // the previous epoch and will be dropped by the listener. Reading
+          // the wire value (rather than a blind ++) keeps the write_audio pin
+          // exact even if a swap_ready is ever missed or duplicated; older
+          // servers omit it, so fall back to the local increment.
+          this._sliceEpoch = meta.source_epoch ?? this._sliceEpoch + 1;
           this.dispatchEvent(
             new CustomEvent("swap_ready", {
               detail: { ...meta, interleaved },

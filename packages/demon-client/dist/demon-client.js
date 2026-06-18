@@ -1380,6 +1380,8 @@ var RemoteBackend = class extends EventTarget {
             this.manualSlotCount = typeof msg.manual_slot_count === "number" ? msg.manual_slot_count : null;
             this.manualSlotCap = typeof msg.manual_slot_cap === "number" ? msg.manual_slot_cap : null;
             this.steeringAvailable = typeof msg.steering_available === "boolean" ? msg.steering_available : null;
+            if (typeof msg.source_epoch === "number")
+              this._sliceEpoch = msg.source_epoch;
             phase = "initial-buffer";
           } catch (e) {
             this._updateTrace({ errorAt: Date.now(), phase: "error" });
@@ -1406,7 +1408,7 @@ var RemoteBackend = class extends EventTarget {
           this._pendingSwap = null;
           this.duration = meta.duration;
           this.channels = meta.channels;
-          this._sliceEpoch++;
+          this._sliceEpoch = meta.source_epoch ?? this._sliceEpoch + 1;
           this.dispatchEvent(
             new CustomEvent("swap_ready", {
               detail: { ...meta, interleaved }
