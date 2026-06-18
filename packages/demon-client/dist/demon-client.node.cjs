@@ -20,16 +20,40 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var node_exports = {};
 __export(node_exports, {
   COMMAND_NAMES: () => COMMAND_NAMES,
+  DCW_MODES: () => DCW_MODES,
+  DCW_WAVELETS: () => DCW_WAVELETS,
+  DEFAULT_CONFIG: () => DEFAULT_CONFIG,
+  DEFAULT_TIME_SIGNATURE: () => DEFAULT_TIME_SIGNATURE,
   EVENT_NAMES: () => EVENT_NAMES,
   KNOB_SCHEMA_VERSION: () => KNOB_SCHEMA_VERSION,
+  KNOWN_TOP_LEVEL_KEYS: () => KNOWN_TOP_LEVEL_KEYS,
+  LOOP_GRID_ORDER: () => LOOP_GRID_ORDER,
   PREEMPTED_CLOSE_CODE: () => PREEMPTED_CLOSE_CODE,
   PROTOCOL_VERSION: () => PROTOCOL_VERSION,
+  RCFG_MODES: () => RCFG_MODES,
   RemoteBackend: () => RemoteBackend,
   SAMPLE_RATE: () => SAMPLE_RATE,
   SLICE_FLAG_DELTA: () => SLICE_FLAG_DELTA,
   SLICE_FLAG_RAW: () => SLICE_FLAG_RAW,
   SLICE_HDR_SIZE: () => SLICE_HDR_SIZE,
-  float16ArrayToFloat32: () => float16ArrayToFloat32
+  VALID_TIME_SIGNATURES: () => VALID_TIME_SIGNATURES,
+  applyConfigToState: () => applyConfigToState,
+  captureConfigFromState: () => captureConfigFromState,
+  float16ArrayToFloat32: () => float16ArrayToFloat32,
+  getUnknownKeys: () => getUnknownKeys,
+  isDcwMode: () => isDcwMode,
+  isDcwWavelet: () => isDcwWavelet,
+  isLoopGridRes: () => isLoopGridRes,
+  isRcfgMode: () => isRcfgMode,
+  isSwapSourceMode: () => isSwapSourceMode,
+  isTimeSignature: () => isTimeSignature,
+  mergeConfig: () => mergeConfig,
+  normalizeConfigShape: () => normalizeConfigShape,
+  resolveLoraCapForSource: () => resolveLoraCapForSource,
+  rtmgConfigToSessionConfig: () => rtmgConfigToSessionConfig,
+  selectVariant: () => selectVariant,
+  serializeConfig: () => serializeConfig,
+  withUnknownKeys: () => withUnknownKeys
 });
 module.exports = __toCommonJS(node_exports);
 
@@ -1769,17 +1793,415 @@ var EVENT_NAMES = [
   "audio_write_failed",
   "command_failed"
 ];
+
+// config/enums.ts
+var LOOP_GRID_ORDER = ["bar", "half", "beat", "eighth"];
+function isLoopGridRes(v) {
+  return typeof v === "string" && LOOP_GRID_ORDER.includes(v);
+}
+var DCW_MODES = ["low", "high", "double", "pix"];
+var DCW_WAVELETS = ["haar", "db4", "sym8", "db8"];
+function isDcwMode(v) {
+  return typeof v === "string" && DCW_MODES.includes(v);
+}
+function isDcwWavelet(v) {
+  return typeof v === "string" && DCW_WAVELETS.includes(v);
+}
+var RCFG_MODES = ["off", "initialize", "self"];
+function isRcfgMode(v) {
+  return typeof v === "string" && RCFG_MODES.includes(v);
+}
+var VALID_TIME_SIGNATURES = ["2", "3", "4", "6"];
+var DEFAULT_TIME_SIGNATURE = "4";
+function isTimeSignature(v) {
+  return typeof v === "string" && VALID_TIME_SIGNATURES.includes(v);
+}
+
+// config/defaults.ts
+var DEFAULT_CONFIG = {
+  version: 1,
+  engine: {
+    sde: false,
+    lora: true,
+    depth: 4,
+    vae_window: 0.36,
+    crop: 0,
+    steps: 8,
+    fast_vae: false,
+    walk_window: false,
+    walk_window_s: 60,
+    lead_floor_s: 0.25,
+    lead_ceiling_s: 1.35,
+    lead_release_tau_s: 1.5,
+    max_source_duration_s: 120,
+    key: "G# minor",
+    time_signature: DEFAULT_TIME_SIGNATURE,
+    enabled_loras: [],
+    auto_prepend_lora_triggers: true,
+    show_incompatible_loras: false
+  },
+  prompts: {
+    a: "heavy dubstep, deathstep, afxdump, growl heavy bass distortion",
+    b: "daft punk style, beautiful, four to the floor, angelic",
+    blend: 0.4
+  },
+  controls: {
+    denoise: 0.7,
+    hint_strength: 1,
+    feedback: 0,
+    feedback_depth: 1,
+    shift: 3.5,
+    ch_g0: 1,
+    ch_g1: 1,
+    ch_g2: 1,
+    ch_g3: 1,
+    ch_g4: 1,
+    ch_g5: 1,
+    ch_g6: 1,
+    ch_g7: 1,
+    ch13: 1,
+    ch14: 1,
+    ch19: 1,
+    ch23: 1,
+    ch29: 1,
+    ch56: 1,
+    dcw_scaler: 0.05,
+    dcw_high_scaler: 0.02,
+    dcw_enabled: true,
+    dcw_mode: "double",
+    dcw_wavelet: "haar",
+    lora_default_strength: 1.4,
+    guidance_scale: 7,
+    cfg_rescale: 0,
+    rcfg_mode: "off"
+  },
+  channel_ranges: {
+    ch_g0: { min: 0, max: 2.2, reverse: false },
+    ch_g1: { min: 0, max: 2, reverse: false },
+    ch_g2: { min: 0, max: 2.3, reverse: true },
+    ch_g3: { min: 0, max: 2, reverse: false },
+    ch_g4: { min: 0, max: 2.5, reverse: false },
+    ch_g5: { min: 0, max: 2, reverse: false },
+    ch_g6: { min: 0, max: 2, reverse: true },
+    ch_g7: { min: 0, max: 2, reverse: true },
+    ch13: { min: 0, max: 2, reverse: true },
+    ch14: { min: 0, max: 2.3, reverse: false },
+    ch19: { min: 0, max: 2.5, reverse: false },
+    ch23: { min: 0, max: 2.45, reverse: false },
+    ch29: { min: 0, max: 2, reverse: false },
+    ch56: { min: 0, max: 2, reverse: false }
+  },
+  seed: 0,
+  swap_source_mode: "instruments",
+  web: {
+    effects: {
+      parallax_strength: 0.4,
+      bloom_on_kick: 0.3,
+      bloom_threshold: 0.15,
+      warp_strength: 0.4
+    },
+    audio: {
+      lufs_enabled: false,
+      lufs_window_sec: 3,
+      lufs_metric: "lufs",
+      lufs_peak_headroom: 4,
+      lufs_silence_floor_db: 30,
+      lufs_silence_floor_hysteresis_db: 6
+    },
+    reset_seconds: 0,
+    denoise_session_gate: {
+      enabled: true,
+      glide_ms: 700
+    },
+    restart_song_on_swap: true
+  }
+};
+
+// config/transforms.ts
+function isSwapSourceMode(v) {
+  return v === "full" || v === "vocals" || v === "instruments";
+}
+var KNOWN_TOP_LEVEL_KEYS = /* @__PURE__ */ new Set([
+  "version",
+  "engine",
+  "prompts",
+  "controls",
+  "channel_ranges",
+  "seed",
+  "swap_source_mode",
+  "web",
+  "curves",
+  "loop"
+]);
+var UNKNOWN = Symbol("rtmgConfigUnknownKeys");
+function getUnknownKeys(cfg) {
+  return cfg[UNKNOWN] ?? {};
+}
+function withUnknownKeys(cfg, unknown) {
+  if (Object.keys(unknown).length === 0) return cfg;
+  Object.defineProperty(cfg, UNKNOWN, {
+    value: unknown,
+    enumerable: false,
+    configurable: true,
+    writable: true
+  });
+  return cfg;
+}
+function serializeConfig(cfg) {
+  return { ...getUnknownKeys(cfg), ...cfg };
+}
+var LEGACY_WEB_KEYS = [
+  "effects",
+  "audio",
+  "reset_seconds",
+  "denoise_session_gate",
+  "restart_song_on_swap"
+];
+function normalizeConfigShape(raw) {
+  const hasLegacyTopLevel = LEGACY_WEB_KEYS.some((k) => k in raw);
+  if (!hasLegacyTopLevel) return raw;
+  const liftedWeb = { ...raw.web ?? {} };
+  for (const k of LEGACY_WEB_KEYS) {
+    if (k in raw && !(k in liftedWeb))
+      liftedWeb[k] = raw[k];
+  }
+  const out = { ...raw, web: liftedWeb };
+  for (const k of LEGACY_WEB_KEYS) delete out[k];
+  return out;
+}
+function mergeConfig(base, rawOverride) {
+  if (!rawOverride) return base;
+  const override = normalizeConfigShape(
+    rawOverride
+  );
+  const web = override.web ?? {};
+  const merged = {
+    version: typeof override.version === "number" ? override.version : base.version,
+    engine: { ...base.engine, ...override.engine ?? {} },
+    prompts: { ...base.prompts, ...override.prompts ?? {} },
+    controls: { ...base.controls, ...override.controls ?? {} },
+    // Per-param shallow merge: an override entry replaces the matching
+    // base entry whole (operator-supplied {min,max,reverse} must travel
+    // together to be coherent). Unspecified params keep the bundled
+    // default range.
+    channel_ranges: {
+      ...base.channel_ranges,
+      ...override.channel_ranges ?? {}
+    },
+    seed: typeof override.seed === "number" ? override.seed : base.seed,
+    swap_source_mode: isSwapSourceMode(override.swap_source_mode) ? override.swap_source_mode : base.swap_source_mode,
+    web: {
+      effects: { ...base.web.effects, ...web.effects ?? {} },
+      audio: { ...base.web.audio, ...web.audio ?? {} },
+      reset_seconds: typeof web.reset_seconds === "number" ? web.reset_seconds : base.web.reset_seconds,
+      denoise_session_gate: {
+        ...base.web.denoise_session_gate,
+        ...web.denoise_session_gate ?? {}
+      },
+      restart_song_on_swap: typeof web.restart_song_on_swap === "boolean" ? web.restart_song_on_swap : base.web.restart_song_on_swap
+    },
+    // Curves are operator-authored and only meaningful as a whole bag,
+    // so the override entry replaces the base entry whole when present.
+    // Absent override keeps whatever the base has (DEFAULT_CONFIG leaves
+    // this undefined; stock pods fall through to localStorage hydration).
+    ...override.curves !== void 0 ? { curves: override.curves } : base.curves !== void 0 ? { curves: base.curves } : {},
+    // Loop region replaces whole when the import carries one; otherwise
+    // keep whatever the base (the live config) holds.
+    ...override.loop !== void 0 ? { loop: override.loop } : base.loop !== void 0 ? { loop: base.loop } : {}
+  };
+  const unknown = { ...getUnknownKeys(base) };
+  for (const k of Object.keys(override)) {
+    if (!KNOWN_TOP_LEVEL_KEYS.has(k)) {
+      unknown[k] = override[k];
+    }
+  }
+  return withUnknownKeys(merged, unknown);
+}
+function resolveLoraCapForSource(durationS, engine) {
+  const tiers = engine.max_concurrent_loras_tiers;
+  if (tiers && tiers.length > 0) {
+    const sorted = [...tiers].filter(
+      (t) => typeof t?.up_to_s === "number" && typeof t?.cap === "number"
+    ).sort((a, b) => a.up_to_s - b.up_to_s);
+    for (const tier of sorted) {
+      if (durationS <= tier.up_to_s) return tier.cap;
+    }
+  }
+  const fallback = engine.max_concurrent_loras;
+  return typeof fallback === "number" && fallback > 0 ? fallback : null;
+}
+function selectVariant(cfg, scale) {
+  if (scale !== "5B") return cfg;
+  const e = cfg.engine;
+  const p = cfg.prompts;
+  return withUnknownKeys(
+    {
+      ...cfg,
+      engine: {
+        ...e,
+        depth: e.depth_xl ?? e.depth,
+        enabled_loras: e.enabled_loras_xl ?? e.enabled_loras
+      },
+      prompts: {
+        ...p,
+        a: p.a_xl ?? p.a,
+        b: p.b_xl ?? p.b,
+        blend: typeof p.blend_xl === "number" ? p.blend_xl : p.blend
+      }
+    },
+    getUnknownKeys(cfg)
+  );
+}
+
+// config/wire.ts
+function rtmgConfigToSessionConfig(cfg, runtime) {
+  const e = cfg.engine;
+  return {
+    telemetry_version: 1,
+    sde: e.sde,
+    lora: e.lora,
+    depth: e.depth,
+    vae_window: e.vae_window,
+    crop: e.crop,
+    steps: e.steps,
+    fast_vae: e.fast_vae,
+    walk_window: e.walk_window ?? false,
+    walk_window_s: e.walk_window_s ?? 60,
+    lead_floor_s: e.lead_floor_s,
+    lead_ceiling_s: e.lead_ceiling_s,
+    lead_release_tau_s: e.lead_release_tau_s,
+    enabled_loras: runtime.enabledLoras,
+    prompt: runtime.promptA,
+    prompt_b: runtime.promptB,
+    lora_strengths: runtime.loraStrengths,
+    fixture_name: runtime.fixtureName,
+    ...runtime.stemSourceMode ? { stem_source_mode: runtime.stemSourceMode } : {},
+    use_server_fixture: runtime.useServerFixture,
+    ...runtime.clientId ? { client_id: runtime.clientId } : {}
+  };
+}
+function applyConfigToState(cfg, scale) {
+  const resolved = selectVariant(cfg, scale);
+  const sliderUpdates = {};
+  for (const [k, v] of Object.entries(resolved.controls)) {
+    if (typeof v === "number") sliderUpdates[k] = v;
+  }
+  sliderUpdates.prompt_blend = resolved.prompts.blend;
+  const patch = {
+    resolved,
+    sliderUpdates,
+    promptA: resolved.prompts.a,
+    promptB: resolved.prompts.b,
+    activeKey: resolved.engine.key,
+    activeTimeSignature: isTimeSignature(resolved.engine.time_signature) ? resolved.engine.time_signature : DEFAULT_TIME_SIGNATURE,
+    seed: resolved.seed,
+    lufsOn: resolved.web.audio.lufs_enabled
+  };
+  if (typeof resolved.controls.dcw_enabled === "boolean") {
+    patch.dcwEnabled = resolved.controls.dcw_enabled;
+  }
+  if (isDcwMode(resolved.controls.dcw_mode)) {
+    patch.dcwMode = resolved.controls.dcw_mode;
+  }
+  if (isDcwWavelet(resolved.controls.dcw_wavelet)) {
+    patch.dcwWavelet = resolved.controls.dcw_wavelet;
+  }
+  if (isRcfgMode(resolved.controls.rcfg_mode)) {
+    patch.rcfgMode = resolved.controls.rcfg_mode;
+  }
+  if (resolved.loop) {
+    const lp = resolved.loop;
+    const validBand = lp.band && typeof lp.band.start === "number" && typeof lp.band.end === "number" && lp.band.end > lp.band.start ? { start: lp.band.start, end: lp.band.end } : null;
+    patch.loop = {
+      loopBand: validBand,
+      bandLoopEnabled: typeof lp.enabled === "boolean" ? lp.enabled : true,
+      loopGridRes: isLoopGridRes(lp.grid) ? lp.grid : "beat"
+    };
+    if (typeof lp.fullBuffer === "boolean") patch.loop.loopOn = lp.fullBuffer;
+  }
+  if (resolved.curves) {
+    patch.curves = {
+      scheduleEnabled: resolved.curves.scheduleEnabled,
+      curves: Object.fromEntries(
+        Object.entries(resolved.curves.curves).map(([param, curve]) => [
+          param,
+          {
+            enabled: curve.enabled,
+            points: curve.points.map((p) => ({ x: p.x, y: p.y, mode: p.mode }))
+          }
+        ])
+      )
+    };
+  }
+  return patch;
+}
+function captureConfigFromState(snapshot, base) {
+  return withUnknownKeys(
+    {
+      version: base.version,
+      engine: {
+        ...base.engine,
+        key: snapshot.key,
+        time_signature: snapshot.timeSignature,
+        enabled_loras: snapshot.enabledLoras
+      },
+      prompts: {
+        a: snapshot.promptA,
+        b: snapshot.promptB,
+        blend: snapshot.promptBlend
+      },
+      controls: snapshot.controls,
+      channel_ranges: base.channel_ranges,
+      seed: snapshot.seed,
+      swap_source_mode: base.swap_source_mode,
+      web: {
+        effects: base.web.effects,
+        audio: { ...base.web.audio, lufs_enabled: snapshot.lufsOn },
+        reset_seconds: base.web.reset_seconds,
+        denoise_session_gate: base.web.denoise_session_gate,
+        restart_song_on_swap: base.web.restart_song_on_swap
+      },
+      loop: snapshot.loop,
+      curves: snapshot.curves
+    },
+    getUnknownKeys(base)
+  );
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   COMMAND_NAMES,
+  DCW_MODES,
+  DCW_WAVELETS,
+  DEFAULT_CONFIG,
+  DEFAULT_TIME_SIGNATURE,
   EVENT_NAMES,
   KNOB_SCHEMA_VERSION,
+  KNOWN_TOP_LEVEL_KEYS,
+  LOOP_GRID_ORDER,
   PREEMPTED_CLOSE_CODE,
   PROTOCOL_VERSION,
+  RCFG_MODES,
   RemoteBackend,
   SAMPLE_RATE,
   SLICE_FLAG_DELTA,
   SLICE_FLAG_RAW,
   SLICE_HDR_SIZE,
-  float16ArrayToFloat32
+  VALID_TIME_SIGNATURES,
+  applyConfigToState,
+  captureConfigFromState,
+  float16ArrayToFloat32,
+  getUnknownKeys,
+  isDcwMode,
+  isDcwWavelet,
+  isLoopGridRes,
+  isRcfgMode,
+  isSwapSourceMode,
+  isTimeSignature,
+  mergeConfig,
+  normalizeConfigShape,
+  resolveLoraCapForSource,
+  rtmgConfigToSessionConfig,
+  selectVariant,
+  serializeConfig,
+  withUnknownKeys
 });
