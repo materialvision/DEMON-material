@@ -2570,6 +2570,7 @@ class StreamingSession:
         decoder_backend: str = "tensorrt",
         vae_backend: str = "tensorrt",
         offload_text_encoder: bool = False,
+        device: str = "cuda",
         session_id: str,
     ) -> "StreamingSession":
         """Build a ready-to-run session for one connection.
@@ -2728,6 +2729,7 @@ class StreamingSession:
             engine_session = Session(
                 project_root=str(checkpoints_dir()),
                 config_path=checkpoint,
+                device=device,
                 decoder_backend=decoder_backend,
                 vae_backend=vae_backend,
                 offload_text_encoder=offload_text_encoder,

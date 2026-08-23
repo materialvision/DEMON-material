@@ -281,3 +281,7 @@ PortableGit/
 # golden-harness scratch (bundles live on the HF dataset, see tests/golden)
 runs/
 refs-out/
+
+#mac
+.DS_Store
+demos/.DS_Store

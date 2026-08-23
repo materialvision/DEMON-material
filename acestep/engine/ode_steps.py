@@ -315,14 +315,21 @@ def apg_project(
     """Split ``v0`` into components parallel and orthogonal to ``v1``.
 
     Runs in fp64 for numerical stability, then casts back to ``v0``'s
-    original dtype.
+    original dtype. MPS has no float64, so the projection hops to CPU
+    there (same workaround as the vendored ``apg_guidance.project``).
     """
     dtype = v0.dtype
+    device_type = v0.device.type
+    if device_type == "mps":
+        v0, v1 = v0.cpu(), v1.cpu()
     v0, v1 = v0.double(), v1.double()
     v1 = torch.nn.functional.normalize(v1, dim=dims)
     v0_parallel = (v0 * v1).sum(dim=dims, keepdim=True) * v1
     v0_orthogonal = v0 - v0_parallel
-    return v0_parallel.to(dtype), v0_orthogonal.to(dtype)
+    return (
+        v0_parallel.to(dtype).to(device_type),
+        v0_orthogonal.to(dtype).to(device_type),
+    )
 
 
 def apg_forward(

@@ -478,7 +478,7 @@ class ModelContext:
     def _is_on_target_device(tensor, target_device) -> bool:
         if tensor is None:
             return True
-        target_type = "cpu" if target_device == "cpu" else "cuda"
+        target_type = torch.device(target_device).type
         return tensor.device.type == target_type
 
     def _ensure_silence_latent_on_device(self) -> None:
@@ -590,7 +590,7 @@ class ModelContext:
     def _accel_device(self) -> Optional[torch.device]:
         """The context's device when it's an offloadable accelerator."""
         device = torch.device(self.device)
-        return device if device.type in ("cuda", "xpu") else None
+        return device if device.type in ("cuda", "xpu", "mps") else None
 
     def _module_on_device(self, module, device: torch.device) -> bool:
         """ANY parameter resident — the PARK predicate: a partially
@@ -919,7 +919,8 @@ class ModelContext:
                      offload_wav_to_cpu=True):
         B, C, T = latents.shape
         if T <= chunk_size:
-            out = self.vae.decode(latents)
+            with torch.no_grad():
+                out = self.vae.decode(latents)
             result = out.sample
             del out
             return result
@@ -937,7 +938,8 @@ class ModelContext:
             cs, ce = i * stride, min(i * stride + stride, T)
             ws, we = max(0, cs - overlap), min(T, ce + overlap)
             chunk = latents[:, :, ws:we]
-            out = self.vae.decode(chunk)
+            with torch.no_grad():
+                out = self.vae.decode(chunk)
             audio = out.sample
             del out
             if us is None:
@@ -952,7 +954,8 @@ class ModelContext:
         ce0 = min(stride, T)
         we0 = min(T, ce0 + overlap)
         c0 = latents[:, :, :we0]
-        out0 = self.vae.decode(c0)
+        with torch.no_grad():
+            out0 = self.vae.decode(c0)
         a0 = out0.sample
         del out0
         us = a0.shape[-1] / c0.shape[-1]
@@ -967,7 +970,8 @@ class ModelContext:
             cs, ce = i * stride, min(i * stride + stride, T)
             ws, we = max(0, cs - overlap), min(T, ce + overlap)
             chunk = latents[:, :, ws:we]
-            out = self.vae.decode(chunk)
+            with torch.no_grad():
+                out = self.vae.decode(chunk)
             audio = out.sample
             del out
             ts = int(round((cs - ws) * us))

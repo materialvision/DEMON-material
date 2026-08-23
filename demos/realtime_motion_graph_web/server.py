@@ -722,11 +722,20 @@ def main():
     control_port = 1319
     accel = "tensorrt"  # decoder + vae backend; overridden by --accel
     checkpoint = "acestep-v15-turbo"  # DiT variant; overridden by --checkpoint
+    device = "cuda"  # torch device for all sessions; overridden by --device
 
     args = sys.argv[1:]
     static_demo_paths = _collect_repeated_arg(args, "--demo")
     no_backend = "--no-backend" in args or "--ui-only" in args
     offload_text_encoder = "--offload-text-encoder" in args
+    if "--device" in args:
+        idx = args.index("--device")
+        device = args[idx + 1]
+    _VALID_DEVICES = ("cuda", "mps", "cpu", "auto")
+    if device not in _VALID_DEVICES:
+        raise SystemExit(
+            f"[Server] --device must be one of {_VALID_DEVICES}, got {device!r}"
+        )
     if "--host" in args:
         idx = args.index("--host")
         host = args[idx + 1]
@@ -858,6 +867,7 @@ def main():
                 checkpoint=checkpoint,
                 backend_family=backend_family,
                 offload_text_encoder=offload_text_encoder,
+                device=device,
             )
 
         # Pay the one-time cold-start cost (TRT decoder-engine load,
@@ -885,6 +895,7 @@ def main():
                     vae_backend=vae_accel,
                     checkpoint=checkpoint,
                     offload_text_encoder=offload_text_encoder,
+                    device=device,
                 )
             else:
                 logger.info(

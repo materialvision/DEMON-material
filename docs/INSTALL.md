@@ -14,7 +14,7 @@ to fix the failures you might hit along the way.
 | [uv](https://docs.astral.sh/uv/) | Manages Python 3.11 and all dependencies; you do not need a system Python. |
 | Node.js 20+ | Only for the bundled web demo. [nodejs.org](https://nodejs.org). |
 | Disk | ~40 GB free: ~18 GB checkpoints, ~10 GB ONNX + engines, headroom. |
-| OS | Windows 11 and Linux are exercised regularly. |
+| OS | Windows 11 and Linux are exercised regularly. macOS (Apple Silicon) works experimentally via MPS — see [§6](#6-apple-silicon-experimental-mps). |
 
 ## The quick path
 
@@ -205,6 +205,36 @@ uv run python -u -m demos.realtime_motion_graph_web.run -- --accel compile
 throughput but needs no engines; `eager` is slower still and mainly for
 debugging. You can mix per component: `--decoder-accel compile
 --vae-accel tensorrt`, etc.
+
+### 6. Apple Silicon (experimental, MPS)
+
+DEMON also runs on Apple Silicon Macs via PyTorch MPS — no CUDA, no
+TensorRT, no engine builds. `uv sync` resolves the plain PyPI wheels of
+the torch stack automatically (they ship MPS), and `demon-setup` skips
+the CUDA/TensorRT doctor checks and the engine build on macOS:
+
+```bash
+uv sync
+uv run demon-setup
+uv run python -u -m demos.realtime_motion_graph_web.run -- --accel eager --device mps
+```
+
+Notes:
+
+- Only the `eager` backend works on MPS: `compile` uses inductor (no
+  MPS codegen) and `tensorrt` ships no macOS wheels. Everything runs
+  fp32 on MPS.
+- The Session API is the same story:
+  `Session(device="auto", decoder_backend="eager", vae_backend="eager")`
+  (`"auto"` resolves to `mps` when no CUDA device is present).
+- TRT-only features are unavailable: the fixed 1 s windowed VAE decode
+  engine (streaming decode falls back to eager windowed decode),
+  DreamVAE fast decode, and TRT LoRA refit. Eager LoRA works.
+- Measured on a high-end Apple Silicon MacBook (fp32, 2B turbo, 60 s
+  source, steps=8, depth=4): one-shot cover generation runs at ~25×
+  realtime and the streaming demo keeps audio slices ~0.2 s ahead of
+  the playhead — usable, but parameter convergence is slower than the
+  TRT reference (seconds rather than ~250 ms).
 
 ## Engine sets and song duration
 

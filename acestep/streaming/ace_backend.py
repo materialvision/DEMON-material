@@ -985,7 +985,8 @@ class ACEStepBackend(DiffusionBackend):
         else:
             audio_out = self.codec.decode(decode_src, t_start=t_start_s, cyclic=True)
             win_offset_samples = 0
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         self.last_dec_ms += (time.perf_counter() - t1) * 1000
         win_wav = audio_out.waveform.detach().cpu().float().squeeze(0)
         win_np = win_wav.numpy().T
@@ -1010,7 +1011,8 @@ class ACEStepBackend(DiffusionBackend):
             return None
         t1 = time.perf_counter()
         audio_out = self.codec.decode(result_latent)
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         self.last_dec_ms += (time.perf_counter() - t1) * 1000
         wav = audio_out.waveform.detach().cpu().float().squeeze(0)
         wav_np = wav.numpy().T

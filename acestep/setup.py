@@ -78,6 +78,10 @@ _ADVISORY_VRAM_GB = 16.0   # 60 s decoder build peaks ~13.5 GB workspace
 # the starter pack into the curated library.
 _SKIP_LORAS_ENV = "DEMON_SKIP_STARTER_LORAS"
 
+# TensorRT ships no macOS wheels; on Apple Silicon the demo runs the
+# eager PyTorch backends on MPS instead (see docs/INSTALL.md).
+_IS_MACOS = sys.platform == "darwin"
+
 
 def _env_skip_loras() -> bool:
     return os.environ.get(_SKIP_LORAS_ENV, "0").strip().lower() not in (
@@ -140,14 +144,7 @@ def _doctor() -> bool:
     except Exception as exc:
         _fail(f"PyTorch import failed: {exc}. Run `uv sync` first.")
         return False
-    if not torch.cuda.is_available():
-        _fail(
-            "No CUDA GPU visible to PyTorch. DEMON requires an NVIDIA "
-            "GPU (tested on RTX 3090 / 4090 / 5090). If you have one, "
-            "check the driver: `nvidia-smi` should list it."
-        )
-        hard_fail = True
-    else:
+    if torch.cuda.is_available():
         props = torch.cuda.get_device_properties(0)
         vram_gb = props.total_memory / (1024 ** 3)
         _ok(f"GPU: {props.name} ({vram_gb:.0f} GB VRAM)")
@@ -158,14 +155,31 @@ def _doctor() -> bool:
                 f"build peaks around 13.5 GB of workspace; builds and "
                 f"inference may OOM."
             )
+    elif _IS_MACOS and torch.backends.mps.is_available():
+        _ok("Apple Silicon GPU (MPS) available")
+        _warn(
+            "macOS has no CUDA/TensorRT: engine builds are skipped and "
+            "the demo runs the eager PyTorch backends on MPS. Launch "
+            "with `-- --accel eager --device mps`."
+        )
+    else:
+        _fail(
+            "No CUDA GPU visible to PyTorch. DEMON requires an NVIDIA "
+            "GPU (tested on RTX 3090 / 4090 / 5090). If you have one, "
+            "check the driver: `nvidia-smi` should list it."
+        )
+        hard_fail = True
 
     # TensorRT.
-    try:
-        import tensorrt
-        _ok(f"TensorRT {tensorrt.__version__}")
-    except Exception as exc:
-        _fail(f"TensorRT import failed: {exc}. Run `uv sync` first.")
-        hard_fail = True
+    if _IS_MACOS:
+        _warn("TensorRT: not available on macOS (expected; using MPS eager)")
+    else:
+        try:
+            import tensorrt
+            _ok(f"TensorRT {tensorrt.__version__}")
+        except Exception as exc:
+            _fail(f"TensorRT import failed: {exc}. Run `uv sync` first.")
+            hard_fail = True
 
     # Disk space where models will land.
     probe = md
@@ -347,12 +361,18 @@ def _summary(*, engines_skipped: bool) -> None:
     if n_loras:
         print(f"  loras: {n_loras} in the library")
     if engines_skipped:
-        print("\n  Engines were skipped (--skip-engines). The demo's "
-              "default TRT mode")
-        print("  needs them; either build later with")
-        print("    uv run python -m acestep.engine.trt.build --preset minimal")
-        print(f"  or launch with `-- --accel compile` (slow warmup, no "
-              f"engines needed).")
+        if _IS_MACOS:
+            print("\n  TensorRT engines were skipped (not available on "
+                  "macOS).")
+            print("  Launch the demo on Apple Silicon with:")
+            print(f"    {DEMO_COMMAND} -- --accel eager --device mps")
+        else:
+            print("\n  Engines were skipped (--skip-engines). The demo's "
+                  "default TRT mode")
+            print("  needs them; either build later with")
+            print("    uv run python -m acestep.engine.trt.build --preset minimal")
+            print(f"  or launch with `-- --accel compile` (slow warmup, no "
+                  f"engines needed).")
     print()
     print("  Launch the web demo:")
     print(f"    {DEMO_COMMAND}")
@@ -437,14 +457,23 @@ def main() -> int:
     else:
         _download_starter_loras()
 
-    if not args.skip_engines:
+    engines_skipped = args.skip_engines
+    if _IS_MACOS and not engines_skipped:
+        engines_skipped = True
+        _header("5/5  TensorRT engines (minimal preset)")
+        _warn(
+            "Skipping TensorRT engine build: TensorRT is not available "
+            "on macOS. The demo runs the eager PyTorch backends on MPS; "
+            "launch with `-- --accel eager --device mps`."
+        )
+    if not engines_skipped:
         extra: list[str] = []
         if args.duration:
             extra.extend(["--duration", *[str(d) for d in args.duration]])
         if not _build_engines(extra):
             return 1
 
-    _summary(engines_skipped=args.skip_engines)
+    _summary(engines_skipped=engines_skipped)
     return 0
 
 

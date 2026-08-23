@@ -31,6 +31,10 @@ Hard rules:
 - The demo's default `--accel tensorrt` requires built engines; the
   server preflight at boot prints the exact fix when they're missing.
   The no-engines fallback is `-- --accel compile`, not eager hacks.
+- On Apple Silicon (macOS), `demon-setup` auto-skips the CUDA/TensorRT
+  checks and the engine build; launch with
+  `-- --accel eager --device mps` (fp32, eager only — `compile` has no
+  MPS codegen). See docs/INSTALL.md §6.
 - Full walkthrough + troubleshooting table: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Where to go by task

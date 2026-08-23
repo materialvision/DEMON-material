@@ -206,7 +206,7 @@ def start_idle_vram_janitor(
 #     streaming session.
 #   - Concurrency: prepare_source / stem extraction are NOT thread-safe on
 #     a shared Session, so _UPLOAD_INFER_LOCK serializes all GPU work on it.
-_UPLOAD_ENCODERS: dict[str, Session] = {}
+_UPLOAD_ENCODERS: dict[tuple[str, str], Session] = {}
 _UPLOAD_ENCODERS_LOCK = threading.Lock()
 _UPLOAD_INFER_LOCK = threading.Lock()
 
@@ -572,9 +572,10 @@ def _strip_upload_encoder_generation_stack(session: Session) -> int:
     return dropped
 
 
-def _upload_encoder_session(checkpoint: str) -> Session:
+def _upload_encoder_session(checkpoint: str, device: str = "cuda") -> Session:
     with _UPLOAD_ENCODERS_LOCK:
-        session = _UPLOAD_ENCODERS.get(checkpoint)
+        cache_key = (checkpoint, device)
+        session = _UPLOAD_ENCODERS.get(cache_key)
         if session is None:
             logger.info("upload_encoder_load_start checkpoint={}", checkpoint)
             # Load the eager weights straight to system RAM (offload
@@ -583,6 +584,7 @@ def _upload_encoder_session(checkpoint: str) -> Session:
             session = Session(
                 project_root=str(checkpoints_dir()),
                 config_path=checkpoint,
+                device=device,
                 decoder_backend="eager",
                 vae_backend="eager",
                 offload_to_cpu=True,
@@ -598,7 +600,7 @@ def _upload_encoder_session(checkpoint: str) -> Session:
             session.handler.offload_to_cpu = False
             session.handler.offload_dit_to_cpu = False
             dropped = _strip_upload_encoder_generation_stack(session)
-            _UPLOAD_ENCODERS[checkpoint] = session
+            _UPLOAD_ENCODERS[cache_key] = session
             logger.info(
                 "upload_encoder_loaded checkpoint={} placement=parked "
                 "decoder_params_dropped={}",
@@ -789,6 +791,7 @@ def _handle_upload_track(
     checkpoint: str,
     decoder_backend: str = "tensorrt",
     vae_backend: str = "tensorrt",
+    device: str = "cuda",
 ) -> None:
     requested_name = str(header.get("name") or "upload")
     key_override = header.get("key")
@@ -859,7 +862,7 @@ def _handle_upload_track(
             decoder_backend=decoder_backend,
             vae_backend=vae_backend,
         )
-        encoder = _upload_encoder_session(checkpoint)
+        encoder = _upload_encoder_session(checkpoint, device)
         logger.info(
             "upload_track_process_start name={} samples={} duration_s={:.1f}",
             name, int(waveform.shape[-1]), waveform.shape[-1] / SAMPLE_RATE,
@@ -1007,6 +1010,7 @@ def handle_client(
     checkpoint: str = "acestep-v15-turbo",
     backend_family: str = "acestep",
     offload_text_encoder: bool = False,
+    device: str = "cuda",
 ):
     """Connection entrypoint. The body lives in ``_handle_client_body``;
     this wrapper exists only to own a single ``ExitStack`` so the
@@ -1021,6 +1025,7 @@ def handle_client(
                 checkpoint=checkpoint,
                 backend_family=backend_family,
                 offload_text_encoder=offload_text_encoder,
+                device=device,
             )
     finally:
         # Final allocator trim, AFTER the body frame (the last holder of
@@ -1051,6 +1056,7 @@ def _handle_client_body(
     checkpoint: str,
     backend_family: str,
     offload_text_encoder: bool,
+    device: str,
 ):
     logger.info(
         "client_connected decoder={} vae={} checkpoint={} family={} text_encoder={}",
@@ -1074,6 +1080,7 @@ def _handle_client_body(
                 checkpoint=checkpoint,
                 decoder_backend=decoder_backend,
                 vae_backend=vae_backend,
+                device=device,
             )
         finally:
             try:
@@ -1219,6 +1226,7 @@ def _handle_client_body(
                 decoder_backend=decoder_backend,
                 vae_backend=vae_backend,
                 offload_text_encoder=offload_text_encoder,
+                device=device,
                 session_id=session_id,
             )
             with _ACTIVE_SLOT_LOCK:

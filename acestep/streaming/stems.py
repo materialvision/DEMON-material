@@ -534,7 +534,20 @@ class MelBandRoformer(Module):
             t=stft_repr.shape[-1],
         )
         stft_repr_expanded_stems = repeat(stft_repr, "b 1 ... -> b n ...", n=num_stems)
-        masks_summed = torch.zeros_like(stft_repr_expanded_stems).scatter_add_(2, scatter_indices, masks)
+        if masks.device.type == "mps":
+            # MPS has no complex scatter_add_. Scatter the real view
+            # instead: the real/imag pair rides the trailing dim, which
+            # the dim-2 scatter never touches, so real-view scatter is
+            # exactly complex scatter.
+            idx_real = scatter_indices.unsqueeze(-1).expand(
+                *scatter_indices.shape, 2,
+            )
+            summed_real = torch.zeros_like(
+                torch.view_as_real(stft_repr_expanded_stems),
+            ).scatter_add_(2, idx_real, torch.view_as_real(masks))
+            masks_summed = torch.view_as_complex(summed_real)
+        else:
+            masks_summed = torch.zeros_like(stft_repr_expanded_stems).scatter_add_(2, scatter_indices, masks)
 
         denom = repeat(self.num_bands_per_freq, "f -> (f r) 1", r=channels)
         masks_averaged = masks_summed / denom.clamp(min=1e-8)

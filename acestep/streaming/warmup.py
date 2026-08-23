@@ -80,6 +80,7 @@ def run_startup_warmup(
     vae_backend: str,
     checkpoint: str,
     offload_text_encoder: bool,
+    device: str = "cuda",
 ) -> None:
     """Drive one synthetic default-fixture session at boot. Never
     raises — a failed warmup must not stop the server from serving.
@@ -112,6 +113,7 @@ def run_startup_warmup(
             decoder_backend=decoder_backend,
             vae_backend=vae_backend,
             offload_text_encoder=offload_text_encoder,
+            device=device,
             session_id=session_id,
         )
         streaming.run_until(_WARMUP_BUDGET_S)
