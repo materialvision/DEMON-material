@@ -28,14 +28,12 @@
     "key": "G# minor",
     "_time_signature_help": "Default meter numerator for the operator dropdown. One of 2, 3, 4, 6 (string) for 2/4, 3/4, 4/4, 6/8 respectively. Sidecar values still win on fixture hits; this is the seed for live uploads and the AlmostReadyDialog manual override.",
     "time_signature": "4",
-    "_enabled_loras_help": "LoRAs to auto-enable on first catalog load. Each entry is either a string (the LoRA's filename stem or sidecar display name, case-insensitive — e.g. \"deep_house-v1\" or \"Deep House\") or an object {name, strength} to set an inline strength override. Without `strength`, the sidecar's recommended_strength wins (or controls.lora_default_strength as fallback). Empty array = count-rule (first two from the sorted catalog). `enabled_loras_xl` overrides this when the active checkpoint is 5B.",
+    "_enabled_loras_help": "LoRAs to auto-enable on first catalog load. Each entry is either a string (the LoRA's filename stem or sidecar display name, case-insensitive — e.g. \"deep_house-v1\" or \"Deep House\") or an object {name, strength} to set an inline strength override. Without `strength`, the sidecar's recommended_strength wins (or controls.lora_default_strength as fallback). Empty array = count-rule (first two from the sorted catalog). The string \"none\" auto-enables nothing. `enabled_loras_xl` overrides this when the active checkpoint is 5B.",
     "enabled_loras": [
-      { "name": "Ambient", "strength": 0.7 },
-      { "name": "Deep House", "strength": 0.75 }
+      "none"
     ],
     "enabled_loras_xl": [
-      { "name": "Funk", "strength": 1.15 },
-      { "name": "Trap", "strength": 0.01 }
+      "none"
     ],
     "_auto_prepend_lora_triggers_help": "When true (default), enabling a LoRA prepends its primary trigger word to Tags A + Tags B so the operator sees exactly what the encoder sees. Disabling a LoRA best-effort removes the trigger when it is still at the head of the prompt. Set to false for fully manual workflows where the operator types triggers themselves.",
     "auto_prepend_lora_triggers": true,
@@ -44,7 +42,7 @@
   },
 
   "prompts": {
-    "a": "roti-4custic, roti-d33ph0us, acoustic deep house hybrid",
+    "a": "cocteau twins, dreampop",
     "b": "daft punk style, beautiful, four to the floor, angelic",
     "blend": 0.0,
     "a_xl": "roti-funkk, funky ass bassline",
@@ -58,7 +56,7 @@
     "lora_default_strength": 0.7,
     "hint_strength": 1.0,
 
-    "feedback": 0.0,
+    "feedback": 0.3,
     "feedback_depth": 1,
     "shift": 3.5,
 

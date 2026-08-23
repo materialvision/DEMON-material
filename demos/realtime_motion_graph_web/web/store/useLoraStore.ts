@@ -177,6 +177,13 @@ function computeSeed(catalog: LoraCatalogEntry[]): {
       overrides,
     );
   }
+  // Explicit opt-out: a "none" entry (case-insensitive) auto-enables
+  // nothing. This is the only way to ship a quiet first paint — an
+  // empty enabled_loras array deliberately falls back to the count-rule
+  // (HARDCODED_PREFERRED_LORAS + index slots) for the hosted demo.
+  if (preferredNames.some((n) => n.toLowerCase() === "none")) {
+    return { strengths, enabled: new Set<string>() };
+  }
   const preferredList: readonly string[] =
     preferredNames.length > 0 ? preferredNames : HARDCODED_PREFERRED_LORAS;
   const enabled = new Set<string>();
